@@ -1,11 +1,22 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { Chart, LineController, LineElement, PointElement, LinearScale, Filler, Tooltip, Legend, BarController, BarElement } from 'chart.js'
+import {
+  Chart,
+  LineController, LineElement, PointElement,
+  LinearScale, CategoryScale,
+  Filler, Tooltip, Legend,
+  BarController, BarElement,
+} from 'chart.js'
 import { history } from '@/api/client'
 import { useWebSocket } from '@/composables/useWebSocket'
 import type { DataPointValue } from '@/types'
 
-Chart.register(LineController, LineElement, PointElement, LinearScale, Filler, Tooltip, Legend, BarController, BarElement)
+Chart.register(
+  LineController, LineElement, PointElement,
+  LinearScale, CategoryScale,
+  Filler, Tooltip, Legend,
+  BarController, BarElement,
+)
 
 const props = defineProps<{
   config: Record<string, unknown>
@@ -16,8 +27,8 @@ const props = defineProps<{
 
 const ws = useWebSocket()
 
-const label = computed(() => (props.config.label as string | undefined) ?? '—')
-const hours = computed(() => (props.config.hours as number | undefined) ?? 24)
+const label     = computed(() => (props.config.label     as string | undefined) ?? '—')
+const hours     = computed(() => (props.config.hours     as number | undefined) ?? 24)
 const chartType = computed<'line' | 'bar'>(() =>
   (props.config.chart_type as string | undefined) === 'bar' ? 'bar' : 'line',
 )
@@ -27,7 +38,7 @@ interface SeriesDef { id: string; label: string; color: string; axis: 'y' | 'y1'
 
 const COLORS = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316']
 
-const canvas = ref<HTMLCanvasElement | null>(null)
+const canvas      = ref<HTMLCanvasElement | null>(null)
 let chart:        Chart | null = null
 let wsOff:        (() => void) | null = null
 let reloadTimer:  ReturnType<typeof setTimeout> | null = null
@@ -38,6 +49,16 @@ function fmtMs(ms: number): string {
     month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit',
   })
+}
+
+// Teilt den Zeitraum in gleich breite Buckets; jeder Bucket hat start/mid/end in ms
+function buildBuckets(fromMs: number, toMs: number, count: number) {
+  const size = (toMs - fromMs) / count
+  return Array.from({ length: count }, (_, i) => ({
+    start: fromMs + i * size,
+    mid:   fromMs + (i + 0.5) * size,
+    end:   fromMs + (i + 1) * size,
+  }))
 }
 
 function buildSeriesDefs(): SeriesDef[] {
@@ -70,6 +91,9 @@ function buildSeriesDefs(): SeriesDef[] {
 function initChart() {
   if (!canvas.value) return
   chart?.destroy()
+
+  const isBar = chartType.value === 'bar'
+
   chart = new Chart(canvas.value, {
     type: chartType.value,
     data: { datasets: [] },
@@ -83,28 +107,37 @@ function initChart() {
           mode:      'index',
           intersect: false,
           callbacks: {
-            title: (items) => items[0]?.parsed.x != null ? fmtMs(items[0].parsed.x) : '',
+            title: (items) => {
+              if (chartType.value === 'bar') return items[0]?.label ?? ''
+              return items[0]?.parsed.x != null ? fmtMs(items[0].parsed.x) : ''
+            },
             label: (ctx) => {
               const v    = ctx.parsed.y
               const u    = seriesUnits.value[ctx.datasetIndex] ?? ''
               const name = ctx.dataset.label || ''
-              const val  = u ? `${v} ${u}` : String(v)
+              const val  = u ? `${v.toFixed(2)} ${u}` : String(v)
               return name ? `${name}: ${val}` : val
             },
           },
         },
       },
       scales: {
-        x: {
-          type: 'linear',
-          ticks: {
-            color:          '#6b7280',
-            maxTicksLimit:  6,
-            maxRotation:    0,
-            callback: (ms) => ms == null ? '' : fmtMs(Number(ms)),
-          },
-          grid: { color: '#1f2937' },
-        },
+        x: isBar
+          ? {
+              type:  'category',
+              ticks: { color: '#6b7280', maxTicksLimit: 8, maxRotation: 0 },
+              grid:  { color: '#1f2937' },
+            }
+          : {
+              type:  'linear',
+              ticks: {
+                color:         '#6b7280',
+                maxTicksLimit: 6,
+                maxRotation:   0,
+                callback: (ms) => ms == null ? '' : fmtMs(Number(ms)),
+              },
+              grid: { color: '#1f2937' },
+            },
         y: {
           type:     'linear',
           position: 'left',
@@ -144,27 +177,53 @@ async function loadData() {
   const hasRight    = defs.some(s => s.axis === 'y1')
   const isBar       = chartType.value === 'bar'
 
-  // Erste Einheit je Achse für den Achsentitel
   const leftUnit  = defs.reduce<string>((u, s, i) => u || (s.axis === 'y'  ? (seriesUnits.value[i] ?? '') : ''), '')
   const rightUnit = defs.reduce<string>((u, s, i) => u || (s.axis === 'y1' ? (seriesUnits.value[i] ?? '') : ''), '')
 
-  chart.data.datasets = defs.map((s, i) => ({
-    yAxisID:         s.axis,
-    label:           s.label || (hasMultiple ? `Serie ${i + 1}` : ''),
-    data:            results[i].map(d => ({ x: new Date(d.ts).getTime(), y: Number(d.v) })),
-    borderColor:     isBar ? 'transparent' : s.color,
-    backgroundColor: isBar ? s.color + 'cc' : s.color + '1a',
-    borderWidth:     isBar ? 0 : 1.5,
-    ...(isBar ? {} : {
-      pointRadius: 0,
-      fill:        !hasMultiple,
-      tension:     0.3,
-    }),
-  }))
+  if (isBar) {
+    // Daten in gleich breite Zeitbuckets aggregieren (Durchschnitt je Bucket).
+    // Alle Serien teilen dieselben Bucket-Mittelpunkte → korrekte Gruppierung.
+    const numBuckets = Math.min(Math.max(Math.round(hours.value * 2), 24), 96)
+    const buckets    = buildBuckets(fromDate.getTime(), now.getTime(), numBuckets)
 
-  // X-Achse
-  const xAxis = chart.options.scales?.x as Record<string, unknown> | undefined
-  if (xAxis) { xAxis.min = fromDate.getTime(); xAxis.max = now.getTime() }
+    chart.data.labels   = buckets.map(b => fmtMs(b.mid))
+    chart.data.datasets = defs.map((s, i) => {
+      const raw = results[i]
+      const data = buckets.map(b => {
+        const pts = raw.filter(d => {
+          const ts = new Date(d.ts).getTime()
+          return ts >= b.start && ts < b.end
+        })
+        if (pts.length === 0) return null
+        return pts.reduce((sum, p) => sum + Number(p.v), 0) / pts.length
+      })
+      return {
+        yAxisID:         s.axis,
+        label:           s.label || (hasMultiple ? `Serie ${i + 1}` : ''),
+        data,
+        backgroundColor: s.color + 'cc',
+        borderWidth:     0,
+        borderRadius:    2,
+      }
+    })
+  } else {
+    chart.data.labels   = undefined
+    chart.data.datasets = defs.map((s, i) => ({
+      yAxisID:         s.axis,
+      label:           s.label || (hasMultiple ? `Serie ${i + 1}` : ''),
+      data:            results[i].map(d => ({ x: new Date(d.ts).getTime(), y: Number(d.v) })),
+      borderColor:     s.color,
+      backgroundColor: s.color + '1a',
+      borderWidth:     1.5,
+      pointRadius:     0,
+      fill:            !hasMultiple,
+      tension:         0.3,
+    }))
+
+    // X-Achse Bereich setzen (nur bei linearer Skala)
+    const xAxis = chart.options.scales?.x as Record<string, unknown> | undefined
+    if (xAxis) { xAxis.min = fromDate.getTime(); xAxis.max = now.getTime() }
+  }
 
   // Linke Y-Achse
   const yLeft = chart.options.scales?.y as Record<string, unknown> | undefined
