@@ -711,7 +711,7 @@ BUILTIN_NODE_TYPES: list[NodeTypeDef] = [
         inputs=[_port("data", "Daten")],
         outputs=[_port("value", "Wert")],  # overridden dynamically when json_paths is set
         config_schema={
-            "json_path":  {"type": "string", "default": "", "label": "Schlüsselpfad (Legacy)"},
+            "json_path": {"type": "string", "default": "", "label": "Schlüsselpfad (Legacy)"},
             "json_paths": {"type": "string", "default": "", "label": "Ausgänge (JSON-Array)"},
         },
         color="#0369a1",
