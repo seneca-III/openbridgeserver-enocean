@@ -1129,14 +1129,52 @@ function _flattenJsonPaths(obj, prefix = '', depth = 0) {
   return paths
 }
 
-// Collect unique .//tagname XPath expressions from XML
-function _collectXmlPaths(element, seen = new Set()) {
-  const xp = `.//${element.tagName}`
-  if (!seen.has(xp)) seen.add(xp)
-  for (const child of Array.from(element.children)) {
-    _collectXmlPaths(child, seen)
+// Collect XPath expressions from XML — simple .//tag plus positional .//tag[n]/child paths
+function _collectXmlPaths(rootEl) {
+  const paths = new Set()
+
+  // Collect descendant paths anchored below a positional base (e.g. .//book[1])
+  function collectBelow(el, basePath, depth) {
+    if (depth > 5) return
+    for (const child of Array.from(el.children)) {
+      const tag = child.tagName
+      const siblings = Array.from(el.children).filter(c => c.tagName === tag)
+      const seg = siblings.length > 1 ? `${tag}[${siblings.indexOf(child) + 1}]` : tag
+      const p = `${basePath}/${seg}`
+      paths.add(p)
+      collectBelow(child, p, depth + 1)
+    }
   }
-  return [...seen]
+
+  function walk(el, depth) {
+    if (depth > 8) return
+    const tag = el.tagName
+    paths.add(`.//${tag}`)
+
+    // Attribute-based discriminators
+    for (const attr of Array.from(el.attributes || [])) {
+      paths.add(`.//${tag}[@${attr.name}="${attr.value}"]`)
+    }
+
+    // Positional path when there are multiple siblings with same tag
+    const parent = el.parentElement
+    if (parent) {
+      const siblings = Array.from(parent.children).filter(c => c.tagName === tag)
+      if (siblings.length > 1) {
+        const idx = siblings.indexOf(el) + 1
+        const base = `.//` + tag + `[${idx}]`
+        paths.add(base)
+        collectBelow(el, base, 1)
+      }
+    }
+
+    for (const child of Array.from(el.children)) {
+      walk(child, depth + 1)
+    }
+  }
+
+  walk(rootEl, 0)
+  return [...paths]
 }
 
 const extractorPaths = computed(() => {
