@@ -188,7 +188,10 @@ test('Topbar-Chip-Toggle schaltet das Set ein und aus', async ({ page }) => {
     const dpInRows = page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpIn.id}"]`)
     const dpOutRows = page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpOut.id}"]`)
 
-    await expect(topbarChip(page, setId)).toBeVisible({ timeout: 5_000 })
+    // The chip is rendered once the topbar has fetched the (API-created) set.
+    // That fetch runs independently of gotoMonitorLive's waits, so allow the
+    // same 10s budget the table assertions use.
+    await expect(topbarChip(page, setId)).toBeVisible({ timeout: 10_000 })
     await expect(dpInRows).toHaveCount(1, { timeout: 10_000 })
     await expect(dpOutRows).toHaveCount(0)
 
@@ -288,7 +291,10 @@ test('Live-Event eines nicht passenden DPs wird durch aktiven Filter gegated', a
     const dpInRows = page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpIn.id}"]`)
     const dpOutRows = page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpOut.id}"]`)
 
-    await expect(topbarChip(page, setId)).toBeVisible({ timeout: 5_000 })
+    // The chip is rendered once the topbar has fetched the (API-created) set.
+    // That fetch runs independently of gotoMonitorLive's waits, so allow the
+    // same 10s budget the table assertions use.
+    await expect(topbarChip(page, setId)).toBeVisible({ timeout: 10_000 })
     await expect(dpInRows).toHaveCount(1, { timeout: 10_000 })
     await expect(dpOutRows).toHaveCount(0)
 
