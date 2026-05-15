@@ -5,6 +5,9 @@ import { apiPost, apiPatch, apiDelete, deleteAllFiltersets, gotoMonitorLive } fr
 // topbar-active set behind, which then pollutes both this file and the
 // ringbuffer live tests. Start every test from a clean slate.
 test.beforeEach(async () => {
+  // Monitor tests wait for a real WebSocket ("Live" badge) plus several save
+  // round-trips — the default 30s per-test budget is too tight under CI load.
+  test.setTimeout(60_000)
   await deleteAllFiltersets()
 })
 
