@@ -5,7 +5,10 @@
     "password": "Password",
     "pin": "PIN",
     "submit": "Sign in",
-    "submitting": "Signing in …"
+    "submitting": "Signing in …",
+    "subtitle": "Visualization · Sign in",
+    "failed": "Login failed",
+    "backWithoutLogin": "← Back to overview (without login)"
   },
   "common": {
     "save": "Save",
@@ -28,16 +31,63 @@
     "hiddenClickToShow": "Hidden — click to show",
     "adminAndAssignedUsers": "Admins + assigned users",
     "authenticatedUser": "Authenticated (user)",
-    "authenticatedPin": "Authenticated (PIN)"
+    "authenticatedPin": "Authenticated (PIN)",
+    "loading": "Loading …",
+    "loadError": "Load error",
+    "saveError": "Error saving",
+    "back": "← Back",
+    "lightMode": "Light mode",
+    "darkMode": "Dark mode",
+    "readonly": "Read only",
+    "loginRequired": "Sign in"
   },
   "editor": {
     "title": "Visu Editor",
     "addWidget": "Add widget",
     "deleteWidget": "Delete widget",
-    "save": "Save"
+    "save": "Save",
+    "newPage": "New page",
+    "gridSettings": "Grid settings",
+    "saving": "Saving …",
+    "cols": "Columns",
+    "cellWidth": "Cell width (px)",
+    "rowHeight": "Row height (px)",
+    "hintClick": "Click → insert",
+    "hintDrag": "Drag → move",
+    "hintResize": "↘ Handle → resize",
+    "hintDelete": "Del → delete widget",
+    "removeWidget": "Remove",
+    "widgetName": "Name",
+    "widgetNamePlaceholder": "e.g. Living room dimmer",
+    "positionSize": "Position & Size",
+    "datapoint": "Datapoint",
+    "writeDatapoint": "Write datapoint",
+    "compatible": "Compatible: {types}",
+    "statusDatapoint": "Status datapoint",
+    "statusDatapointHint": "Optional: separate read-back datapoint. If empty, the write datapoint is used for display.",
+    "configuration": "Configuration",
+    "hintEmpty": "Insert a widget from the palette on the left",
+    "hintNoSelection": "Click a widget on the canvas\nor insert from the palette",
+    "widgetCountSingular": "widget on this page",
+    "widgetCountPlural": "widgets on this page",
+    "brokenDpRef": "At least one datapoint reference was not found",
+    "pageNamePlaceholder": "Page name …",
+    "gridInfo": "Cell: {w}×{h}px · Grid: {total}px wide"
   },
   "viewer": {
     "noVisuSelected": "No visu selected"
+  },
+  "pin": {
+    "title": "Access secured",
+    "subtitle": "Please enter PIN",
+    "checking": "Checking …",
+    "wrongPin": "Wrong PIN. Please try again."
+  },
+  "tree": {
+    "overview": "Overview",
+    "visualization": "Visualization",
+    "noPages": "No pages available yet.",
+    "createFirstPage": "Create first page",
+    "manage": "Visu management"
   }
 }
-

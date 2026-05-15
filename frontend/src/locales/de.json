@@ -5,7 +5,10 @@
     "password": "Passwort",
     "pin": "PIN",
     "submit": "Anmelden",
-    "submitting": "Anmelden …"
+    "submitting": "Anmelden …",
+    "subtitle": "Visualisierung · Anmeldung",
+    "failed": "Login fehlgeschlagen",
+    "backWithoutLogin": "← Zur Übersicht (ohne Login)"
   },
   "common": {
     "save": "Speichern",
@@ -28,16 +31,63 @@
     "hiddenClickToShow": "Ausgeblendet — klicken zum Einblenden",
     "adminAndAssignedUsers": "Admins + zugewiesene Benutzer",
     "authenticatedUser": "Authentifiziert (Benutzer)",
-    "authenticatedPin": "Authentifiziert (PIN)"
+    "authenticatedPin": "Authentifiziert (PIN)",
+    "loading": "Lade …",
+    "loadError": "Fehler beim Laden",
+    "saveError": "Fehler beim Speichern",
+    "back": "← Zurück",
+    "lightMode": "Heller Modus",
+    "darkMode": "Dunkler Modus",
+    "readonly": "Nur ansehen",
+    "loginRequired": "Anmeldung"
   },
   "editor": {
     "title": "Visu Editor",
     "addWidget": "Widget hinzufügen",
     "deleteWidget": "Widget löschen",
-    "save": "Speichern"
+    "save": "Speichern",
+    "newPage": "Neue Seite",
+    "gridSettings": "Grid-Einstellungen",
+    "saving": "Speichere …",
+    "cols": "Spalten",
+    "cellWidth": "Zellbreite (px)",
+    "rowHeight": "Zeilenhöhe (px)",
+    "hintClick": "Klick → einfügen",
+    "hintDrag": "Ziehen → verschieben",
+    "hintResize": "↘ Handle → Größe ändern",
+    "hintDelete": "Entf → Widget löschen",
+    "removeWidget": "Entfernen",
+    "widgetName": "Name",
+    "widgetNamePlaceholder": "z.B. Wohnzimmer Dimmer",
+    "positionSize": "Position & Größe",
+    "datapoint": "Objekt",
+    "writeDatapoint": "Schreib-Objekt",
+    "compatible": "Kompatibel: {types}",
+    "statusDatapoint": "Status-Objekt",
+    "statusDatapointHint": "Optional: separates Rückmelde-Objekt. Falls leer, wird das Schreib-Objekt für die Anzeige verwendet.",
+    "configuration": "Konfiguration",
+    "hintEmpty": "Widget aus der Palette links einfügen",
+    "hintNoSelection": "Widget auf dem Canvas anklicken\noder aus der Palette einfügen",
+    "widgetCountSingular": "Widget auf dieser Seite",
+    "widgetCountPlural": "Widgets auf dieser Seite",
+    "brokenDpRef": "Mindestens ein Datenpunkt-Verweis wurde nicht gefunden",
+    "pageNamePlaceholder": "Seitenname …",
+    "gridInfo": "Zelle: {w}×{h}px · Grid: {total}px breit"
   },
   "viewer": {
     "noVisuSelected": "Keine Visu ausgewählt"
+  },
+  "pin": {
+    "title": "Zugang gesichert",
+    "subtitle": "Bitte PIN eingeben",
+    "checking": "Prüfe …",
+    "wrongPin": "Falscher PIN. Bitte erneut versuchen."
+  },
+  "tree": {
+    "overview": "Übersicht",
+    "visualization": "Visualisierung",
+    "noPages": "Noch keine Seiten vorhanden.",
+    "createFirstPage": "Erste Seite erstellen",
+    "manage": "Visu Verwaltung"
   }
 }
-
