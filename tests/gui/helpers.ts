@@ -157,16 +157,27 @@ export async function waitForMonitorReady(page: Page): Promise<void> {
 }
 
 /**
- * Navigate to the Monitor and wait until the live WebSocket is connected.
+ * Navigate to the Monitor and wait until it is ready to receive live pushes.
  *
  * Tests that push values via the API and expect them to appear through the
- * live `ringbuffer_entry` push MUST use this — the server does not replay
- * events, so any value written before the WS handshake completes is lost.
- * The "Live" badge text is shown only while `wsStore.connected` is true.
+ * live `ringbuffer_entry` push MUST use this. Two preconditions must hold
+ * before the test pushes a value, otherwise the entry is silently lost:
+ *   1. The WebSocket is connected — shown by the "Live" status badge. The
+ *      server does not replay events written before the handshake.
+ *   2. The initial table query has returned — until then `load()` overwrites
+ *      `entries` and would clobber a live entry that arrived during loading.
  */
 export async function gotoMonitorLive(page: Page): Promise<void> {
+  const initialQuery = page
+    .waitForResponse(
+      (r) =>
+        /\/api\/v1\/ringbuffer\/(query\/v2|filtersets\/query)$/.test(new URL(r.url()).pathname),
+      { timeout: 20_000 },
+    )
+    .catch(() => null)
   await page.goto('/ringbuffer')
   await expect(page.locator('[data-testid="status-badge"]')).toContainText('Live', { timeout: 20_000 })
+  await initialQuery
 }
 
 /** Upload a single SVG file to the icon library. `name` is the filename without extension. */

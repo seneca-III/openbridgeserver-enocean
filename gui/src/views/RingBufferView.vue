@@ -313,12 +313,16 @@ async function applyFilters() {
 }
 
 onMounted(async () => {
+  // Register the live handler BEFORE the initial load. The WebSocket
+  // connects faster than the loadFiltersets()/load() round-trips, so a
+  // ringbuffer_entry push arriving in that gap would otherwise be dropped
+  // (the server does not replay events).
+  unregisterRb = wsStore.onRingbufferEntry(onLiveEntry)
   // Load filtersets first so the topbar-colour cache is populated before
   // load() picks between queryV2 and queryMultiFiltersets (#437). /stats
   // is owned by TopbarStats / the config modal — not fetched here.
   await loadFiltersets()
   await load()
-  unregisterRb = wsStore.onRingbufferEntry(onLiveEntry)
 })
 
 onUnmounted(() => {
