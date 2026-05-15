@@ -178,9 +178,9 @@ In `<script setup>` blocks use `const { t } = useI18n()` and call `t('key')`.
 **Adding a new locale:**
 1. Add `src/locales/<lang>.json` (copy `de.json` as a starting point)
 2. Import it in `i18n.js` / `i18n.ts` and add to `messages` + `SUPPORTED_LOCALES`
-3. Run `tx push -s` to upload source; community translates on Transifex; `tx pull -a` to pull back
+3. Run `wlc push gui-admin` to upload source; community translates on Weblate; `wlc pull gui-admin` to pull back
 
-**Transifex** resources are named `gui-admin` (Admin GUI) and `frontend-visu` (Visu SPA) under the `openbridgeserver` project. Source language is `de`; file format is `KEYVALUEJSON`.
+**Weblate** components are named `gui-admin` (Admin GUI) and `frontend-visu` (Visu SPA) under the `openbridgeserver` project on [hosted.weblate.org](https://hosted.weblate.org/projects/openbridgeserver/). Source language is `de`; file format is `JSON (simple)`. CLI tool: `pip install wlc`; credentials in `~/.config/weblate` or via `WLC_URL` / `WLC_KEY` env vars.
 
 ## Architecture
 

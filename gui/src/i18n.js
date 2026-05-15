@@ -5,8 +5,8 @@ import en from './locales/en.json'
 /**
  * Supported locales.
  * To add a new language: add its JSON file to src/locales/ and import it here.
- * The JSON files are the Transifex source/target resources — upload de.json as
- * the source and pull translated files via `tx pull`.
+ * The JSON files are the Weblate source/target resources — de.json is the
+ * authoritative source; translations are managed via Weblate and pulled with `wlc pull`.
  */
 export const SUPPORTED_LOCALES = [
   { code: 'de', label: 'Deutsch' },
