@@ -1,20 +1,71 @@
 <template>
-  <Modal v-model="openModel" title="CSV/TSV-Export" :soft-backdrop="true" max-width="lg">
+  <Modal v-model="openModel" title="Export" :soft-backdrop="true" max-width="lg">
     <div class="flex flex-col gap-4">
-      <!-- Format -->
+      <!-- Delimiter / Quote / Escape -->
       <div class="form-group">
-        <label class="label">Format</label>
-        <div class="flex gap-4">
-          <label class="inline-flex items-center gap-2">
-            <input type="radio" value="csv" v-model="form.format" data-testid="export-format-csv" />
-            <span>CSV (Komma)</span>
-          </label>
-          <label class="inline-flex items-center gap-2">
-            <input type="radio" value="tsv" v-model="form.format" data-testid="export-format-tsv" />
-            <span>TSV (Tab)</span>
-          </label>
+        <div class="flex items-center justify-between mb-1">
+          <label class="label">CSV-Format</label>
+          <button
+            type="button"
+            class="btn-secondary btn-sm"
+            data-testid="export-reset-rfc4180"
+            title="Setzt Trennzeichen, Anführungszeichen und Escape-Zeichen auf die RFC-4180-Vorgabe."
+            @click="resetToRfc4180"
+          >
+            ↺ RFC 4180
+          </button>
         </div>
-        <p class="text-xs text-slate-500 mt-1">Dateiendung: <code class="font-mono">.{{ form.format }}</code></p>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div class="flex flex-col gap-1">
+            <label class="text-xs text-slate-500">Trennzeichen</label>
+            <div class="flex items-center gap-2">
+              <input
+                v-model="form.delimiter"
+                type="text"
+                maxlength="1"
+                class="input font-mono w-16 text-center"
+                data-testid="export-delimiter"
+                :placeholder="form.delimiter === '\t' ? '⇥' : ','"
+              />
+              <button
+                type="button"
+                class="btn-secondary btn-sm"
+                data-testid="export-delimiter-tab"
+                title="Tabulator als Trennzeichen setzen (TSV)"
+                @click="form.delimiter = '\t'"
+              >
+                ⇥ Tab
+              </button>
+              <span v-if="form.delimiter === '\t'" class="text-xs text-slate-500">Tabulator</span>
+            </div>
+          </div>
+          <div class="flex flex-col gap-1">
+            <label class="text-xs text-slate-500">Anführungszeichen</label>
+            <input
+              v-model="form.quote_char"
+              type="text"
+              maxlength="1"
+              class="input font-mono w-16 text-center"
+              data-testid="export-quote-char"
+              placeholder='"'
+            />
+          </div>
+          <div class="flex flex-col gap-1">
+            <label class="text-xs text-slate-500">Escape-Zeichen</label>
+            <input
+              v-model="form.escape_char"
+              type="text"
+              maxlength="1"
+              class="input font-mono w-16 text-center"
+              data-testid="export-escape-char"
+              placeholder="(leer)"
+            />
+          </div>
+        </div>
+        <p class="text-xs text-slate-500 mt-1.5">
+          Dateiendung: <code class="font-mono">.{{ form.delimiter === '\t' ? 'tsv' : 'csv' }}</code>.
+          Escape-Zeichen leer = RFC 4180 (Anführungszeichen im Feld werden verdoppelt).
+        </p>
       </div>
 
       <!-- Encoding -->
@@ -55,7 +106,7 @@
 
     <template #footer>
       <button class="btn-secondary" data-testid="btn-export-cancel" @click="openModel = false">Abbrechen</button>
-      <button class="btn-primary" :disabled="busy" data-testid="btn-export-go" @click="onExport">
+      <button class="btn-primary" :disabled="busy || !formValid" data-testid="btn-export-go" @click="onExport">
         <Spinner v-if="busy" size="sm" color="white" />
         {{ pendingRowCount !== null ? 'Trotzdem exportieren' : 'Exportieren' }}
       </button>
@@ -83,8 +134,18 @@ const openModel = computed({
 
 const EXPORT_WARN_THRESHOLD = 1000
 
+// RFC 4180 defaults: comma delimiter, double-quote quoting, no separate
+// escape (quote-doubling inside quoted fields handles internal quotes).
+const RFC_4180_DEFAULTS = Object.freeze({
+  delimiter: ',',
+  quote_char: '"',
+  escape_char: '',
+})
+
 const form = reactive({
-  format: 'csv',
+  delimiter: ',',
+  quote_char: '"',
+  escape_char: '',
   encoding: 'utf8',
   include_unit: true,
   include_matched_set_ids: false,
@@ -92,6 +153,17 @@ const form = reactive({
 const busy = ref(false)
 const errorMsg = ref('')
 const pendingRowCount = ref(null)
+
+// delimiter and quote_char are required single characters. escape_char may be
+// empty (= no escape, RFC 4180 quote-doubling). Both backend Pydantic and the
+// UI enforce this so the Export button is disabled while the form is invalid.
+const formValid = computed(
+  () => form.delimiter.length === 1 && form.quote_char.length === 1 && form.escape_char.length <= 1,
+)
+
+function resetToRfc4180() {
+  Object.assign(form, RFC_4180_DEFAULTS)
+}
 
 watch(
   () => props.modelValue,
@@ -157,7 +229,9 @@ async function onExport() {
     const body = {
       set_ids: props.setIds || [],
       time: props.time || null,
-      format: form.format,
+      delimiter: form.delimiter,
+      quote_char: form.quote_char,
+      escape_char: form.escape_char,
       encoding: form.encoding,
       include_unit: form.include_unit,
       include_matched_set_ids: form.include_matched_set_ids,
@@ -172,7 +246,8 @@ async function onExport() {
     // Extract filename from Content-Disposition if present
     const cd = resp.headers?.['content-disposition'] || ''
     const match = cd.match(/filename="([^"]+)"/)
-    a.download = match ? match[1] : `ringbuffer_export.${form.format}`
+    const fallbackExt = form.delimiter === '\t' ? 'tsv' : 'csv'
+    a.download = match ? match[1] : `ringbuffer_export.${fallbackExt}`
     document.body.appendChild(a)
     a.click()
     a.remove()

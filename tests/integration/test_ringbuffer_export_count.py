@@ -143,6 +143,6 @@ async def test_count_unknown_set_id_is_skipped_like_export(client, auth_headers)
 
 
 async def test_count_rejects_unknown_fields(client, auth_headers):
-    """Format/encoding options on the count endpoint are a programming error → 422."""
-    resp = await _post_count(client, auth_headers, {"set_ids": [], "format": "csv"})
+    """Delimiter/encoding options on the count endpoint are a programming error → 422."""
+    resp = await _post_count(client, auth_headers, {"set_ids": [], "delimiter": ","})
     assert resp.status_code == 422

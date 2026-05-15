@@ -346,29 +346,45 @@ class RingBufferFiltersetOrderPatch(BaseModel):
 
 
 class RingBufferMultiExportRequest(BaseModel):
-    """Request body for ``POST /filtersets/export/csv`` (multi-set CSV/TSV export).
+    """Request body for ``POST /filtersets/export/csv`` (multi-set CSV export).
 
     Streams the full OR-union of entries matching any of the active filtersets,
-    plus an optional time filter, in CSV or TSV format. The export is
-    independent of UI pagination.
+    plus an optional time filter, as a delimiter-separated text file. The
+    delimiter, quote character and escape character are configurable — the
+    defaults follow RFC 4180. The export is independent of UI pagination.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     set_ids: list[str] = Field(default_factory=list)
     time: RingBufferTimeFilterV2 | None = None
-    format: Literal["csv", "tsv"] = "csv"
+    # Single-character delimiter (e.g. ',' for CSV, '\t' for TSV, ';' for
+    # German Excel). Always exactly one character.
+    delimiter: str = Field(default=",", min_length=1, max_length=1)
+    # Quote character around fields that contain the delimiter, the quote
+    # character itself, or newlines. Default '"' per RFC 4180.
+    quote_char: str = Field(default='"', min_length=1, max_length=1)
+    # Escape character for the quote character inside a quoted field. Empty
+    # string (default) selects RFC 4180 behaviour: the quote char inside a
+    # quoted field is doubled. Setting a single character switches the csv
+    # writer to backslash-style escaping (doublequote=False).
+    escape_char: str = Field(default="", max_length=1)
     encoding: Literal["utf8", "utf8-bom"] = "utf8"
     include_unit: bool = True
     include_matched_set_ids: bool = False
 
 
 class RingBufferExportSettings(BaseModel):
-    """Persisted user defaults for the CSV/TSV export dialog (#427)."""
+    """Persisted user defaults for the CSV export dialog (#427)."""
 
-    model_config = ConfigDict(extra="forbid")
+    # `extra="ignore"` so legacy persisted blobs that still carry `format`
+    # (csv|tsv) load without raising. The legacy fields are mapped to the
+    # new delimiter-based schema in get_ringbuffer_export_settings.
+    model_config = ConfigDict(extra="ignore")
 
-    format: Literal["csv", "tsv"] = "csv"
+    delimiter: str = Field(default=",", min_length=1, max_length=1)
+    quote_char: str = Field(default='"', min_length=1, max_length=1)
+    escape_char: str = Field(default="", max_length=1)
     encoding: Literal["utf8", "utf8-bom"] = "utf8"
     include_unit: bool = True
     include_matched_set_ids: bool = False
@@ -1373,8 +1389,12 @@ async def export_ringbuffer_filtersets_csv(
             f"export row limit exceeded (max {_CSV_EXPORT_MAX_ROWS})",
         )
 
-    delimiter = "\t" if body.format == "tsv" else ","
-    extension = "tsv" if body.format == "tsv" else "csv"
+    # Tab delimiter conventionally produces .tsv with the matching media type;
+    # everything else lands as .csv. Extension and media type are derived from
+    # the delimiter, not from a separate format selector.
+    extension = "tsv" if body.delimiter == "\t" else "csv"
+    media_type = "text/tab-separated-values" if body.delimiter == "\t" else "text/csv"
+
     fieldnames = list(_CSV_EXPORT_HEADERS)
     if body.include_unit:
         fieldnames.append("unit")
@@ -1389,7 +1409,17 @@ async def export_ringbuffer_filtersets_csv(
     )
     if body.encoding == "utf8-bom":
         spool.write("﻿")
-    writer = csv.DictWriter(spool, fieldnames=fieldnames, delimiter=delimiter)
+    # Empty escape_char selects RFC 4180 behaviour (doublequote=True). Setting
+    # an escape_char switches the writer to backslash-style escaping; csv
+    # requires doublequote=False in that mode.
+    writer_kwargs: dict[str, Any] = {
+        "delimiter": body.delimiter,
+        "quotechar": body.quote_char,
+    }
+    if body.escape_char:
+        writer_kwargs["escapechar"] = body.escape_char
+        writer_kwargs["doublequote"] = False
+    writer = csv.DictWriter(spool, fieldnames=fieldnames, **writer_kwargs)
     writer.writeheader()
     for entry in entries:
         row = _entry_to_csv_row(entry)
@@ -1401,7 +1431,6 @@ async def export_ringbuffer_filtersets_csv(
 
     spool.seek(0)
     filename = f"ringbuffer_export_{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}.{extension}"
-    media_type = "text/tab-separated-values" if body.format == "tsv" else "text/csv"
     background_tasks.add_task(spool.close)
     return StreamingResponse(
         spool,
@@ -1423,8 +1452,17 @@ async def get_ringbuffer_export_settings(
     if not row or not row["value"]:
         return RingBufferExportSettings()
     try:
-        return RingBufferExportSettings(**json.loads(row["value"]))
-    except (json.JSONDecodeError, ValidationError):
+        raw = json.loads(row["value"])
+    except json.JSONDecodeError:
+        return RingBufferExportSettings()
+    # Legacy format: pre-#427 the dialog stored a CSV/TSV radio selection.
+    # Translate to the new delimiter when the new key is absent so users
+    # don't silently lose their old TSV preference on first load.
+    if isinstance(raw, dict) and "delimiter" not in raw and raw.get("format") == "tsv":
+        raw["delimiter"] = "\t"
+    try:
+        return RingBufferExportSettings(**raw)
+    except ValidationError:
         return RingBufferExportSettings()
 
 

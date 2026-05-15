@@ -182,7 +182,7 @@ async def test_multi_export_unknown_set_id_is_silently_skipped(client, auth_head
 # ---------------------------------------------------------------------------
 
 
-async def test_multi_export_tsv_format_uses_tab_and_tsv_extension(client, auth_headers):
+async def test_multi_export_tab_delimiter_uses_tsv_extension(client, auth_headers):
     tag = f"rb427tsv-{uuid.uuid4().hex[:8]}"
     dp = await _create_dp(client, auth_headers, f"RB427 TSV {uuid.uuid4()}", tags=[tag])
     await _write_value(client, auth_headers, dp["id"], 4.0)
@@ -198,7 +198,7 @@ async def test_multi_export_tsv_format_uses_tab_and_tsv_extension(client, auth_h
         resp = await _post_multi_export(
             client,
             auth_headers,
-            {"set_ids": [set_id], "format": "tsv"},
+            {"set_ids": [set_id], "delimiter": "\t"},
         )
         assert resp.status_code == 200, resp.text
         # Content-Disposition ends with .tsv
@@ -464,11 +464,32 @@ async def test_multi_export_quotes_csv_special_characters(client, auth_headers):
 # ---------------------------------------------------------------------------
 
 
-async def test_multi_export_invalid_format_returns_422(client, auth_headers):
+async def test_multi_export_legacy_format_key_returns_422(client, auth_headers):
+    # The `format` field was removed in favour of explicit delimiter/quote_char/
+    # escape_char. The request model has extra="forbid" so unknown fields fail
+    # validation rather than silently dropping the user's choice.
     resp = await _post_multi_export(
         client,
         auth_headers,
-        {"set_ids": [], "format": "xls"},
+        {"set_ids": [], "format": "csv"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_multi_export_multi_char_delimiter_returns_422(client, auth_headers):
+    resp = await _post_multi_export(
+        client,
+        auth_headers,
+        {"set_ids": [], "delimiter": "||"},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_multi_export_empty_delimiter_returns_422(client, auth_headers):
+    resp = await _post_multi_export(
+        client,
+        auth_headers,
+        {"set_ids": [], "delimiter": ""},
     )
     assert resp.status_code == 422, resp.text
 
@@ -480,3 +501,31 @@ async def test_multi_export_invalid_encoding_returns_422(client, auth_headers):
         {"set_ids": [], "encoding": "latin1"},
     )
     assert resp.status_code == 422, resp.text
+
+
+async def test_multi_export_custom_delimiter_and_quote(client, auth_headers):
+    tag = f"rb427sep-{uuid.uuid4().hex[:8]}"
+    dp = await _create_dp(client, auth_headers, f"RB427 sep {uuid.uuid4()}", tags=[tag])
+    await _write_value(client, auth_headers, dp["id"], 4.0)
+
+    set_id = (
+        await _create_filterset(
+            client,
+            auth_headers,
+            {"name": f"RB427 sep-set {uuid.uuid4()}", "filter": {"tags": [tag]}},
+        )
+    )["id"]
+    try:
+        resp = await _post_multi_export(
+            client,
+            auth_headers,
+            {"set_ids": [set_id], "delimiter": ";", "quote_char": "'"},
+        )
+        assert resp.status_code == 200, resp.text
+        # Header line uses ; as separator.
+        header = resp.text.splitlines()[0]
+        assert ";" in header
+        rows = _parse_rows(resp.text, delimiter=";")
+        assert any(row["datapoint_id"] == dp["id"] for row in rows)
+    finally:
+        await _delete_filterset(client, auth_headers, set_id)
