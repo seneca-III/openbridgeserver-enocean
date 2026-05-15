@@ -40,7 +40,13 @@ async function pickInCombobox(page: Page, scopeTestId: string, query: string): P
   const input = root.locator('[data-testid="combobox-input"]').first()
   await input.click()
   if (query) await input.fill(query)
-  await root.locator('[data-testid="combobox-item-0"]').first().click({ timeout: 5_000 })
+  // The suggestion list is fetched asynchronously. Clicking combobox-item-0
+  // straight away races that fetch and can pick a stale pre-filter item (e.g.
+  // an unrelated datapoint). Wait until the list has narrowed to the single
+  // match for `query` before clicking.
+  const items = root.locator('[data-testid^="combobox-item-"]')
+  if (query) await expect(items).toHaveCount(1)
+  await items.first().click({ timeout: 5_000 })
 }
 
 // Click "Speichern & in Topleiste" and wait until the full chain has settled:
