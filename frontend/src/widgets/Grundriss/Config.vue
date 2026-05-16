@@ -4,6 +4,7 @@ import { useVisuStore } from '@/stores/visu'
 import { WidgetRegistry } from '@/widgets/registry'
 import DataPointPicker from '@/components/DataPointPicker.vue'
 import type { VisuNode } from '@/types'
+import { imageToScreen as _imageToScreen, screenToImage as _screenToImage } from './coords'
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -118,52 +119,25 @@ const mousePos      = ref<[number, number]>([0, 0])
 
 const closeThreshold = computed(() => cfg.imageNaturalW * 0.04)
 
+function layoutParams(containerW: number, containerH: number) {
+  return {
+    containerW,
+    containerH,
+    naturalW: cfg.imageNaturalW,
+    naturalH: cfg.imageNaturalH,
+    rotation: cfg.rotation,
+  }
+}
+
 // Convert a mouse event on the canvas to unrotated image coordinates.
-// Inverse of canvasImageToScreen() / Widget.vue's imageToScreen(), so drags
-// in any rotation always update mw.x / mw.y in the correct image coordinate space.
 function getImageCoords(e: MouseEvent, el: HTMLElement): [number, number] {
   const rect = el.getBoundingClientRect()
-  const W  = rect.width
-  const H  = rect.height
-  const sx = e.clientX - rect.left
-  const sy = e.clientY - rect.top
-  const r  = cfg.rotation
-  const NW = cfg.imageNaturalW
-  const NH = cfg.imageNaturalH
-  const innerW = (r === 90 || r === 270) ? H : W
-  const innerH = (r === 90 || r === 270) ? W : H
-  const s  = Math.min(innerW / NW, innerH / NH)
-  const ox = (innerW - NW * s) / 2
-  const oy = (innerH - NH * s) / 2
-  let px: number, py: number
-  switch (r) {
-    case 90:  px = (sy - ox) / s;     py = (W - oy - sx) / s; break
-    case 180: px = (W - ox - sx) / s; py = (H - oy - sy) / s; break
-    case 270: px = (H - ox - sy) / s; py = (sx - oy) / s;     break
-    default:  px = (sx - ox) / s;     py = (sy - oy) / s;     break
-  }
-  return [Math.max(0, Math.min(NW, px)), Math.max(0, Math.min(NH, py))]
+  return _screenToImage(e.clientX - rect.left, e.clientY - rect.top, layoutParams(rect.width, rect.height))
 }
 
 // Convert unrotated image coordinates to canvas-relative screen pixels.
-// Mirrors Widget.vue's imageToScreen() so drag handles sit over the correct spot.
 function canvasImageToScreen(px: number, py: number): [number, number] {
-  const W  = canvasW.value
-  const H  = canvasH.value
-  const r  = cfg.rotation
-  const NW = cfg.imageNaturalW
-  const NH = cfg.imageNaturalH
-  const innerW = (r === 90 || r === 270) ? H : W
-  const innerH = (r === 90 || r === 270) ? W : H
-  const s  = Math.min(innerW / NW, innerH / NH)
-  const ox = (innerW - NW * s) / 2
-  const oy = (innerH - NH * s) / 2
-  switch (r) {
-    case 90:  return [W - oy - py * s, ox + px * s]
-    case 180: return [W - ox - px * s, H - oy - py * s]
-    case 270: return [oy + py * s,     H - ox - px * s]
-    default:  return [ox + px * s,     oy + py * s]
-  }
+  return _imageToScreen(px, py, layoutParams(canvasW.value, canvasH.value))
 }
 
 // Marker radius in screen px — proportional to the rendered image width.
