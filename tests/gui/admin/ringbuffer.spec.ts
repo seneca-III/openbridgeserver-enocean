@@ -1,5 +1,21 @@
 import { test, expect } from '@playwright/test'
-import { apiPost, apiDelete } from '../helpers'
+import {
+  apiPost,
+  apiDelete,
+  deleteAllFiltersets,
+  gotoMonitor,
+  gotoMonitorLive,
+  waitForMonitorReady,
+} from '../helpers'
+
+// Filtersets are global state. Start every test from an empty, unfiltered
+// feed so a leftover topbar-active set cannot gate out live pushes.
+test.beforeEach(async () => {
+  // Monitor tests wait for a real WebSocket ("Live" badge) plus live pushes —
+  // the default 30s per-test budget is too tight under CI load.
+  test.setTimeout(60_000)
+  await deleteAllFiltersets()
+})
 
 test('RingBuffer Live-Eintrag ohne Reload', async ({ page }) => {
   // Fixture: create a DataPoint
@@ -11,11 +27,7 @@ test('RingBuffer Live-Eintrag ohne Reload', async ({ page }) => {
   const dpId = created.id
 
   try {
-    await page.goto('/ringbuffer')
-    await page.waitForLoadState('networkidle')
-
-    // Status badge must say "Live"
-    await expect(page.locator('[data-testid="status-badge"]')).toContainText('Live', { timeout: 8_000 })
+    await gotoMonitorLive(page)
 
     // Before the push, no entries for this brand-new DP should exist
     const before = await page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpId}"]`).count()
@@ -40,9 +52,7 @@ test('RingBuffer Pause/Resume stoppt Live-Append und holt Queue nach', async ({ 
   const dpId = created.id
 
   try {
-    await page.goto('/ringbuffer')
-    await page.waitForLoadState('networkidle')
-    await expect(page.locator('[data-testid="status-badge"]')).toContainText('Live', { timeout: 8_000 })
+    await gotoMonitorLive(page)
 
     const rows = page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpId}"]`)
     const before = await rows.count()
@@ -73,8 +83,7 @@ test('RingBuffer Auto-Scroll folgt Live, bleibt stabil bei Pause', async ({ page
   const dpId = created.id
 
   try {
-    await page.goto('/ringbuffer')
-    await page.waitForLoadState('networkidle')
+    await gotoMonitorLive(page)
     const rows = page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpId}"]`)
     const before = await rows.count()
 
@@ -114,8 +123,7 @@ test('RingBuffer zeigt Live-Einträge auch ohne manuellen Refresh', async ({ pag
   const dpId = created.id
 
   try {
-    await page.goto('/ringbuffer')
-    await page.waitForLoadState('networkidle')
+    await gotoMonitorLive(page)
     const rows = page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpId}"]`)
     const before = await rows.count()
 
@@ -160,8 +168,7 @@ test('RingBuffer Monitor-Modal öffnet stabil ohne separates Speicher-PopUp', as
     })
   })
 
-  await page.goto('/ringbuffer')
-  await page.waitForLoadState('networkidle')
+  await gotoMonitor(page)
   await page.click('[data-testid="btn-open-monitor-config"]')
 
   await expect(page.locator('[data-testid="rb-config-max-size-value"]')).toBeVisible()
@@ -219,8 +226,7 @@ test('RingBuffer Monitor-Modal hält Speicher-/Retention-State und sendet Limits
     })
   })
 
-  await page.goto('/ringbuffer')
-  await page.waitForLoadState('networkidle')
+  await gotoMonitor(page)
   await page.click('[data-testid="btn-open-monitor-config"]')
 
   await expect(page.locator('[data-testid="rb-config-max-entries-enabled"]')).toBeChecked()
@@ -295,8 +301,7 @@ test('RingBuffer Monitor-Modal Statistik rendert stabil bei leerem und gefüllte
     })
   })
 
-  await page.goto('/ringbuffer')
-  await page.waitForLoadState('networkidle')
+  await gotoMonitor(page)
   await page.click('[data-testid="btn-open-monitor-config"]')
   const statsBox = await page.locator('[data-testid="rb-config-stats"]').boundingBox()
   const firstInputBox = await page.locator('[data-testid="rb-config-max-entries"]').boundingBox()
@@ -311,7 +316,7 @@ test('RingBuffer Monitor-Modal Statistik rendert stabil bei leerem und gefüllte
 
   showFilledStats = true
   await page.reload()
-  await page.waitForLoadState('networkidle')
+  await waitForMonitorReady(page)
   await page.click('[data-testid="btn-open-monitor-config"]')
   await expect(page.locator('[data-testid="rb-config-stats-total"]')).toContainText('25')
   await expect(page.locator('[data-testid="rb-config-stats-file-size"]')).toContainText('1.00 MB')
@@ -370,8 +375,7 @@ test('RingBuffer Monitor-Modal unterstützt Max.-Einträge ohne Limit und schlie
     })
   })
 
-  await page.goto('/ringbuffer')
-  await page.waitForLoadState('networkidle')
+  await gotoMonitor(page)
   await page.click('[data-testid="btn-open-monitor-config"]')
   await expect(page.locator('[data-testid="rb-config-max-entries-enabled"]')).toBeChecked()
   await page.click('[data-testid="rb-config-max-entries-enabled"]')

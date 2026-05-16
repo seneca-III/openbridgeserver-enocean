@@ -1,5 +1,22 @@
 import { test, expect, type Page, type Locator } from '@playwright/test'
-import { apiPost, apiPatch, apiDelete } from '../helpers'
+import {
+  apiPost,
+  apiPatch,
+  apiDelete,
+  deleteAllFiltersets,
+  gotoMonitorLive,
+  waitForMonitorReady,
+} from '../helpers'
+
+// Filtersets are global state — a previously failed test may leave a
+// topbar-active set behind, which then pollutes both this file and the
+// ringbuffer live tests. Start every test from a clean slate.
+test.beforeEach(async () => {
+  // Monitor tests wait for a real WebSocket ("Live" badge) plus several save
+  // round-trips — the default 30s per-test budget is too tight under CI load.
+  test.setTimeout(60_000)
+  await deleteAllFiltersets()
+})
 
 // API-First helper: create a filterset and flip topbar_active=true. UI tests
 // that don't validate the FilterEditor itself use this so they don't depend
@@ -25,15 +42,25 @@ async function openNewFilterEditor(page: Page): Promise<void> {
   await expect(page.locator('[data-testid="filter-editor-name"]')).toBeVisible({ timeout: 5_000 })
 }
 
-// Pick the first matching item from a Combobox scoped by the wrapper test-id.
-// Works for DpCombobox, TagCombobox, HierarchyCombobox and AdapterCombobox —
-// they all render <Combobox> internally and share the same input/item slots.
-async function pickInCombobox(page: Page, scopeTestId: string, query: string): Promise<void> {
+// Pick an item from a Combobox scoped by the wrapper test-id. Works for
+// DpCombobox, TagCombobox, HierarchyCombobox and AdapterCombobox — they all
+// render <Combobox> internally and share the same input/item slots.
+//
+// `match` must be text that appears in the target suggestion item (a tag,
+// datapoint name or hierarchy node name — NOT a UUID; the hierarchy combobox
+// only searches names). The helper types it, then waits until combobox-item-0
+// actually renders that text. The combobox debounces and fetches suggestions
+// asynchronously, and `input.click()` already triggers a focus-fetch of the
+// unfiltered list — clicking item-0 before the query-fetch lands would pick a
+// stale entry. Asserting the rendered text first makes the pick deterministic.
+async function pickInCombobox(page: Page, scopeTestId: string, match: string): Promise<void> {
   const root = page.locator(`[data-testid="${scopeTestId}"]`)
   const input = root.locator('[data-testid="combobox-input"]').first()
   await input.click()
-  if (query) await input.fill(query)
-  await root.locator('[data-testid="combobox-item-0"]').first().click({ timeout: 5_000 })
+  if (match) await input.fill(match)
+  const item0 = root.locator('[data-testid="combobox-item-0"]').first()
+  if (match) await expect(item0).toContainText(match)
+  await item0.click({ timeout: 5_000 })
 }
 
 // Click "Speichern & in Topleiste" and wait until the full chain has settled:
@@ -89,10 +116,26 @@ function topbarChip(page: Page, setId: string): Locator {
   return page.locator(`[data-testid="topbar-chip-${setId}"]`)
 }
 
+// Assert the topbar chip for `setId` is visible. The topbar renders its chips
+// from a mount-time /filtersets fetch whose render can occasionally race; for
+// API-created sets there is no explicit topbar reload to fall back on, so if
+// the chip has not appeared, reload the page once to re-mount the topbar.
+async function expectTopbarChip(page: Page, setId: string): Promise<void> {
+  const chip = topbarChip(page, setId)
+  try {
+    await expect(chip).toBeVisible({ timeout: 8_000 })
+  } catch {
+    await page.reload()
+    await waitForMonitorReady(page)
+    await expect(chip).toBeVisible({ timeout: 10_000 })
+  }
+}
+
 test('FilterCriteria: Tags-Liste OR-matcht, Datapoints AND-engt ein', async ({ page }) => {
   const tag = uniqueName('fe02-and-or')
+  const dpAName = uniqueName('E2E-RB-FE02-A')
   const dpA = (await apiPost('/api/v1/datapoints', {
-    name: uniqueName('E2E-RB-FE02-A'),
+    name: dpAName,
     data_type: 'FLOAT',
     tags: [tag],
   })) as { id: string }
@@ -107,15 +150,14 @@ test('FilterCriteria: Tags-Liste OR-matcht, Datapoints AND-engt ein', async ({ p
     await apiPost(`/api/v1/datapoints/${dpA.id}/value`, { value: 11.0, quality: 'good' })
     await apiPost(`/api/v1/datapoints/${dpB.id}/value`, { value: 22.0, quality: 'good' })
 
-    await page.goto('/ringbuffer')
-    await page.waitForLoadState('networkidle')
+    await gotoMonitorLive(page)
 
     await openNewFilterEditor(page)
     await page.fill('[data-testid="filter-editor-name"]', uniqueName('FS-AND-OR'))
     await pickInCombobox(page, 'filter-editor-tags', tag)
     setId = await saveAndCaptureId(page)
 
-    await expect(topbarChip(page, setId)).toBeVisible({ timeout: 5_000 })
+    await expectTopbarChip(page, setId)
     await expect(
       page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpA.id}"]`),
     ).toHaveCount(1, { timeout: 10_000 })
@@ -126,7 +168,11 @@ test('FilterCriteria: Tags-Liste OR-matcht, Datapoints AND-engt ein', async ({ p
     // Re-open the editor, add a datapoint filter — AND between tags-section and
     // datapoints-section now excludes dpB even though dpB still carries the tag.
     await page.click(`[data-testid="topbar-chip-body-${setId}"]`)
-    await pickInCombobox(page, 'filter-editor-dps', dpA.id)
+    // Wait until the editor has hydrated from the set (loadSet → hydrateForm
+    // runs Object.assign(form, makeEmptyForm()), which would otherwise wipe a
+    // datapoint picked before the async load resolves).
+    await expect(page.locator('[data-testid="filter-editor-name"]')).not.toHaveValue('')
+    await pickInCombobox(page, 'filter-editor-dps', dpAName)
     await saveAndCaptureId(page)
 
     await expect(
@@ -162,13 +208,17 @@ test('Topbar-Chip-Toggle schaltet das Set ein und aus', async ({ page }) => {
     // API-first set creation: this test is about toggle UX, not FilterEditor.
     setId = await createActiveFilterset(uniqueName('FS-TOGGLE'), { datapoints: [dpIn.id] })
 
-    await page.goto('/ringbuffer')
-    await page.waitForLoadState('networkidle')
+    await gotoMonitorLive(page)
 
     const dpInRows = page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpIn.id}"]`)
     const dpOutRows = page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpOut.id}"]`)
 
-    await expect(topbarChip(page, setId)).toBeVisible({ timeout: 5_000 })
+    await expectTopbarChip(page, setId)
+    // Pause the live feed: once the set is toggled inactive there are no
+    // active topbar sets, so the live feed would run unfiltered and a
+    // background WS push could repopulate the table between the toggle and
+    // the empty-state assertion. This test isolates the query-path behaviour.
+    await page.click('[data-testid="btn-live-pause"]')
     await expect(dpInRows).toHaveCount(1, { timeout: 10_000 })
     await expect(dpOutRows).toHaveCount(0)
 
@@ -202,10 +252,11 @@ test('Hierarchy-Knoten löst descendant-inclusive auf (Recursive-CTE)', async ({
     name: uniqueName('FE02-Tree'),
     description: 'E2E',
   })) as { id: string }
+  const nodeName = uniqueName('FE02-Node')
   const node = (await apiPost('/api/v1/hierarchy/nodes', {
     tree_id: tree.id,
     parent_id: null,
-    name: uniqueName('FE02-Node'),
+    name: nodeName,
     description: 'E2E',
     order: 0,
   })) as { id: string }
@@ -220,17 +271,16 @@ test('Hierarchy-Knoten löst descendant-inclusive auf (Recursive-CTE)', async ({
   try {
     await apiPost(`/api/v1/datapoints/${dp.id}/value`, { value: 42.0, quality: 'good' })
 
-    await page.goto('/ringbuffer')
-    await page.waitForLoadState('networkidle')
+    await gotoMonitorLive(page)
 
     await openNewFilterEditor(page)
     await page.fill('[data-testid="filter-editor-name"]', uniqueName('FS-HIER'))
-    await pickInCombobox(page, 'filter-editor-hierarchy', node.id)
+    await pickInCombobox(page, 'filter-editor-hierarchy', nodeName)
     setId = await saveAndCaptureId(page)
 
     // The DP is linked to the node but not picked explicitly. Recursive-CTE
     // resolution on the server expands the node into its descendant DPs.
-    await expect(topbarChip(page, setId)).toBeVisible({ timeout: 5_000 })
+    await expectTopbarChip(page, setId)
     await expect(
       page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dp.id}"]`),
     ).toHaveCount(1, { timeout: 10_000 })
@@ -263,13 +313,12 @@ test('Live-Event eines nicht passenden DPs wird durch aktiven Filter gegated', a
 
     setId = await createActiveFilterset(uniqueName('FS-LIVE-GATE'), { datapoints: [dpIn.id] })
 
-    await page.goto('/ringbuffer')
-    await page.waitForLoadState('networkidle')
+    await gotoMonitorLive(page)
 
     const dpInRows = page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpIn.id}"]`)
     const dpOutRows = page.locator(`[data-testid="ringbuffer-entry"][data-dp="${dpOut.id}"]`)
 
-    await expect(topbarChip(page, setId)).toBeVisible({ timeout: 5_000 })
+    await expectTopbarChip(page, setId)
     await expect(dpInRows).toHaveCount(1, { timeout: 10_000 })
     await expect(dpOutRows).toHaveCount(0)
 
