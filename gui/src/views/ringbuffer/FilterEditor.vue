@@ -7,6 +7,18 @@
     @update:model-value="onModalToggle"
   >
     <div class="flex flex-col gap-5">
+      <!-- Owner / permission banner (#478): visible on every existing set -->
+      <p
+        v-if="setId && loadedSet"
+        data-testid="filter-editor-owner-line"
+        class="text-xs text-slate-500 dark:text-slate-400"
+      >
+        <span v-if="loadedSet.created_by === auth.username">Eigenes Set</span>
+        <span v-else-if="loadedSet.created_by">Eigentümer: <strong>{{ loadedSet.created_by }}</strong></span>
+        <span v-else>Geteiltes Set (vor #478 angelegt — nur Admin darf bearbeiten)</span>
+        <span v-if="!canEdit" class="ml-2 inline-flex items-center rounded bg-slate-200 dark:bg-slate-700 px-1.5 py-0.5 text-[10px] uppercase tracking-wide">Nur lesend</span>
+      </p>
+
       <!-- Set-Metadaten -->
       <section class="grid grid-cols-1 md:grid-cols-2 gap-3">
         <div class="flex flex-col gap-1">
@@ -224,9 +236,9 @@
       <button
         v-if="setId"
         class="btn-danger btn-sm"
-        :disabled="deleting || saving"
+        :disabled="deleting || saving || !canEdit"
         data-testid="filter-editor-delete"
-        title="Filter-Set unwiderruflich löschen"
+        :title="canEdit ? 'Filter-Set unwiderruflich löschen' : 'Nur der Eigentümer oder ein Admin darf löschen'"
         @click="onDelete"
       >
         🗑 Löschen
@@ -234,8 +246,9 @@
       <button class="btn-secondary btn-sm" data-testid="filter-editor-cancel" @click="onCancel">Verwerfen</button>
       <button
         class="btn-primary btn-sm"
-        :disabled="saving || filterIsEmpty || deleting"
+        :disabled="saving || filterIsEmpty || deleting || !canEdit"
         data-testid="filter-editor-save-topbar"
+        :title="canEdit ? '' : 'Nur der Eigentümer oder ein Admin darf speichern'"
         @click="onSave(true)"
       >
         Speichern &amp; in Topleiste
@@ -270,6 +283,9 @@ import DpCombobox from '@/components/ui/DpCombobox.vue'
 import TagCombobox from '@/components/ui/TagCombobox.vue'
 import AdapterCombobox from '@/components/ui/AdapterCombobox.vue'
 import { isEmptyFilter } from '@/composables/useClientSideMatch'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -340,6 +356,7 @@ const filterIsEmpty = computed(() =>
     value_filter: form.valueOperator ? { operator: form.valueOperator } : null,
   }),
 )
+
 const errorMsg = ref('')
 const saving = ref(false)
 const deleting = ref(false)
@@ -348,6 +365,16 @@ const confirmOpen = ref(false)
 const confirmDeleteOpen = ref(false)
 const expanding = ref(false)
 const loadedSet = ref(null)
+
+// Fine-grained ownership (#478): admin can edit every set; non-admin users
+// only the sets they created themselves. New sets (no setId yet) are always
+// editable by the caller. Legacy sets (created_by == null) are admin-only.
+const canEdit = computed(() => {
+  if (!props.setId) return true
+  const owner = loadedSet.value?.created_by
+  if (auth.isAdmin) return true
+  return owner != null && owner === auth.username
+})
 // Cache hierarchy node descendants by `${tree_id}:${node_id}` so we can
 // resolve descendants client-side without needing a dedicated backend route.
 const hierarchyTreeCache = new Map() // tree_id -> array of {id, parent_id}

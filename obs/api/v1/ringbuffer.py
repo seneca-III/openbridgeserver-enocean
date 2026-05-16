@@ -315,6 +315,8 @@ class RingBufferFiltersetOut(BaseModel):
     filter: FilterCriteria
     created_at: str
     updated_at: str
+    # #478: NULL on rows created before V33 — treated as "shared, admin-only editable".
+    created_by: str | None = None
 
 
 class RingBufferFiltersetTopbarPatch(BaseModel):
@@ -692,33 +694,105 @@ async def _query_v2_entries(
 # ---------------------------------------------------------------------------
 
 
-def _row_to_filterset(row: Any) -> RingBufferFiltersetOut:
+def _row_to_filterset(row: Any, *, user_state: tuple[bool, bool, int] | None = None) -> RingBufferFiltersetOut:
+    """Project a DB row into the API model.
+
+    ``user_state`` holds the per-user override
+    ``(is_active, topbar_active, topbar_order)`` from
+    ``ringbuffer_filterset_user_state``. When absent (no row for this user),
+    the set is treated as active and un-pinned for that user. The global
+    ``is_active`` / ``topbar_active`` / ``topbar_order`` columns on
+    ``ringbuffer_filtersets`` are no longer surfaced via the API (#478 —
+    fully isolated per-user view).
+    """
+    if user_state is not None:
+        is_active, topbar_active, topbar_order = user_state
+    else:
+        is_active, topbar_active, topbar_order = True, False, 0
+    created_by = row["created_by"] if "created_by" in row.keys() else None
     return RingBufferFiltersetOut(
         id=row["id"],
         name=row["name"],
         description=row["description"],
         dsl_version=int(row["dsl_version"]),
-        is_active=bool(row["is_active"]),
+        is_active=is_active,
         color=_normalize_color(row["color"] if "color" in row.keys() else None),
-        topbar_active=bool(row["topbar_active"]) if "topbar_active" in row.keys() else False,
-        topbar_order=int(row["topbar_order"]) if "topbar_order" in row.keys() else 0,
+        topbar_active=topbar_active,
+        topbar_order=topbar_order,
         filter=_decode_filter(row["filter_json"] if "filter_json" in row.keys() else None),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        created_by=created_by,
     )
 
 
-async def _fetch_filterset(db: Database, filterset_id: str) -> RingBufferFiltersetOut | None:
+async def _fetch_user_state(db: Database, username: str, filterset_id: str) -> tuple[bool, bool, int] | None:
+    """Return ``(is_active, topbar_active, topbar_order)`` for the user, or ``None``."""
+    row = await db.fetchone(
+        "SELECT is_active, topbar_active, topbar_order FROM ringbuffer_filterset_user_state WHERE username=? AND filterset_id=?",
+        (username, filterset_id),
+    )
+    if not row:
+        return None
+    return bool(row["is_active"]), bool(row["topbar_active"]), int(row["topbar_order"])
+
+
+async def _fetch_filterset(db: Database, filterset_id: str, *, username: str | None = None) -> RingBufferFiltersetOut | None:
     row = await db.fetchone("SELECT * FROM ringbuffer_filtersets WHERE id=?", (filterset_id,))
     if not row:
         return None
-    return _row_to_filterset(row)
+    user_state = await _fetch_user_state(db, username, filterset_id) if username else None
+    return _row_to_filterset(row, user_state=user_state)
+
+
+async def _is_admin(db: Database, username: str) -> bool:
+    row = await db.fetchone("SELECT is_admin FROM users WHERE username=?", (username,))
+    return row is not None and bool(row["is_admin"])
+
+
+async def _require_filterset_ownership(db: Database, filterset_id: str, current_user: str) -> RingBufferFiltersetOut:
+    """Load a set or raise: 404 if missing, 403 if the caller is neither admin
+    nor the owner. Mirrors the API-key admin-or-owner pattern in ``obs/api/auth.py``.
+
+    Rows with ``created_by IS NULL`` (pre-#478 sets) are treated as shared and
+    admin-only mutable.
+    """
+    current = await _fetch_filterset(db, filterset_id, username=current_user)
+    if current is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
+    if await _is_admin(db, current_user):
+        return current
+    if current.created_by != current_user:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur Admin oder Eigentümer")
+    return current
+
+
+async def _upsert_user_state(
+    db: Database,
+    *,
+    username: str,
+    filterset_id: str,
+    is_active: bool,
+    topbar_active: bool,
+    topbar_order: int,
+) -> None:
+    await db.execute(
+        """INSERT INTO ringbuffer_filterset_user_state
+             (username, filterset_id, is_active, topbar_active, topbar_order)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(username, filterset_id) DO UPDATE SET
+             is_active=excluded.is_active,
+             topbar_active=excluded.topbar_active,
+             topbar_order=excluded.topbar_order""",
+        (username, filterset_id, int(is_active), int(topbar_active), int(topbar_order)),
+    )
 
 
 async def _insert_filterset(
     db: Database,
     *,
     payload: RingBufferFiltersetIn,
+    created_by: str | None,
 ) -> RingBufferFiltersetOut:
     now = _now_iso()
     filterset_id = _new_id()
@@ -726,8 +800,8 @@ async def _insert_filterset(
     await db.execute(
         """INSERT INTO ringbuffer_filtersets
            (id, name, description, dsl_version, is_active,
-            color, topbar_active, topbar_order, filter_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            color, topbar_active, topbar_order, filter_json, created_at, updated_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
         (
             filterset_id,
             payload.name,
@@ -740,10 +814,24 @@ async def _insert_filterset(
             _encode_filter(payload.filter),
             now,
             now,
+            created_by,
         ),
     )
+    # Seed the creator's own per-user state from the POST body so GET as that
+    # user returns is_active/topbar_active/topbar_order as requested. We only
+    # write a row when something diverges from the defaults (active+un-pinned)
+    # to keep the override table lean.
+    if created_by is not None and (not payload.is_active or payload.topbar_active or payload.topbar_order):
+        await _upsert_user_state(
+            db,
+            username=created_by,
+            filterset_id=filterset_id,
+            is_active=bool(payload.is_active),
+            topbar_active=bool(payload.topbar_active),
+            topbar_order=int(payload.topbar_order),
+        )
     await db.commit()
-    created = await _fetch_filterset(db, filterset_id)
+    created = await _fetch_filterset(db, filterset_id, username=created_by)
     if not created:
         raise RuntimeError("failed to create filterset")
     return created
@@ -931,19 +1019,26 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
 
 @router.get("/filtersets", response_model=list[RingBufferFiltersetOut])
 async def list_ringbuffer_filtersets(
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> list[RingBufferFiltersetOut]:
-    rows = await db.fetchall(
-        "SELECT * FROM ringbuffer_filtersets ORDER BY topbar_order, created_at, id",
-    )
-    return [_row_to_filterset(row) for row in rows]
+    rows = await db.fetchall("SELECT * FROM ringbuffer_filtersets")
+    states = {
+        row["filterset_id"]: (bool(row["is_active"]), bool(row["topbar_active"]), int(row["topbar_order"]))
+        for row in await db.fetchall(
+            "SELECT filterset_id, is_active, topbar_active, topbar_order FROM ringbuffer_filterset_user_state WHERE username=?",
+            (current_user,),
+        )
+    }
+    out = [_row_to_filterset(row, user_state=states.get(row["id"])) for row in rows]
+    out.sort(key=lambda fs: (fs.topbar_order, fs.created_at, fs.id))
+    return out
 
 
 @router.post("/filtersets", response_model=RingBufferFiltersetOut, status_code=status.HTTP_201_CREATED)
 async def create_ringbuffer_filterset(
     request: Request,
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> RingBufferFiltersetOut:
     raw = await _read_json_body(request)
@@ -953,16 +1048,16 @@ async def create_ringbuffer_filterset(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "filterset.filter must declare at least one criterion (hierarchy_nodes, datapoints, tags, adapters, q, or value_filter)",
         )
-    return await _insert_filterset(db, payload=payload)
+    return await _insert_filterset(db, payload=payload, created_by=current_user)
 
 
 @router.get("/filtersets/{filterset_id}", response_model=RingBufferFiltersetOut)
 async def get_ringbuffer_filterset(
     filterset_id: str,
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> RingBufferFiltersetOut:
-    current = await _fetch_filterset(db, filterset_id)
+    current = await _fetch_filterset(db, filterset_id, username=current_user)
     if not current:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
     return current
@@ -972,12 +1067,10 @@ async def get_ringbuffer_filterset(
 async def update_ringbuffer_filterset(
     filterset_id: str,
     request: Request,
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> RingBufferFiltersetOut:
-    current = await _fetch_filterset(db, filterset_id)
-    if not current:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
+    current = await _require_filterset_ownership(db, filterset_id, current_user)
 
     raw = await _read_json_body(request)
     try:
@@ -992,10 +1085,7 @@ async def update_ringbuffer_filterset(
     name = body.name if body.name is not None else current.name
     description = body.description if body.description is not None else current.description
     dsl_version = body.dsl_version if body.dsl_version is not None else current.dsl_version
-    is_active = body.is_active if body.is_active is not None else current.is_active
     color = body.color if body.color is not None else current.color
-    topbar_active = body.topbar_active if body.topbar_active is not None else current.topbar_active
-    topbar_order = body.topbar_order if body.topbar_order is not None else current.topbar_order
     new_filter = body.filter if body.filter is not None else current.filter
 
     if _is_empty_criteria(new_filter):
@@ -1004,26 +1094,43 @@ async def update_ringbuffer_filterset(
             "filterset.filter must declare at least one criterion (hierarchy_nodes, datapoints, tags, adapters, q, or value_filter)",
         )
 
+    # is_active, topbar_active and topbar_order live in
+    # ringbuffer_filterset_user_state per-user (#478); PUT only changes the
+    # shared payload (name/description/filter/color/dsl_version) and never
+    # touches the global is_active / topbar_* columns.
     await db.execute(
         """UPDATE ringbuffer_filtersets
-           SET name=?, description=?, dsl_version=?, is_active=?,
-               color=?, topbar_active=?, topbar_order=?, filter_json=?, updated_at=?
+           SET name=?, description=?, dsl_version=?,
+               color=?, filter_json=?, updated_at=?
            WHERE id=?""",
         (
             name,
             description,
             dsl_version,
-            int(is_active),
             color,
-            int(topbar_active),
-            int(topbar_order),
             _encode_filter(new_filter),
             now,
             filterset_id,
         ),
     )
+    # Allow body.is_active/topbar_active/topbar_order to update the caller's
+    # own per-user state for backward compat with clients that still bundle
+    # these fields into a PUT.
+    if body.is_active is not None or body.topbar_active is not None or body.topbar_order is not None:
+        prior = await _fetch_user_state(db, current_user, filterset_id)
+        active = body.is_active if body.is_active is not None else (prior[0] if prior else True)
+        topbar_active = body.topbar_active if body.topbar_active is not None else (prior[1] if prior else False)
+        order = body.topbar_order if body.topbar_order is not None else (prior[2] if prior else 0)
+        await _upsert_user_state(
+            db,
+            username=current_user,
+            filterset_id=filterset_id,
+            is_active=bool(active),
+            topbar_active=bool(topbar_active),
+            topbar_order=int(order),
+        )
     await db.commit()
-    updated = await _fetch_filterset(db, filterset_id)
+    updated = await _fetch_filterset(db, filterset_id, username=current_user)
     if not updated:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
     return updated
@@ -1032,12 +1139,10 @@ async def update_ringbuffer_filterset(
 @router.delete("/filtersets/{filterset_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_ringbuffer_filterset(
     filterset_id: str,
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> None:
-    row = await db.fetchone("SELECT id FROM ringbuffer_filtersets WHERE id=?", (filterset_id,))
-    if not row:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
+    await _require_filterset_ownership(db, filterset_id, current_user)
     await db.execute_and_commit("DELETE FROM ringbuffer_filtersets WHERE id=?", (filterset_id,))
 
 
@@ -1045,9 +1150,11 @@ async def delete_ringbuffer_filterset(
 async def clone_ringbuffer_filterset(
     filterset_id: str,
     body: RingBufferFiltersetCloneRequest,
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> RingBufferFiltersetOut:
+    # Cloning stays open for everyone — that's how a non-admin gets a writable
+    # copy of an admin-curated or someone else's set (#478).
     source = await _fetch_filterset(db, filterset_id)
     if not source:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
@@ -1062,10 +1169,10 @@ async def clone_ringbuffer_filterset(
         # Clones do not inherit topbar activation — the user explicitly opts in
         # via the PATCH /topbar endpoint after deciding the clone is ready.
         topbar_active=False,
-        topbar_order=source.topbar_order,
+        topbar_order=0,
         filter=source.filter,
     )
-    return await _insert_filterset(db, payload=clone_payload)
+    return await _insert_filterset(db, payload=clone_payload, created_by=current_user)
 
 
 # ---------------------------------------------------------------------------
@@ -1076,72 +1183,96 @@ async def clone_ringbuffer_filterset(
 @router.patch("/filtersets/order", response_model=list[RingBufferFiltersetOut])
 async def patch_ringbuffer_filtersets_order(
     body: RingBufferFiltersetOrderPatch,
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> list[RingBufferFiltersetOut]:
-    """Persist a new topbar order for several sets in one batch.
+    """Persist a new topbar order for several sets in one batch — per-user.
 
-    Sets not mentioned in ``items`` keep their existing ``topbar_order``.
-    Unknown IDs are ignored silently — same rationale as for the multi-query
-    endpoint (a racing delete must not break drag-and-drop reordering).
+    Sets not mentioned in ``items`` keep their existing per-user ``topbar_order``.
+    Unknown IDs are ignored silently — a racing delete must not break drag-and-
+    drop reordering.
     """
-    now = _now_iso()
     known_ids = {row["id"] for row in await db.fetchall("SELECT id FROM ringbuffer_filtersets")}
     for item in body.items:
         if item.id not in known_ids:
             continue
-        await db.execute(
-            "UPDATE ringbuffer_filtersets SET topbar_order=?, updated_at=? WHERE id=?",
-            (int(item.topbar_order), now, item.id),
+        prior = await _fetch_user_state(db, current_user, item.id)
+        is_active = prior[0] if prior else True
+        topbar_active = prior[1] if prior else False
+        await _upsert_user_state(
+            db,
+            username=current_user,
+            filterset_id=item.id,
+            is_active=bool(is_active),
+            topbar_active=bool(topbar_active),
+            topbar_order=int(item.topbar_order),
         )
     await db.commit()
 
-    rows = await db.fetchall(
-        "SELECT * FROM ringbuffer_filtersets ORDER BY topbar_order, created_at, id",
-    )
-    return [_row_to_filterset(row) for row in rows]
+    rows = await db.fetchall("SELECT * FROM ringbuffer_filtersets")
+    states = {
+        row["filterset_id"]: (bool(row["is_active"]), bool(row["topbar_active"]), int(row["topbar_order"]))
+        for row in await db.fetchall(
+            "SELECT filterset_id, is_active, topbar_active, topbar_order FROM ringbuffer_filterset_user_state WHERE username=?",
+            (current_user,),
+        )
+    }
+    out = [_row_to_filterset(row, user_state=states.get(row["id"])) for row in rows]
+    out.sort(key=lambda fs: (fs.topbar_order, fs.created_at, fs.id))
+    return out
 
 
 @router.patch("/filtersets/{filterset_id}/topbar", response_model=RingBufferFiltersetOut)
 async def patch_ringbuffer_filterset_topbar(
     filterset_id: str,
     body: RingBufferFiltersetTopbarPatch,
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> RingBufferFiltersetOut:
-    """Toggle the topbar activation and/or order of a single set.
+    """Update the per-user view (``is_active``, ``topbar_active``, ``topbar_order``).
 
-    A no-op body (both fields ``None``) still touches ``updated_at`` so the
-    frontend can rely on a single sync source after the call.
+    All three fields live in ``ringbuffer_filterset_user_state`` (#478) so every
+    authenticated user maintains their own active/pinned state. No ownership
+    check is required — this is the user's *own* view of the shared filterset.
     """
-    current = await _fetch_filterset(db, filterset_id)
-    if not current:
+    fs_row = await db.fetchone("SELECT id FROM ringbuffer_filtersets WHERE id=?", (filterset_id,))
+    if not fs_row:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
 
-    topbar_active = body.topbar_active if body.topbar_active is not None else current.topbar_active
-    topbar_order = body.topbar_order if body.topbar_order is not None else current.topbar_order
-    is_active = body.is_active if body.is_active is not None else current.is_active
+    prior = await _fetch_user_state(db, current_user, filterset_id)
+    cur_is_active = prior[0] if prior else True
+    cur_topbar_active = prior[1] if prior else False
+    cur_topbar_order = prior[2] if prior else 0
+
+    is_active = body.is_active if body.is_active is not None else cur_is_active
+    topbar_active = body.topbar_active if body.topbar_active is not None else cur_topbar_active
+    topbar_order = body.topbar_order if body.topbar_order is not None else cur_topbar_order
 
     # When the set transitions from "not in topbar" to "in topbar" *and* the
     # caller did not pin an explicit order, assign one that ranks the new
-    # set after every currently topbar-active set. This avoids many sets
-    # piling up at topbar_order=0, which breaks the deterministic first-
-    # color-wins tie-break in the UI and confuses drag-and-drop reordering.
-    if topbar_active and not current.topbar_active and body.topbar_order is None:
+    # set after every currently topbar-active set IN THIS USER'S VIEW. This
+    # avoids many sets piling up at topbar_order=0 and keeps the deterministic
+    # first-color-wins tie-break sane.
+    if topbar_active and not cur_topbar_active and body.topbar_order is None:
         max_row = await db.fetchone(
-            "SELECT COALESCE(MAX(topbar_order), -1) AS max_order FROM ringbuffer_filtersets WHERE topbar_active=1 AND id != ?",
-            (filterset_id,),
+            "SELECT COALESCE(MAX(topbar_order), -1) AS max_order FROM ringbuffer_filterset_user_state "
+            "WHERE username=? AND topbar_active=1 AND filterset_id != ?",
+            (current_user, filterset_id),
         )
         max_order = int(max_row["max_order"]) if max_row else -1
         topbar_order = max_order + 1
 
-    now = _now_iso()
-    await db.execute_and_commit(
-        "UPDATE ringbuffer_filtersets SET topbar_active=?, topbar_order=?, is_active=?, updated_at=? WHERE id=?",
-        (int(topbar_active), int(topbar_order), int(is_active), now, filterset_id),
+    await _upsert_user_state(
+        db,
+        username=current_user,
+        filterset_id=filterset_id,
+        is_active=bool(is_active),
+        topbar_active=bool(topbar_active),
+        topbar_order=int(topbar_order),
     )
+    await db.commit()
 
-    updated = await _fetch_filterset(db, filterset_id)
+    updated = await _fetch_filterset(db, filterset_id, username=current_user)
     if not updated:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
     return updated
@@ -1155,7 +1286,7 @@ async def patch_ringbuffer_filterset_topbar(
 @router.post("/filtersets/query", response_model=list[RingBufferMultiEntryOut])
 async def query_ringbuffer_filtersets_multi(
     body: RingBufferMultiQueryRequest,
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> list[RingBufferMultiEntryOut]:
     if len(body.set_ids) > _FILTERSET_MULTI_QUERY_SET_CAP:
@@ -1181,10 +1312,12 @@ async def query_ringbuffer_filtersets_multi(
         entries = await _query_v2_entries(query)
         return [RingBufferMultiEntryOut(**entry.model_dump(), matched_set_ids=[]) for entry in entries]
 
-    # Resolve sets — skip missing/inactive ones rather than fail.
+    # Resolve sets — skip missing/inactive (per-user) ones rather than fail.
+    # ``is_active`` is now part of the caller's per-user state, so two users may
+    # see different OR-unions across the same set_ids.
     resolved: list[RingBufferFiltersetOut] = []
     for set_id in body.set_ids:
-        current = await _fetch_filterset(db, set_id)
+        current = await _fetch_filterset(db, set_id, username=current_user)
         if current is None:
             continue
         if not current.is_active:
@@ -1251,16 +1384,17 @@ async def query_ringbuffer_filtersets_multi(
 @router.post("/filtersets/{filterset_id}/query", response_model=list[RingBufferEntryOut])
 async def query_ringbuffer_filterset(
     filterset_id: str,
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> list[RingBufferEntryOut]:
     """Single-set query (back-compat for callers that target one set at a time).
 
     The body is intentionally ignored — the time filter and pagination are
     fixed defaults here. Callers that need custom time/pagination should use
-    ``POST /filtersets/query`` with a single-element ``set_ids`` list.
+    ``POST /filtersets/query`` with a single-element ``set_ids`` list. The
+    set's ``is_active`` flag is taken from the caller's per-user state (#478).
     """
-    current = await _fetch_filterset(db, filterset_id)
+    current = await _fetch_filterset(db, filterset_id, username=current_user)
     if not current:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
     if not current.is_active:
@@ -1281,6 +1415,8 @@ _EXPORT_SETTINGS_KEY = "ringbuffer.export_settings"
 async def _collect_multi_entries(
     body: RingBufferMultiExportRequest,
     db: Database,
+    *,
+    username: str | None = None,
 ) -> tuple[list[RingBufferEntryOut], dict[int, list[str]]]:
     """Collect the OR-union of entries across the requested filtersets.
 
@@ -1310,7 +1446,7 @@ async def _collect_multi_entries(
 
     resolved: list[RingBufferFiltersetOut] = []
     for set_id in body.set_ids:
-        current = await _fetch_filterset(db, set_id)
+        current = await _fetch_filterset(db, set_id, username=username)
         if current is None or not current.is_active:
             continue
         # Empty FilterCriteria → the set has no real filter configured yet.
@@ -1355,7 +1491,7 @@ async def _collect_multi_entries(
 @router.post("/filtersets/export/count", response_model=RingBufferMultiExportCountResponse)
 async def count_ringbuffer_filtersets_export(
     body: RingBufferMultiExportCountRequest,
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> RingBufferMultiExportCountResponse:
     """Preflight: how many rows would the corresponding CSV export produce?
@@ -1363,9 +1499,11 @@ async def count_ringbuffer_filtersets_export(
     Used by the UI to warn the user before triggering a large download. The
     set/time semantics match ``POST /filtersets/export/csv`` exactly, so the
     returned count is the row count of the union the export would write.
+    Per-user ``is_active`` applies — a set the caller has deactivated for
+    themselves is excluded from the count too (#478).
     """
     export_body = RingBufferMultiExportRequest(set_ids=body.set_ids, time=body.time)
-    entries, _ = await _collect_multi_entries(export_body, db)
+    entries, _ = await _collect_multi_entries(export_body, db, username=current_user)
     return RingBufferMultiExportCountResponse(row_count=len(entries))
 
 
@@ -1373,7 +1511,7 @@ async def count_ringbuffer_filtersets_export(
 async def export_ringbuffer_filtersets_csv(
     body: RingBufferMultiExportRequest,
     background_tasks: BackgroundTasks,
-    _user: str = Depends(get_current_user),
+    current_user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> StreamingResponse:
     """Multi-set CSV/TSV export — OR-union of all requested active sets.
@@ -1381,8 +1519,9 @@ async def export_ringbuffer_filtersets_csv(
     Optional columns (``unit`` from #434, ``matched_set_ids`` from #431) and
     encoding (UTF-8 with optional BOM) are toggleable via the request body. The
     persisted user defaults live behind ``GET/PUT /ringbuffer/export/settings``.
+    Per-user ``is_active`` filters the OR-union to what the caller has enabled.
     """
-    entries, matched = await _collect_multi_entries(body, db)
+    entries, matched = await _collect_multi_entries(body, db, username=current_user)
     if len(entries) > _CSV_EXPORT_MAX_ROWS:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,

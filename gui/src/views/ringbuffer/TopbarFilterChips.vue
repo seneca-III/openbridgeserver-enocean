@@ -25,12 +25,12 @@
           class="w-1.5 self-stretch shrink-0"
           :style="{ backgroundColor: set.color || '#94a3b8' }"
         />
-        <!-- Active/inactive toggle -->
+        <!-- Active/inactive toggle (per-user — #478, open to everyone) -->
         <button
           type="button"
           :data-testid="`topbar-chip-toggle-${set.id}`"
           class="px-2 py-1 text-sm text-slate-600 dark:text-slate-300 hover:text-slate-800 dark:hover:text-white"
-          :title="set.is_active ? 'Aktiv — klicken zum Deaktivieren' : 'Inaktiv — klicken zum Aktivieren'"
+          :title="set.is_active ? 'Aktiv — klicken zum Deaktivieren (nur für mich)' : 'Inaktiv — klicken zum Aktivieren (nur für mich)'"
           @click.stop="onToggleActive(set)"
         >
           {{ set.is_active ? '●' : '○' }}
@@ -40,6 +40,7 @@
           type="button"
           :data-testid="`topbar-chip-body-${set.id}`"
           class="px-2 py-1 text-sm text-slate-800 dark:text-slate-100 hover:underline focus:outline-none"
+          :title="ownerTitle(set)"
           @click.stop="$emit('edit-set', set.id)"
         >
           <span
@@ -49,6 +50,25 @@
             title="Dieses Set hat keinen Filter konfiguriert — die Tabelle bleibt leer, solange das Set aktiv ist."
           >⚠</span>
           {{ set.name }}
+          <!-- Owner hint: visible for everyone (including admin) on every set
+               the caller does NOT own. Shared legacy sets (created_by==null)
+               show "shared". The lock icon is only added when the caller has
+               no write access (non-admin, non-owner) so admin sees the owner
+               without misleading "read-only" affordance. -->
+          <span
+            v-if="!isMine(set)"
+            :data-testid="`topbar-chip-owner-${set.id}`"
+            class="ml-1 text-xs text-slate-400 dark:text-slate-500"
+            :title="ownerTitle(set)"
+          >
+            <span v-if="set.created_by">@{{ set.created_by }}</span>
+            <span v-else class="italic">geteilt</span>
+            <span
+              v-if="!canEdit(set)"
+              :data-testid="`topbar-chip-owner-lock-${set.id}`"
+              class="ml-0.5"
+            >🔒</span>
+          </span>
         </button>
         <!-- Remove from topbar -->
         <button
@@ -143,13 +163,39 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { VueDraggable } from 'vue-draggable-plus'
 import { ringbufferApi } from '@/api/client'
 import { isEmptyFilter } from '@/composables/useClientSideMatch'
+import { useAuthStore } from '@/stores/auth'
 
 const emit = defineEmits(['edit-set', 'new-set', 'changed', 'export'])
 
+const auth = useAuthStore()
 const filtersets = ref([])
 const addMenuOpen = ref(false)
 const addMenuQuery = ref('')
 const searchInputRef = ref(null)
+
+// Admin can edit every set; non-admin users only the sets they created
+// themselves (#478). All per-user state (is_active toggle, topbar pinning,
+// drag-reorder, +Add, ×Remove) stays open for everyone — only the chip body
+// (which jumps into the FilterEditor for editing/deleting) signals the lock
+// via the 🔒 marker.
+function canEdit(set) {
+  if (!set) return false
+  if (auth.isAdmin) return true
+  const owner = set.created_by
+  return owner != null && owner === auth.username
+}
+
+function isMine(set) {
+  return !!set && set.created_by != null && set.created_by === auth.username
+}
+
+function ownerTitle(set) {
+  if (!set) return ''
+  if (isMine(set)) return 'Eigenes Set — bearbeiten'
+  if (set.created_by == null) return 'Geteiltes Set (nur Admin darf bearbeiten)'
+  if (canEdit(set)) return `Eigentümer: ${set.created_by} — bearbeiten als Admin`
+  return `Eigentümer: ${set.created_by} — klicken um zu öffnen / zu klonen`
+}
 
 const activeSets = computed({
   get() {

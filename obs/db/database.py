@@ -510,6 +510,49 @@ async def _migration_v32(conn: aiosqlite.Connection) -> None:
             raise
 
 
+async def _migration_v33(conn: aiosqlite.Connection) -> None:
+    """Fine-grained filterset ownership (#478).
+
+    Adds the ``created_by`` owner column to ``ringbuffer_filtersets`` and a
+    per-user state table that overrides the topbar pinning and ordering. The
+    global ``topbar_active`` / ``topbar_order`` columns on
+    ``ringbuffer_filtersets`` are no longer read by the API; they remain in
+    place for backward-compat-friendly schema diffs only.
+
+    Existing rows keep ``created_by = NULL`` and are treated as shared,
+    admin-only-editable by the API.
+    """
+    try:
+        await conn.execute("ALTER TABLE ringbuffer_filtersets ADD COLUMN created_by TEXT")
+    except aiosqlite.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_rb_fs_created_by ON ringbuffer_filtersets(created_by)")
+
+    await conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ringbuffer_filterset_user_state (
+            username       TEXT NOT NULL,
+            filterset_id   TEXT NOT NULL REFERENCES ringbuffer_filtersets(id) ON DELETE CASCADE,
+            is_active      INTEGER NOT NULL DEFAULT 1,
+            topbar_active  INTEGER NOT NULL DEFAULT 0,
+            topbar_order   INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (username, filterset_id)
+        )
+        """
+    )
+    # ``is_active`` was added after the initial V33 draft. Guard the column-add
+    # for any DB that may have been created against the early shape.
+    try:
+        await conn.execute("ALTER TABLE ringbuffer_filterset_user_state ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+    except aiosqlite.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_rb_fs_user_state_active ON ringbuffer_filterset_user_state(username, topbar_active)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_rb_fs_user_state_order ON ringbuffer_filterset_user_state(username, topbar_order)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_rb_fs_user_state_is_active ON ringbuffer_filterset_user_state(username, is_active)")
+
+
 # List of (version, sql_or_callable) tuples — append new migrations here
 MIGRATIONS: list[tuple[int, str | Callable]] = [
     (1, _MIGRATION_V1),
@@ -546,6 +589,7 @@ MIGRATIONS: list[tuple[int, str | Callable]] = [
     # skipped so fresh DBs jump 29→32, while epic dev DBs at schema_version=31
     # see V32 as the next applicable migration.
     (32, _migration_v32),
+    (33, _migration_v33),
 ]
 
 

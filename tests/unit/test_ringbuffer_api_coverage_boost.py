@@ -232,7 +232,7 @@ async def test_fetch_filterset_returns_none_or_flat_structure():
 
 @pytest.mark.asyncio
 async def test_get_filterset_returns_404_when_missing(monkeypatch):
-    async def _fetch_none(_db, _id):
+    async def _fetch_none(_db, _id, *, username=None):
         return None
 
     monkeypatch.setattr(rb_api, "_fetch_filterset", _fetch_none)
@@ -244,7 +244,7 @@ async def test_get_filterset_returns_404_when_missing(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_single_set_query_returns_404_when_missing(monkeypatch):
-    async def _fetch_none(_db, _id):
+    async def _fetch_none(_db, _id, *, username=None):
         return None
 
     monkeypatch.setattr(rb_api, "_fetch_filterset", _fetch_none)
@@ -270,7 +270,7 @@ async def test_single_set_query_returns_empty_when_inactive(monkeypatch):
         updated_at="2026-01-01T00:00:00Z",
     )
 
-    async def _fetch(_db, _id):
+    async def _fetch(_db, _id, *, username=None):
         return fs
 
     monkeypatch.setattr(rb_api, "_fetch_filterset", _fetch)
