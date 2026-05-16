@@ -118,16 +118,63 @@ const mousePos      = ref<[number, number]>([0, 0])
 
 const closeThreshold = computed(() => cfg.imageNaturalW * 0.04)
 
+// Convert a mouse event on the canvas to unrotated image coordinates.
+// Inverse of canvasImageToScreen() / Widget.vue's imageToScreen(), so drags
+// in any rotation always update mw.x / mw.y in the correct image coordinate space.
 function getImageCoords(e: MouseEvent, el: HTMLElement): [number, number] {
-  const rect  = el.getBoundingClientRect()
-  const scale = Math.min(rect.width / cfg.imageNaturalW, rect.height / cfg.imageNaturalH)
-  const offX  = (rect.width  - cfg.imageNaturalW * scale) / 2
-  const offY  = (rect.height - cfg.imageNaturalH * scale) / 2
-  return [
-    Math.max(0, Math.min(cfg.imageNaturalW, (e.clientX - rect.left - offX) / scale)),
-    Math.max(0, Math.min(cfg.imageNaturalH, (e.clientY - rect.top  - offY) / scale)),
-  ]
+  const rect = el.getBoundingClientRect()
+  const W  = rect.width
+  const H  = rect.height
+  const sx = e.clientX - rect.left
+  const sy = e.clientY - rect.top
+  const r  = cfg.rotation
+  const NW = cfg.imageNaturalW
+  const NH = cfg.imageNaturalH
+  const innerW = (r === 90 || r === 270) ? H : W
+  const innerH = (r === 90 || r === 270) ? W : H
+  const s  = Math.min(innerW / NW, innerH / NH)
+  const ox = (innerW - NW * s) / 2
+  const oy = (innerH - NH * s) / 2
+  let px: number, py: number
+  switch (r) {
+    case 90:  px = (sy - ox) / s;     py = (W - oy - sx) / s; break
+    case 180: px = (W - ox - sx) / s; py = (H - oy - sy) / s; break
+    case 270: px = (H - ox - sy) / s; py = (sx - oy) / s;     break
+    default:  px = (sx - ox) / s;     py = (sy - oy) / s;     break
+  }
+  return [Math.max(0, Math.min(NW, px)), Math.max(0, Math.min(NH, py))]
 }
+
+// Convert unrotated image coordinates to canvas-relative screen pixels.
+// Mirrors Widget.vue's imageToScreen() so drag handles sit over the correct spot.
+function canvasImageToScreen(px: number, py: number): [number, number] {
+  const W  = canvasW.value
+  const H  = canvasH.value
+  const r  = cfg.rotation
+  const NW = cfg.imageNaturalW
+  const NH = cfg.imageNaturalH
+  const innerW = (r === 90 || r === 270) ? H : W
+  const innerH = (r === 90 || r === 270) ? W : H
+  const s  = Math.min(innerW / NW, innerH / NH)
+  const ox = (innerW - NW * s) / 2
+  const oy = (innerH - NH * s) / 2
+  switch (r) {
+    case 90:  return [W - oy - py * s, ox + px * s]
+    case 180: return [W - ox - px * s, H - oy - py * s]
+    case 270: return [oy + py * s,     H - ox - px * s]
+    default:  return [ox + px * s,     oy + py * s]
+  }
+}
+
+// Marker radius in screen px — proportional to the rendered image width.
+const mwMarkerRadius = computed(() => {
+  const r  = cfg.rotation
+  const NW = cfg.imageNaturalW
+  const NH = cfg.imageNaturalH
+  const innerW = (r === 90 || r === 270) ? canvasH.value : canvasW.value
+  const innerH = (r === 90 || r === 270) ? canvasW.value : canvasH.value
+  return Math.max(6, NW * 0.013 * Math.min(innerW / NW, innerH / NH))
+})
 
 function isNearFirst(pos: [number, number]): boolean {
   if (currentPoints.value.length < 3) return false
@@ -168,6 +215,18 @@ function cancelCurrentPolygon() {
 const fullscreenOpen = ref(false)
 const canvasRef      = ref<HTMLDivElement>()
 const widgetRect     = ref<DOMRect | null>(null)
+const canvasW        = ref(0)
+const canvasH        = ref(0)
+let canvasRo: ResizeObserver | null = null
+watch(canvasRef, (el) => {
+  canvasRo?.disconnect()
+  if (!el) { canvasW.value = 0; canvasH.value = 0; return }
+  canvasRo = new ResizeObserver(([entry]) => {
+    canvasW.value = entry.contentRect.width
+    canvasH.value = entry.contentRect.height
+  })
+  canvasRo.observe(el)
+})
 
 function captureWidgetRect() {
   if (!props.widgetId) { widgetRect.value = null; return }
@@ -276,7 +335,10 @@ function onKeyDown(e: KeyboardEvent) {
 }
 
 onMounted(() => document.addEventListener('keydown', onKeyDown))
-onUnmounted(() => document.removeEventListener('keydown', onKeyDown))
+onUnmounted(() => {
+  document.removeEventListener('keydown', onKeyDown)
+  canvasRo?.disconnect()
+})
 
 // ── Area selection & editing ──────────────────────────────────────────────────
 
@@ -877,26 +939,6 @@ function openPlacement(mwId: string) {
               >{{ area.name }}</text>
             </g>
 
-            <!-- Mini-widget position markers (draggable) -->
-            <g v-for="mw in cfg.miniWidgets" :key="`fs-mw-${mw.id}`">
-              <circle
-                :cx="mw.x" :cy="mw.y"
-                :r="cfg.imageNaturalW * 0.013"
-                :fill="mw.id === placingMwId || mw.id === draggingMwId ? 'rgba(239,68,68,0.9)' : 'rgba(239,68,68,0.5)'"
-                :stroke="mw.id === placingMwId || mw.id === draggingMwId ? '#fff' : '#ef4444'"
-                :stroke-width="strokeW"
-                :style="{ cursor: draggingMwId === mw.id ? 'grabbing' : 'grab' }"
-                @mousedown.stop="startMarkerDrag($event, mw.id)"
-              />
-              <text
-                :x="mw.x" :y="mw.y + cfg.imageNaturalW * 0.02"
-                text-anchor="middle" dominant-baseline="hanging"
-                :font-size="fontSize * 0.55"
-                :fill="mw.id === placingMwId || mw.id === draggingMwId ? '#fff' : '#fca5a5'"
-                style="pointer-events: none; user-select: none;"
-              >{{ mw.label || mw.widgetType }}</text>
-            </g>
-
             <!-- Live drawing preview -->
             <g v-if="!placingMwId && livePoints.length > 0">
               <polygon
@@ -931,6 +973,39 @@ function openPlacement(mwId: string) {
               />
             </g>
           </svg>
+
+        <!-- Mini-widget drag handles — outside the SVG, positioned via rotation-aware
+             canvasImageToScreen() so they always sit over the correct spot on the
+             rotated image regardless of cfg.rotation. -->
+        <div
+          v-for="mw in cfg.miniWidgets"
+          :key="`mw-handle-${mw.id}`"
+          class="absolute z-10 select-none"
+          :style="{
+            left:      `${canvasImageToScreen(mw.x, mw.y)[0]}px`,
+            top:       `${canvasImageToScreen(mw.x, mw.y)[1]}px`,
+            transform: 'translate(-50%, -50%)',
+            cursor:    draggingMwId === mw.id ? 'grabbing' : 'grab',
+          }"
+          @mousedown.stop="startMarkerDrag($event, mw.id)"
+        >
+          <svg :width="mwMarkerRadius * 2" :height="mwMarkerRadius * 2" style="display:block;overflow:visible">
+            <circle
+              :cx="mwMarkerRadius" :cy="mwMarkerRadius" :r="mwMarkerRadius - 1"
+              :fill="mw.id === placingMwId || mw.id === draggingMwId ? 'rgba(239,68,68,0.9)' : 'rgba(239,68,68,0.5)'"
+              :stroke="mw.id === placingMwId || mw.id === draggingMwId ? '#fff' : '#ef4444'"
+              stroke-width="1.5"
+            />
+          </svg>
+          <span
+            class="absolute left-1/2 -translate-x-1/2 whitespace-nowrap text-center pointer-events-none"
+            :style="{
+              top:      `${mwMarkerRadius * 2 + 2}px`,
+              fontSize: `${Math.max(9, mwMarkerRadius * 0.7)}px`,
+              color:    mw.id === placingMwId || mw.id === draggingMwId ? '#fff' : '#fca5a5',
+            }"
+          >{{ mw.label || mw.widgetType }}</span>
+        </div>
       </div>
 
       <!-- Toolbar — above the dimming shadow -->
