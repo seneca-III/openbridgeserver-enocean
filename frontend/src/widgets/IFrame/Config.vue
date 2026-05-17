@@ -12,7 +12,7 @@ const emit = defineEmits<{
 const cfg = reactive({
   label:           (props.modelValue.label           as string)  ?? '',
   url:             (props.modelValue.url             as string)  ?? '',
-  sandbox:         (props.modelValue.sandbox         as string)  ?? 'allow-same-origin allow-scripts allow-popups allow-forms',
+  sandbox:         (props.modelValue.sandbox         as string)  ?? 'allow-popups allow-forms',
   allowFullscreen: (props.modelValue.allowFullscreen as boolean) ?? false,
   aspectRatio:     (props.modelValue.aspectRatio     as string)  ?? '16/9',
 })
@@ -20,7 +20,7 @@ const cfg = reactive({
 watch(() => props.modelValue, (v) => {
   cfg.label           = (v.label           as string)  ?? ''
   cfg.url             = (v.url             as string)  ?? ''
-  cfg.sandbox         = (v.sandbox         as string)  ?? 'allow-same-origin allow-scripts allow-popups allow-forms'
+  cfg.sandbox         = (v.sandbox         as string)  ?? 'allow-popups allow-forms'
   cfg.allowFullscreen = (v.allowFullscreen as boolean) ?? false
   cfg.aspectRatio     = (v.aspectRatio     as string)  ?? '16/9'
 })
@@ -57,7 +57,12 @@ const ASPECT_RATIOS = [
 
 const isValidUrl = computed(() => {
   if (!cfg.url) return true
-  try { new URL(cfg.url); return true } catch { return false }
+  try {
+    const parsed = new URL(cfg.url)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
 })
 </script>
 
@@ -85,7 +90,7 @@ const isValidUrl = computed(() => {
         class="w-full bg-gray-800 border rounded px-2 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
         :class="isValidUrl ? 'border-gray-700' : 'border-red-500'"
       />
-      <p v-if="!isValidUrl" class="mt-1 text-xs text-red-400">Ungültige URL</p>
+      <p v-if="!isValidUrl" class="mt-1 text-xs text-red-400">Ungültige URL (nur http/https erlaubt)</p>
     </div>
 
     <!-- Seitenverhältnis -->

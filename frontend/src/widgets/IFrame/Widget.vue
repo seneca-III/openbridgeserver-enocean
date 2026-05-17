@@ -2,6 +2,8 @@
 import { computed } from 'vue'
 import type { DataPointValue } from '@/types'
 
+const SAFE_PROTOCOLS = new Set(['http:', 'https:'])
+
 const props = defineProps<{
   config: Record<string, unknown>
   datapointId: string | null
@@ -11,10 +13,25 @@ const props = defineProps<{
 }>()
 
 const label           = computed(() => (props.config.label           as string)  ?? '')
-const url             = computed(() => (props.config.url             as string)  ?? '')
-const sandbox         = computed(() => (props.config.sandbox         as string)  ?? '')
+const urlRaw          = computed(() => (props.config.url             as string)  ?? '')
+const sandboxRaw      = computed(() => (props.config.sandbox         as string)  ?? '')
 const allowFullscreen = computed(() => (props.config.allowFullscreen as boolean) ?? false)
 const aspectRatio     = computed(() => (props.config.aspectRatio     as string)  ?? '16/9')
+
+const safeUrl = computed(() => {
+  if (!urlRaw.value) return ''
+  try {
+    const parsed = new URL(urlRaw.value)
+    return SAFE_PROTOCOLS.has(parsed.protocol) ? parsed.toString() : ''
+  } catch {
+    return ''
+  }
+})
+
+const safeSandbox = computed(() => {
+  const value = sandboxRaw.value.trim()
+  return value || 'allow-popups allow-forms'
+})
 
 const containerStyle = computed((): Record<string, string> => {
   if (aspectRatio.value === 'free') return {}
@@ -35,7 +52,7 @@ const containerStyle = computed((): Record<string, string> => {
 
     <!-- Editor-Platzhalter -->
     <div
-      v-if="editorMode && !url"
+      v-if="editorMode && !safeUrl"
       class="flex-1 flex flex-col items-center justify-center text-gray-500 gap-2 bg-gray-800/40"
     >
       <span class="text-4xl">🖼️</span>
@@ -44,7 +61,7 @@ const containerStyle = computed((): Record<string, string> => {
 
     <!-- Kein URL im Live-Modus -->
     <div
-      v-else-if="!url"
+      v-else-if="!safeUrl"
       class="flex-1 flex items-center justify-center text-gray-600 text-xs bg-gray-900"
     >
       Keine URL konfiguriert
@@ -62,8 +79,8 @@ const containerStyle = computed((): Record<string, string> => {
         class="absolute inset-0 z-10 cursor-default"
       />
       <iframe
-        :src="url"
-        :sandbox="sandbox || undefined"
+        :src="safeUrl"
+        :sandbox="safeSandbox"
         :allowfullscreen="allowFullscreen || undefined"
         referrerpolicy="no-referrer"
         class="w-full h-full border-0"
