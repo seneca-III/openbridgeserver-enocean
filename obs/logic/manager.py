@@ -9,11 +9,14 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
+import socket
 import uuid
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -43,6 +46,26 @@ _THROTTLE_UNITS: dict[str, float] = {
     "min": 60_000.0,
     "h": 3_600_000.0,
 }
+
+_ICAL_MAX_BYTES = 1_048_576
+_ICAL_ALLOWED_CONTENT_TYPES = ("text/calendar", "application/ics", "application/octet-stream", "text/plain")
+
+
+def _is_public_http_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    if not parsed.hostname:
+        return False
+    try:
+        infos = socket.getaddrinfo(parsed.hostname, parsed.port, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
+            return False
+    return True
 
 _manager: LogicManager | None = None
 
@@ -393,6 +416,9 @@ class LogicManager:
             url = (node.data.get("url") or "").strip()
             if not url:
                 continue
+            if not _is_public_http_url(url):
+                logger.warning("Graph %s: blocked non-public iCal URL for node %s (%s)", graph_id[:8], node.id[:8], url)
+                continue
             refresh_min = float(node.data.get("refresh_interval_min") or 60)
             hyst_node = hyst.setdefault(node.id, {})
             last_fetch: float | None = hyst_node.get("last_fetch_ts")
@@ -400,14 +426,18 @@ class LogicManager:
             needs_fetch = url_changed or last_fetch is None or (execute_now.timestamp() - last_fetch) >= refresh_min * 60
             if needs_fetch:
                 try:
-                    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as _hclient:
+                    async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as _hclient:
                         _resp = await _hclient.get(url)
                         _resp.raise_for_status()
+                        _ct = _resp.headers.get("content-type", "").lower()
+                        if _ct and not any(t in _ct for t in _ICAL_ALLOWED_CONTENT_TYPES):
+                            raise ValueError(f"Unsupported iCal content-type: {_ct}")
+                        if len(_resp.content) > _ICAL_MAX_BYTES:
+                            raise ValueError(f"iCal response too large: {len(_resp.content)} bytes")
                         # Decode with charset from Content-Type; many iCal servers
                         # omit the charset and serve Latin-1 (e.g. c-trace.de).
                         # Try strict UTF-8 first; fall back to Latin-1 which always
                         # succeeds and covers ISO-8859-1 / CP-1252 content.
-                        _ct = _resp.headers.get("content-type", "")
                         _charset: str | None = None
                         for _part in _ct.split(";"):
                             _p = _part.strip()
