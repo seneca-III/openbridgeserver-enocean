@@ -196,8 +196,6 @@ async def websocket_endpoint(
     ws: WebSocket,
     token: str | None = Query(None, description="JWT access token (legacy — prefer Authorization header)"),
 ) -> None:
-    # Auth: optional — authenticated users get a user context, anonymous users
-    # can still subscribe to public datapoints (read-only push channel).
     from obs.api.auth import decode_token
 
     auth_header = ws.headers.get("authorization", "")
@@ -207,14 +205,14 @@ async def websocket_endpoint(
         logger.debug("WS auth via query param — prefer Authorization header in production")
         resolved_token = token
     else:
-        resolved_token = None
+        await ws.close(code=4001, reason="Authentication required")
+        return
 
-    if resolved_token is not None:
-        try:
-            decode_token(resolved_token)
-        except Exception:
-            await ws.close(code=4001, reason="Invalid token")
-            return
+    try:
+        decode_token(resolved_token)
+    except Exception:
+        await ws.close(code=4001, reason="Invalid token")
+        return
 
     manager = get_ws_manager()
     conn_id = await manager.connect(ws)

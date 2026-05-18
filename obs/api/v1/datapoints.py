@@ -199,7 +199,7 @@ async def delete_datapoint(
 @router.get("/{dp_id}/value", response_model=ValueOut)
 async def get_value(
     dp_id: uuid.UUID,
-    _user: str | None = Depends(optional_current_user),
+    _user: str = Depends(get_current_user),
 ) -> ValueOut:
     reg = get_registry()
     dp = reg.get(dp_id)
