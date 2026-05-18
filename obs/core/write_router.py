@@ -23,6 +23,8 @@ import time
 import uuid
 from typing import Any
 
+_MAX_CACHED_VALUE_CHARS = 8192
+
 logger = logging.getLogger(__name__)
 
 
@@ -206,7 +208,19 @@ class WriteRouter:
             try:
                 await instance.write(binding, write_value)
                 self._last_sent[binding.id] = time.monotonic()
-                self._last_value[binding.id] = value  # Original für Delta/OnChange
+
+                needs_value_cache = (
+                    binding.send_on_change
+                    or binding.send_min_delta is not None
+                    or binding.send_min_delta_pct is not None
+                )
+                if needs_value_cache:
+                    cache_value = value
+                    if isinstance(cache_value, str) and len(cache_value) > _MAX_CACHED_VALUE_CHARS:
+                        cache_value = cache_value[:_MAX_CACHED_VALUE_CHARS]
+                    self._last_value[binding.id] = cache_value  # Original für Delta/OnChange
+                else:
+                    self._last_value.pop(binding.id, None)
                 logger.info(
                     "WriteRouter: wrote to adapter=%s instance=%s binding=%s value=%r",
                     binding.adapter_type,
