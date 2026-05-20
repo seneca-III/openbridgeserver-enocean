@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from obs.logic.manager import LogicManager
+from obs.logic.manager import LogicManager, _is_private_host
 from obs.logic.models import FlowData
 from tests.unit.conftest import edge, make_executor, node
 
@@ -47,6 +47,31 @@ def _mock_response(status_code: int, json_data: object | None = None, text: str 
     else:
         resp.json.side_effect = ValueError("no JSON")
     return resp
+
+
+class TestApiClientSsrfHostGuard:
+    """Unit tests for low-level host classification in SSRF guard."""
+
+    def test_empty_host_is_blocked(self):
+        assert _is_private_host("") is True
+
+    def test_localhost_localdomain_is_allowed(self):
+        assert _is_private_host("localhost.localdomain") is False
+
+    def test_direct_loopback_ip_is_allowed(self):
+        assert _is_private_host("127.0.0.1") is False
+
+    @patch("obs.logic.manager.socket.getaddrinfo", side_effect=OSError("dns fail"))
+    def test_dns_failure_is_blocked(self, _mock_getaddrinfo):
+        assert _is_private_host("example.com") is True
+
+    @patch("obs.logic.manager.socket.getaddrinfo", return_value=[(None, None, None, None, ("not-an-ip", 0))])
+    def test_invalid_dns_answer_is_blocked(self, _mock_getaddrinfo):
+        assert _is_private_host("example.com") is True
+
+    @patch("obs.logic.manager.socket.getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 0))])
+    def test_loopback_dns_answer_is_allowed(self, _mock_getaddrinfo):
+        assert _is_private_host("example.com") is False
 
 
 # ===========================================================================
@@ -208,6 +233,61 @@ class TestApiClientManagerHttp:
 
         assert "content" not in captured
         assert "data" not in captured
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    @patch("obs.logic.manager._is_private_host", return_value=True)
+    def test_blocked_target_sets_blocked_output(self, _mock_private_host, mock_client_cls):
+        """Blocked target must set explicit error output and skip HTTP call."""
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_client.request = AsyncMock()
+
+        manager = _make_manager()
+        _, flow = self._build_graph()
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            outputs = self._run(manager, flow)
+
+        mock_client.request.assert_not_called()
+        assert outputs["ac"]["response"] == "Blocked URL target"
+        assert outputs["ac"]["status"] is None
+        assert outputs["ac"]["success"] is False
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    def test_text_response_is_truncated_to_1mb(self, mock_client_cls):
+        """Large text responses must be truncated before storing node output."""
+        big = "x" * 1_500_000
+        resp = _mock_response(200, text=big)
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_client.request = AsyncMock(return_value=resp)
+
+        manager = _make_manager()
+        _, flow = self._build_graph(extra_data={"response_type": "text/plain"})
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            outputs = self._run(manager, flow)
+
+        assert outputs["ac"]["success"] is True
+        assert isinstance(outputs["ac"]["response"], str)
+        assert len(outputs["ac"]["response"]) == 1_000_000
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    def test_localhost_target_is_allowed(self, mock_client_cls):
+        """localhost targets stay allowed for local/self-hosted use-cases."""
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_client.request = AsyncMock(return_value=_mock_response(200, {"ok": True}))
+
+        manager = _make_manager()
+        _, flow = self._build_graph(extra_data={"url": "http://localhost:8080/api/v1/system/health"})
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            outputs = self._run(manager, flow)
+
+        mock_client.request.assert_called_once()
+        assert outputs["ac"]["success"] is True
+        assert outputs["ac"]["status"] == 200
 
 
 # ===========================================================================
