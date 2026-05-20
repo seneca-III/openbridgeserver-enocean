@@ -51,6 +51,7 @@ open bridge verbindet verschiedene Gebäudetechnik-Protokolle zu einem einheitli
    - [Grundriss- und Anlagenschema-Widget](#grundriss--und-anlagenschema-widget)
 20. [Entwicklung](#entwicklung)
    - [Lokale Entwicklung mit PyCharm](#lokale-entwicklung-mit-pycharm)
+   - [Lokale Git-Hooks (Pre-Push-Gate)](#lokale-git-hooks-pre-push-gate)
 
 ---
 
@@ -1537,6 +1538,26 @@ pytest tests/
 
 # Mit Auto-Fix
 ./tools/lint.sh --fix
+```
+
+### Lokale Git-Hooks (Pre-Push-Gate)
+
+Die versionierten Hooks liegen unter `.githooks/`. Damit Git sie ausführt, muss pro Clone einmal `core.hooksPath` gesetzt werden:
+
+```bash
+./tools/setup-git-hooks.sh
+```
+
+Danach läuft bei jedem `git push` automatisch:
+
+- `python3 -m ruff check .`
+- `python3 -m ruff format . --check`
+- `pytest tests/ -v --cov=obs --cov-report=xml --cov-report=term --junitxml=junit.xml`
+
+Bei Bedarf kann der Hook einmalig umgangen werden mit:
+
+```bash
+git push --no-verify
 ```
 
 ---
