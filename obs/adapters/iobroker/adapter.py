@@ -369,7 +369,7 @@ class IoBrokerAdapter(AdapterBase):
             logger.info("ioBroker Socket.IO connected → %s", self._connect_url)
             if self._cfg is not None:
                 await self._publish_connected_status(f"Verbunden mit {self._cfg.host}:{self._cfg.port}")
-            await self._subscribe_bound_states(force_publish_initial=True)
+            await self._subscribe_bound_states(force_publish_initial=True, publish_connected_status=False)
 
         @sio.event
         async def disconnect():  # noqa: ANN202
@@ -499,7 +499,12 @@ class IoBrokerAdapter(AdapterBase):
             return
         await self._publish_status(True, detail)
 
-    async def _subscribe_bound_states(self, *, force_publish_initial: bool = True) -> bool:
+    async def _subscribe_bound_states(
+        self,
+        *,
+        force_publish_initial: bool = True,
+        publish_connected_status: bool = True,
+    ) -> bool:
         if not self._socket_is_connected() or not self._state_map:
             return self._socket_is_connected()
 
@@ -508,7 +513,7 @@ class IoBrokerAdapter(AdapterBase):
             try:
                 await self._call_socket("subscribe", states)
                 logger.info("ioBroker Socket.IO subscribed: %s", states)
-                if self._cfg is not None:
+                if publish_connected_status and self._cfg is not None:
                     await self._publish_connected_status(f"Verbunden mit {self._cfg.host}:{self._cfg.port}")
             except Exception:
                 logger.exception("ioBroker Socket.IO subscribe failed")
