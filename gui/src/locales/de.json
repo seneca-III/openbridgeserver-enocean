@@ -236,6 +236,19 @@
       "previewError": "Vorschau konnte nicht geladen werden",
       "importFailed": "Import fehlgeschlagen"
     },
+    "migration": {
+      "openButton": "Bindings migrieren",
+      "openTitle": "Alle Verknüpfungen dieser Instanz auf eine andere Instanz desselben Typs migrieren",
+      "modalTitle": "Bindings migrieren",
+      "modalTitleFull": "Bindings migrieren — {name}",
+      "description": "Alle Verknüpfungen der Quell-Instanz werden auf die Ziel-Instanz desselben Adapter-Typs verschoben. Bereits vorhandene Verknüpfungen am Ziel werden übersprungen.",
+      "targetLabel": "Ziel-Instanz",
+      "targetPlaceholder": "Ziel wählen …",
+      "targetBindingCount": "{n} Verknüpfungen",
+      "confirmButton": "Migrieren",
+      "result": "{migrated} Verknüpfungen migriert, {skipped} übersprungen.",
+      "failed": "Migration fehlgeschlagen"
+    },
     "anwesenheit": {
       "modalTitle": "Anwesenheitssimulation",
       "modalTitleFull": "Anwesenheitssimulation — {name}",

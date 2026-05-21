@@ -236,6 +236,19 @@
       "previewError": "Preview could not be loaded",
       "importFailed": "Import failed"
     },
+    "migration": {
+      "openButton": "Migrate bindings",
+      "openTitle": "Move all bindings of this instance to another instance of the same adapter type",
+      "modalTitle": "Migrate bindings",
+      "modalTitleFull": "Migrate bindings — {name}",
+      "description": "All bindings from the source instance are moved to the target instance of the same adapter type. Existing bindings on the target are skipped.",
+      "targetLabel": "Target instance",
+      "targetPlaceholder": "Select target …",
+      "targetBindingCount": "{n} bindings",
+      "confirmButton": "Migrate",
+      "result": "{migrated} bindings migrated, {skipped} skipped.",
+      "failed": "Migration failed"
+    },
     "anwesenheit": {
       "modalTitle": "Presence simulation",
       "modalTitleFull": "Presence simulation — {name}",
