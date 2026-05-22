@@ -3,6 +3,7 @@
 
 Checks:
 1) Hardcoded user-facing strings in changed gui/src + frontend/src .vue/.js/.ts files.
+   If base/head refs are provided, only added lines in the diff are scanned.
 2) Locale key parity between de.json and en.json when locale files are changed.
 """
 
@@ -13,6 +14,7 @@ import json
 import re
 import subprocess
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -20,6 +22,7 @@ from typing import Iterable
 TARGET_FILE_RE = re.compile(r"^(gui/src|frontend/src)/.+\.(vue|js|ts)$")
 LOCALE_FILE_RE = re.compile(r"^(gui|frontend)/src/locales/(de|en)\.json$")
 TEMPLATE_BLOCK_RE = re.compile(r"<template\b[^>]*>(.*?)</template>", re.IGNORECASE | re.DOTALL)
+HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
 ATTR_RE = re.compile(
     r"\b(label|title|placeholder|alt|aria-label|helper-text|tooltip|caption|headline|confirm-text|cancel-text|no-data-text|loading-text)\s*=\s*(['\"])(.*?)\2"
 )
@@ -83,6 +86,55 @@ def run_git_diff(repo_root: Path, base: str | None, head: str | None) -> list[st
 
     tried = " | ".join(" ".join(c) for c in candidates)
     raise RuntimeError(f"Could not determine changed files via git diff ({tried})")
+
+
+def parse_added_lines(diff_output: str) -> dict[str, set[int]]:
+    added_lines: dict[str, set[int]] = defaultdict(set)
+    current_file: str | None = None
+    current_new_line: int | None = None
+
+    for raw_line in diff_output.splitlines():
+        if raw_line.startswith("+++ b/"):
+            current_file = raw_line[6:]
+            current_new_line = None
+            continue
+
+        if raw_line.startswith("@@ "):
+            match = HUNK_RE.match(raw_line)
+            current_new_line = int(match.group(1)) if match else None
+            continue
+
+        if current_file is None or current_new_line is None:
+            continue
+
+        if raw_line.startswith("+") and not raw_line.startswith("+++"):
+            added_lines[current_file].add(current_new_line)
+            current_new_line += 1
+            continue
+
+        if raw_line.startswith("-") and not raw_line.startswith("---"):
+            continue
+
+        current_new_line += 1
+
+    return dict(added_lines)
+
+
+def run_git_diff_added_lines(repo_root: Path, base: str | None, head: str | None) -> dict[str, set[int]] | None:
+    if not base or not head:
+        return None
+
+    candidates = [
+        ["git", "diff", "--unified=0", "--no-color", f"{base}...{head}"],
+        ["git", "diff", "--unified=0", "--no-color", base, head],
+    ]
+
+    for cmd in candidates:
+        proc = subprocess.run(cmd, cwd=repo_root, text=True, capture_output=True)
+        if proc.returncode == 0:
+            return parse_added_lines(proc.stdout)
+
+    return None
 
 
 def flatten_keys(data: dict, prefix: str = "") -> set[str]:
@@ -152,13 +204,15 @@ def add_violations_from_matches(
             sink.append(Violation(path=path, line=line, kind=kind, snippet=normalize_text(candidate)))
 
 
-def scan_vue(path: str, content: str, allowlist: Allowlist) -> list[Violation]:
+def scan_vue(path: str, content: str, allowlist: Allowlist, changed_lines: set[int] | None) -> list[Violation]:
     violations: list[Violation] = []
 
     for tpl_match in TEMPLATE_BLOCK_RE.finditer(content):
         tpl = tpl_match.group(1)
         start_line = content.count("\n", 0, tpl_match.start(1)) + 1
         for idx, raw_line in enumerate(tpl.splitlines(), start=start_line):
+            if changed_lines is not None and idx not in changed_lines:
+                continue
             line = COMMENT_RE.sub("", raw_line)
             if not line.strip():
                 continue
@@ -183,6 +237,8 @@ def scan_vue(path: str, content: str, allowlist: Allowlist) -> list[Violation]:
 
     stripped = TEMPLATE_BLOCK_RE.sub("\n", content)
     for line_no, raw_line in enumerate(stripped.splitlines(), start=1):
+        if changed_lines is not None and line_no not in changed_lines:
+            continue
         line = raw_line.strip()
         if not line or line.startswith("//"):
             continue
@@ -217,9 +273,11 @@ def scan_vue(path: str, content: str, allowlist: Allowlist) -> list[Violation]:
     return violations
 
 
-def scan_script(path: str, content: str, allowlist: Allowlist) -> list[Violation]:
+def scan_script(path: str, content: str, allowlist: Allowlist, changed_lines: set[int] | None) -> list[Violation]:
     violations: list[Violation] = []
     for line_no, raw_line in enumerate(content.splitlines(), start=1):
+        if changed_lines is not None and line_no not in changed_lines:
+            continue
         line = raw_line.strip()
         if not line or line.startswith("//"):
             continue
@@ -253,17 +311,24 @@ def scan_script(path: str, content: str, allowlist: Allowlist) -> list[Violation
     return violations
 
 
-def scan_hardcoded_strings(repo_root: Path, files: list[str], allowlist: Allowlist) -> list[Violation]:
+def scan_hardcoded_strings(
+    repo_root: Path,
+    files: list[str],
+    allowlist: Allowlist,
+    added_lines_by_file: dict[str, set[int]],
+    line_filtering_enabled: bool,
+) -> list[Violation]:
     violations: list[Violation] = []
     for rel_path in files:
         path = repo_root / rel_path
         if not path.exists() or not path.is_file():
             continue
         content = path.read_text(encoding="utf-8")
+        changed_lines = added_lines_by_file.get(rel_path, set()) if line_filtering_enabled else None
         if rel_path.endswith(".vue"):
-            violations.extend(scan_vue(rel_path, content, allowlist))
+            violations.extend(scan_vue(rel_path, content, allowlist, changed_lines))
         else:
-            violations.extend(scan_script(rel_path, content, allowlist))
+            violations.extend(scan_script(rel_path, content, allowlist, changed_lines))
     return sorted(violations, key=lambda v: (v.path, v.line, v.kind, v.snippet))
 
 
@@ -307,8 +372,13 @@ def main() -> int:
 
     if args.files:
         changed_files = sorted(set(args.files))
+        added_lines_by_file: dict[str, set[int]] = {}
+        line_filtering_enabled = False
     else:
         changed_files = run_git_diff(repo_root, args.base, args.head)
+        added_lines_by_file_or_none = run_git_diff_added_lines(repo_root, args.base, args.head)
+        line_filtering_enabled = added_lines_by_file_or_none is not None
+        added_lines_by_file = added_lines_by_file_or_none or {}
 
     if not changed_files:
         print("i18n guard: no changed files in diff; nothing to do.")
@@ -322,7 +392,13 @@ def main() -> int:
         return 0
 
     allowlist = Allowlist(repo_root / args.allowlist)
-    violations = scan_hardcoded_strings(repo_root, scan_files, allowlist)
+    violations = scan_hardcoded_strings(
+        repo_root,
+        scan_files,
+        allowlist,
+        added_lines_by_file,
+        line_filtering_enabled,
+    )
 
     locale_errors: list[str] = []
     for app in sorted(touched_apps):
