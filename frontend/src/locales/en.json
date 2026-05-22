@@ -621,7 +621,8 @@
       "closedShort": "closed"
     },
     "rtr": {
-      "accentColor": "Accent colour",
+      "gradientColors": "Colour / gradient (1–4 colours, cold → warm)",
+      "colorIndex": "Colour {n}",
       "tempRange": "Temperature range",
       "min": "Min",
       "max": "Max",

@@ -4,7 +4,7 @@ import DataPointPicker from '@/components/DataPointPicker.vue'
 
 interface RTRConfig {
   label:             string
-  color:             string
+  gradient_colors:   string[]
   min_temp:          number
   max_temp:          number
   step:              number
@@ -45,7 +45,11 @@ const emit  = defineEmits<{ (e: 'update:modelValue', val: Record<string, unknown
 
 const cfg = reactive<RTRConfig>({
   label:             (props.modelValue.label             as string         | undefined) ?? '',
-  color:             (props.modelValue.color             as string         | undefined) ?? '#ef4444',
+  gradient_colors:   (() => {
+    const gc = props.modelValue.gradient_colors as string[] | undefined
+    if (gc && gc.length > 0) return gc
+    return [(props.modelValue.color as string | undefined) ?? '#ef4444']
+  })(),
   min_temp:          (props.modelValue.min_temp          as number         | undefined) ?? 5,
   max_temp:          (props.modelValue.max_temp          as number         | undefined) ?? 35,
   step:              (props.modelValue.step              as number         | undefined) ?? 0.5,
@@ -98,16 +102,30 @@ function toggleMode(value: number) {
       />
     </div>
 
-    <!-- Akzentfarbe -->
+    <!-- Farbverlauf -->
     <div>
-      <label class="block text-xs text-gray-400 mb-1">{{ $t('widgets.rtr.accentColor') }}</label>
-      <div class="flex items-center gap-2">
+      <label class="block text-xs text-gray-400 mb-1">{{ $t('widgets.rtr.gradientColors') }}</label>
+      <div class="flex items-center gap-2 flex-wrap">
         <input
-          v-model="cfg.color"
+          v-for="(_, i) in cfg.gradient_colors"
+          :key="i"
+          v-model="cfg.gradient_colors[i]"
           type="color"
           class="w-8 h-8 rounded cursor-pointer border border-gray-700 bg-transparent p-0.5 shrink-0"
+          :title="$t('widgets.rtr.colorIndex', { n: i + 1 })"
         />
-        <span class="text-xs text-gray-500 font-mono">{{ cfg.color }}</span>
+        <button
+          v-if="cfg.gradient_colors.length < 4"
+          type="button"
+          class="text-xs text-blue-400 hover:text-blue-300 px-2 py-1 border border-gray-700 rounded"
+          @click="cfg.gradient_colors.push('#6b7280')"
+        >+</button>
+        <button
+          v-if="cfg.gradient_colors.length > 1"
+          type="button"
+          class="text-xs text-red-400 hover:text-red-300 px-2 py-1 border border-gray-700 rounded"
+          @click="cfg.gradient_colors.splice(cfg.gradient_colors.length - 1, 1)"
+        >−</button>
       </div>
     </div>
 

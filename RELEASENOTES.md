@@ -16,6 +16,7 @@
 * Logicmodule: Functional Block: "iCalendar" filtering by summary, location, and description. https://github.com/abeggled/openbridgeserver/issues/350
 * Visu: Floor plan widget with the ability to place mini widgets on the floor plan. https://github.com/abeggled/openbridgeserver/issues/228
 * Visu: RTR Widget: Cilmate control (A/C) mode added for use with correct DPT 20.105 https://github.com/abeggled/openbridgeserver/issues/461
+* Visu: RTR Widget: color gradient added https://github.com/abeggled/openbridgeserver/issues/465
   
 ### Fixes 🐞
 * General #375: Proxmox LXC, confusing checksum field content within release notes. https://github.com/abeggled/openbridgeserver/issues/375

@@ -621,7 +621,8 @@
       "closedShort": "zu"
     },
     "rtr": {
-      "accentColor": "Akzentfarbe",
+      "gradientColors": "Farbe / Farbverlauf (1–4 Farben, kalt → warm)",
+      "colorIndex": "Farbe {n}",
       "tempRange": "Temperaturbereich",
       "min": "Min",
       "max": "Max",
