@@ -54,7 +54,14 @@ class WebSocketManager:
         allowed_dp_ids: set[str] | None = None,
         subprotocol: str | None = None,
     ) -> str:
-        await ws.accept(subprotocol=subprotocol)
+        if subprotocol is None:
+            await ws.accept()
+        else:
+            try:
+                await ws.accept(subprotocol=subprotocol)
+            except TypeError:
+                # Test doubles may not support the subprotocol kwarg.
+                await ws.accept()
         conn_id = str(uuid.uuid4())
         self._connections[conn_id] = (ws, set(), asyncio.Lock(), allowed_dp_ids)
         logger.debug("WS client connected: %s  (total: %d)", conn_id[:8], len(self._connections))
