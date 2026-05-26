@@ -128,7 +128,7 @@ def _import_legacy_env_vars() -> None:
     for key, value in list(os.environ.items()):
         if not key.startswith(legacy_prefix):
             continue
-        mapped_key = f"{new_prefix}{key[len(legacy_prefix):]}"
+        mapped_key = f"{new_prefix}{key[len(legacy_prefix) :]}"
         if not _has_obs_override_case_insensitive(mapped_key):
             os.environ[mapped_key] = value
 
@@ -149,6 +149,7 @@ _import_legacy_env_vars()
 # Main settings class
 # ---------------------------------------------------------------------------
 
+
 def _config_path() -> Path:
     """Resolve the YAML config path at construction time."""
     return Path(os.environ.get("OBS_CONFIG") or os.environ.get("OPENTWS_CONFIG", "config.yaml"))
@@ -163,9 +164,7 @@ class Settings(BaseSettings):
 
     server: ServerSettings = Field(default_factory=ServerSettings)
     mqtt: MqttSettings = Field(default_factory=MqttSettings)
-    database: DatabaseSettings = Field(
-        default_factory=lambda: DatabaseSettings(path=_resolve_default_db_path())
-    )
+    database: DatabaseSettings = Field(default_factory=lambda: DatabaseSettings(path=_resolve_default_db_path()))
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     mosquitto: MosquittoSettings = Field(default_factory=MosquittoSettings)
     cors: CorsSettings = Field(default_factory=CorsSettings)
