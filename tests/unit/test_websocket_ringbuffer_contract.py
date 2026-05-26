@@ -115,3 +115,62 @@ async def test_broadcast_disconnects_dead_connection_on_transport_error():
 
     assert manager.connection_count == 1
     assert good.messages == [{"action": "ping"}]
+
+
+@pytest.mark.asyncio
+async def test_subscribe_filters_datapoints_for_page_scoped_connection():
+    ws = _FakeWebSocket()
+    manager = WebSocketManager()
+    conn_id = await manager.connect(ws, allowed_dp_ids={"allowed-id"})
+
+    manager.subscribe(conn_id, ["allowed-id", "blocked-id"])
+
+    assert manager.subscriptions(conn_id) == {"allowed-id"}
+
+
+@pytest.mark.asyncio
+async def test_ringbuffer_push_is_scoped_for_anonymous_page_connections(monkeypatch):
+    allowed_uuid = uuid4()
+    blocked_uuid = uuid4()
+    allowed_id = str(allowed_uuid)
+    blocked_id = str(blocked_uuid)
+
+    unrestricted_ws = _FakeWebSocket()
+    scoped_ws = _FakeWebSocket()
+    manager = WebSocketManager()
+    await manager.connect(unrestricted_ws)
+    await manager.connect(scoped_ws, allowed_dp_ids={allowed_id})
+
+    class _RegistryStub:
+        def get(self, _dp_id):
+            return SimpleNamespace(name="Contract DP", unit="W")
+
+        def get_value(self, _dp_id):
+            return SimpleNamespace(old_value=1.0)
+
+    monkeypatch.setattr("obs.core.registry.get_registry", lambda: _RegistryStub())
+
+    base_ts = datetime(2026, 5, 6, 19, 44, 49, 123000, tzinfo=UTC)
+    allowed_event = DataValueEvent(
+        datapoint_id=allowed_uuid,
+        value=1.0,
+        quality="good",
+        source_adapter="api",
+        ts=base_ts,
+    )
+    blocked_event = DataValueEvent(
+        datapoint_id=blocked_uuid,
+        value=2.0,
+        quality="good",
+        source_adapter="api",
+        ts=base_ts,
+    )
+
+    await manager.handle_value_event(allowed_event)
+    await manager.handle_value_event(blocked_event)
+
+    scoped_ringbuffer = [m for m in scoped_ws.messages if m.get("action") == "ringbuffer_entry"]
+    unrestricted_ringbuffer = [m for m in unrestricted_ws.messages if m.get("action") == "ringbuffer_entry"]
+
+    assert [m["entry"]["datapoint_id"] for m in scoped_ringbuffer] == [allowed_id]
+    assert [m["entry"]["datapoint_id"] for m in unrestricted_ringbuffer] == [allowed_id, blocked_id]

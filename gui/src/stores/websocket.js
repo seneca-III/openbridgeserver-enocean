@@ -26,7 +26,8 @@ export const useWebSocketStore = defineStore('websocket', () => {
     if (_ws.value?.readyState === WebSocket.OPEN) return
 
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const url   = `${proto}://${window.location.host}/api/v1/ws`
+    const token = localStorage.getItem('access_token')
+    const url   = `${proto}://${window.location.host}/api/v1/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`
     const ws    = new WebSocket(url)
     _ws.value   = ws
 

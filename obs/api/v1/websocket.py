@@ -23,6 +23,10 @@ from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from obs.api.v1.sessions import validate_session
+from obs.db.database import Database, get_db
+from obs.models.visu import PageConfig
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["websocket"])
@@ -37,15 +41,17 @@ class WebSocketManager:
     """Tracks all connected WebSocket clients and their DataPoint subscriptions."""
 
     def __init__(self) -> None:
-        # conn_id → (websocket, subscribed_dp_ids, send_lock)
+        # conn_id → (websocket, subscribed_dp_ids, send_lock, allowed_dp_ids)
+        # allowed_dp_ids: None = unrestricted (authenticated user),
+        # otherwise page-scoped allowlist for anonymous viewer sessions.
         # send_lock serialises concurrent sends on the same WebSocket;
         # concurrent asyncio.gather calls in EventBus would otherwise race.
-        self._connections: dict[str, tuple[WebSocket, set[str], asyncio.Lock]] = {}
+        self._connections: dict[str, tuple[WebSocket, set[str], asyncio.Lock, set[str] | None]] = {}
 
-    async def connect(self, ws: WebSocket) -> str:
+    async def connect(self, ws: WebSocket, allowed_dp_ids: set[str] | None = None) -> str:
         await ws.accept()
         conn_id = str(uuid.uuid4())
-        self._connections[conn_id] = (ws, set(), asyncio.Lock())
+        self._connections[conn_id] = (ws, set(), asyncio.Lock(), allowed_dp_ids)
         logger.debug("WS client connected: %s  (total: %d)", conn_id[:8], len(self._connections))
         return conn_id
 
@@ -65,7 +71,17 @@ class WebSocketManager:
 
     def subscribe(self, conn_id: str, dp_ids: list[str]) -> None:
         if conn_id in self._connections:
-            self._connections[conn_id][1].update(dp_ids)
+            allowed = self._connections[conn_id][3]
+            if allowed is None:
+                self._connections[conn_id][1].update(dp_ids)
+            else:
+                self._connections[conn_id][1].update(i for i in dp_ids if i in allowed)
+
+    def subscriptions(self, conn_id: str) -> set[str]:
+        entry = self._connections.get(conn_id)
+        if entry is None:
+            return set()
+        return set(entry[1])
 
     def unsubscribe(self, conn_id: str, dp_ids: list[str]) -> None:
         if conn_id in self._connections:
@@ -82,7 +98,7 @@ class WebSocketManager:
         entry = self._connections.get(conn_id)
         if entry is None:
             return False
-        ws, _, lock = entry
+        ws, _, lock, _allowed = entry
         async with lock:
             try:
                 await ws.send_json(msg)
@@ -132,7 +148,7 @@ class WebSocketManager:
             "old_v": state.old_value if state else None,
         }
         dead: list[str] = []
-        for conn_id, (_, subs, _lock) in list(self._connections.items()):
+        for conn_id, (_, subs, _lock, _allowed_ids) in list(self._connections.items()):
             if dp_id_str not in subs:
                 continue
             if not await self._send(conn_id, dp_msg):
@@ -154,11 +170,40 @@ class WebSocketManager:
                 "unit": dp.unit if dp else None,
             },
         }
-        await self.broadcast(rb_msg)
+        dead = []
+        for conn_id, (_, _subs, _lock, allowed_ids) in list(self._connections.items()):
+            if allowed_ids is not None and dp_id_str not in allowed_ids:
+                continue
+            if not await self._send(conn_id, rb_msg):
+                dead.append(conn_id)
+        for conn_id in dead:
+            await self.disconnect(conn_id)
 
     @property
     def connection_count(self) -> int:
         return len(self._connections)
+
+
+async def _page_allowed_datapoints(db: Database, page_id: str) -> set[str] | None:
+    """Return datapoint IDs referenced by a PAGE node, or None if page does not exist."""
+    row = await db.fetchone("SELECT page_config FROM visu_nodes WHERE id = ? AND type = 'PAGE'", (page_id,))
+    if not row or not row["page_config"]:
+        return None
+    try:
+        page = PageConfig.model_validate_json(row["page_config"])
+    except Exception:
+        return None
+
+    ids: set[str] = set()
+    for widget in page.widgets:
+        if widget.datapoint_id:
+            ids.add(widget.datapoint_id)
+        if widget.status_datapoint_id:
+            ids.add(widget.status_datapoint_id)
+        for value in widget.config.values():
+            if isinstance(value, str):
+                ids.add(value)
+    return ids
 
 
 # ---------------------------------------------------------------------------
@@ -195,25 +240,58 @@ def init_ws_manager() -> WebSocketManager:
 async def websocket_endpoint(
     ws: WebSocket,
 ) -> None:
-    # Auth: optional — authenticated users get a user context, anonymous users
-    # can still subscribe to public datapoints (read-only push channel).
+    # Auth:
+    # - authenticated users: unrestricted subscriptions/live pushes
+    # - anonymous users: only allowed with page context and page-scoped datapoints
     from obs.api.auth import decode_token
+    from obs.api.v1.visu import _resolve_access_with_node
 
+    resolved_token: str | None = None
     auth_header = ws.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
-        resolved_token: str | None = auth_header[7:]
-    else:
-        resolved_token = None
+        resolved_token = auth_header[7:]
+    if resolved_token is None:
+        query_token = ws.query_params.get("token")
+        if query_token:
+            resolved_token = query_token
 
+    user: str | None = None
     if resolved_token is not None:
         try:
-            decode_token(resolved_token)
+            user = decode_token(resolved_token)
         except Exception:
             await ws.close(code=4001, reason="Invalid token")
             return
 
+    allowed_dp_ids: set[str] | None = None
+    if user is None:
+        page_id = ws.query_params.get("page_id")
+        if not page_id:
+            await ws.close(code=4001, reason="Authentication required")
+            return
+
+        db = get_db()
+        access, defining_node_id = await _resolve_access_with_node(db, page_id)
+        if access == "protected":
+            session_token = ws.query_params.get("session_token")
+            validate_id = defining_node_id or page_id
+            if not session_token or not validate_session(session_token, validate_id):
+                await ws.close(code=4003, reason="Valid session token required")
+                return
+        elif access == "user":
+            await ws.close(code=4001, reason="Authentication required")
+            return
+        elif access not in ("public", "readonly"):
+            await ws.close(code=4001, reason="Authentication required")
+            return
+
+        allowed_dp_ids = await _page_allowed_datapoints(db, page_id)
+        if allowed_dp_ids is None:
+            await ws.close(code=4003, reason="Page not found")
+            return
+
     manager = get_ws_manager()
-    conn_id = await manager.connect(ws)
+    conn_id = await manager.connect(ws, allowed_dp_ids=allowed_dp_ids)
 
     try:
         while True:
@@ -228,8 +306,11 @@ async def websocket_endpoint(
 
             if action == "subscribe":
                 ids = [str(i) for i in data.get("ids", [])]
+                before = manager.subscriptions(conn_id)
                 manager.subscribe(conn_id, ids)
-                await ws.send_json({"action": "subscribed", "ids": ids})
+                after = manager.subscriptions(conn_id)
+                added = [i for i in ids if i in after and i not in before]
+                await ws.send_json({"action": "subscribed", "ids": added})
 
             elif action == "unsubscribe":
                 ids = [str(i) for i in data.get("ids", [])]

@@ -8,14 +8,20 @@
  */
 
 import { ref, readonly } from 'vue'
-import { getJwt } from '@/api/client'
+import { getJwt, getWriteContext } from '@/api/client'
 
 type MessageHandler = (data: Record<string, unknown>) => void
 
 const WS_URL = () => {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws'
   const jwt = getJwt()
-  return `${proto}://${location.host}/api/v1/ws${jwt ? `?token=${jwt}` : ''}`
+  const ctx = getWriteContext()
+  const params = new URLSearchParams()
+  if (jwt) params.set('token', jwt)
+  if (ctx.pageId) params.set('page_id', ctx.pageId)
+  if (ctx.sessionToken) params.set('session_token', ctx.sessionToken)
+  const query = params.toString()
+  return `${proto}://${location.host}/api/v1/ws${query ? `?${query}` : ''}`
 }
 
 // ── Singleton-State ───────────────────────────────────────────────────────────
