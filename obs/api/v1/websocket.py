@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
@@ -196,7 +197,12 @@ class WebSocketManager:
         return len(self._connections)
 
 
-async def _page_allowed_datapoints(db: Database, page_id: str) -> set[str] | None:
+async def _page_allowed_datapoints(
+    db: Database,
+    page_id: str,
+    *,
+    widget_ref_access_check: Callable[[str], Awaitable[bool]] | None = None,
+) -> set[str] | None:
     """Return datapoint IDs referenced by a PAGE node, or None if page does not exist."""
 
     def _collect_strings(value: Any, out: set[str]) -> None:
@@ -249,6 +255,8 @@ async def _page_allowed_datapoints(db: Database, page_id: str) -> set[str] | Non
         source_page_id = _non_empty_str(widget.config.get("source_page_id"))
         source_widget_name = _non_empty_str(widget.config.get("source_widget_name"))
         if not source_page_id or not source_widget_name:
+            return
+        if widget_ref_access_check is not None and not await widget_ref_access_check(source_page_id):
             return
 
         ref_key = (source_page_id, source_widget_name)
@@ -369,9 +377,9 @@ async def websocket_endpoint(
             return
 
         db = get_db()
+        session_token = ws.query_params.get("session_token")
         access, defining_node_id = await _resolve_access_with_node(db, page_id)
         if access == "protected":
-            session_token = ws.query_params.get("session_token")
             validate_id = defining_node_id or page_id
             if not session_token or not validate_session(session_token, validate_id):
                 await ws.close(code=4003, reason="Valid session token required")
@@ -383,7 +391,20 @@ async def websocket_endpoint(
             await ws.close(code=4001, reason="Authentication required")
             return
 
-        allowed_dp_ids = await _page_allowed_datapoints(db, page_id)
+        async def _can_access_widget_ref_page(source_page_id: str) -> bool:
+            source_access, source_defining_node_id = await _resolve_access_with_node(db, source_page_id)
+            if source_access in ("public", "readonly"):
+                return True
+            if source_access == "protected":
+                source_validate_id = source_defining_node_id or source_page_id
+                return bool(session_token and validate_session(session_token, source_validate_id))
+            return False
+
+        allowed_dp_ids = await _page_allowed_datapoints(
+            db,
+            page_id,
+            widget_ref_access_check=_can_access_widget_ref_page,
+        )
         if allowed_dp_ids is None:
             await ws.close(code=4003, reason="Page not found")
             return

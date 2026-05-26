@@ -282,3 +282,71 @@ async def test_page_allowed_datapoints_includes_widgetref_target_datapoints():
     assert target_dp_id in ids
     assert target_status_dp_id in ids
     assert nested_target_dp_id in ids
+
+
+@pytest.mark.asyncio
+async def test_page_allowed_datapoints_skips_widgetref_target_when_access_denied():
+    target_dp_id = str(uuid4())
+
+    page_config_main = {
+        "grid_cols": 12,
+        "grid_row_height": 80,
+        "background": None,
+        "widgets": [
+            {
+                "id": str(uuid4()),
+                "name": "ref-host",
+                "type": "widget_ref",
+                "x": 0,
+                "y": 0,
+                "w": 2,
+                "h": 2,
+                "datapoint_id": None,
+                "status_datapoint_id": None,
+                "config": {
+                    "source_page_id": "page-target",
+                    "source_widget_name": "kitchen-widget",
+                },
+            },
+        ],
+    }
+
+    page_config_target = {
+        "grid_cols": 12,
+        "grid_row_height": 80,
+        "background": None,
+        "widgets": [
+            {
+                "id": str(uuid4()),
+                "name": "kitchen-widget",
+                "type": "horizontal_bar",
+                "x": 0,
+                "y": 0,
+                "w": 2,
+                "h": 2,
+                "datapoint_id": target_dp_id,
+                "status_datapoint_id": None,
+                "config": {},
+            },
+        ],
+    }
+
+    class _DbStub:
+        async def fetchone(self, _sql, params):
+            if params[0] == "page-main":
+                return {"page_config": json.dumps(page_config_main)}
+            if params[0] == "page-target":
+                return {"page_config": json.dumps(page_config_target)}
+            return None
+
+    async def _deny_target(page_id: str) -> bool:
+        return page_id != "page-target"
+
+    ids = await _page_allowed_datapoints(
+        _DbStub(),
+        "page-main",
+        widget_ref_access_check=_deny_target,
+    )
+
+    assert ids is not None
+    assert target_dp_id not in ids
