@@ -128,7 +128,9 @@ class TestSanitizeSvg:
         assert "onload" not in out
 
     def test_removes_script_and_foreignobject(self):
-        payload = b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><foreignObject><div>bad</div></foreignObject><path d="M1 1"/></svg>'
+        payload = (
+            b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script><foreignObject><div>bad</div></foreignObject><path d="M1 1"/></svg>'
+        )
         out = _sanitize_svg(payload).decode("utf-8")
         assert "<script" not in out
         assert "<foreignObject" not in out
@@ -140,3 +142,23 @@ class TestSanitizeSvg:
 
         with pytest.raises(HTTPException):
             _sanitize_svg(b"<svg><path></svg")
+
+    def test_strips_obfuscated_javascript_href(self):
+        payload = b'<svg xmlns="http://www.w3.org/2000/svg"><a href="java&#10;script:alert(1)"><path d="M1 1"/></a></svg>'
+        out = _sanitize_svg(payload).decode("utf-8")
+        assert "href=" not in out
+
+    def test_rejects_too_deep_svg(self):
+        import pytest
+        from fastapi import HTTPException
+
+        deep = "<svg>" + ("<g>" * 300) + ("</g>" * 300) + "</svg>"
+        with pytest.raises(HTTPException) as exc_info:
+            _sanitize_svg(deep.encode("utf-8"))
+        assert exc_info.value.status_code == 422
+
+    def test_preserves_plain_svg_root_tag(self):
+        payload = b'<svg xmlns="http://www.w3.org/2000/svg"><path d="M1 1"/></svg>'
+        out = _sanitize_svg(payload).decode("utf-8")
+        assert out.startswith("<svg")
+        assert "<ns0:svg" not in out

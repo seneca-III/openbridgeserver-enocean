@@ -135,13 +135,16 @@ async def get_current_user(
 
     if api_key:
         key_hash = hash_api_key(api_key)
-        row = await db.fetchone("SELECT name FROM api_keys WHERE key_hash=?", (key_hash,))
+        row = await db.fetchone(
+            "SELECT COALESCE(NULLIF(owner, ''), name) AS subject FROM api_keys WHERE key_hash=?",
+            (key_hash,),
+        )
         if not row:
             raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid API key")
         # Update last_used_at
         now = datetime.now(UTC).isoformat()
         await db.execute_and_commit("UPDATE api_keys SET last_used_at=? WHERE key_hash=?", (now, key_hash))
-        return row["name"]
+        return row["subject"]
 
     raise HTTPException(
         status.HTTP_401_UNAUTHORIZED,

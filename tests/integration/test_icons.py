@@ -169,6 +169,25 @@ async def test_import_invalid_zip(client, auth_headers, icons_tmp):
     assert resp.status_code == 400
 
 
+@pytest.mark.asyncio
+async def test_import_svg_with_admin_api_key(client, auth_headers, icons_tmp):
+    create_key = await client.post(
+        "/api/v1/auth/apikeys",
+        headers=auth_headers,
+        json={"name": "icons-admin-import"},
+    )
+    assert create_key.status_code == 201, create_key.text
+    api_key = create_key.json()["key"]
+
+    resp = await client.post(
+        "/api/v1/icons/import",
+        headers={"X-API-Key": api_key},
+        files=[("files", ("home.svg", _MINIMAL_SVG, "image/svg+xml"))],
+    )
+    assert resp.status_code == 200, resp.text
+    assert (icons_tmp / "home.svg").exists()
+
+
 # ---------------------------------------------------------------------------
 # GET /icons/{name} — get single icon
 # ---------------------------------------------------------------------------
