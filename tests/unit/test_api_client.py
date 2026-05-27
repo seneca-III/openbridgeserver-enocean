@@ -548,3 +548,75 @@ class TestApiClientResponseType:
         resp = _mock_response(200, text="plain text")
         outputs = self._run_with_response_type("text", resp)
         assert outputs["ac"]["response"] == "plain text"
+
+
+# ===========================================================================
+# Manager: notify_pushover image_url security hardening
+# ===========================================================================
+
+
+class TestNotifyPushoverImageUrlSecurity:
+    def _run_notify_pushover(self, image_url: str) -> dict:
+        manager = _make_manager()
+        n = node(
+            "po",
+            "notify_pushover",
+            {
+                "app_token": "app-token",
+                "user_key": "user-key",
+                "message": "hello",
+                "image_url": image_url,
+            },
+        )
+        flow = _flow([n])
+        graph_id = "g-po"
+        manager._graphs[graph_id] = ("notify", True, flow)
+        manager._node_state[graph_id] = {}
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            return asyncio.run(manager._execute_graph(graph_id, "notify", flow, {"po": {"trigger": True}}))
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    def test_rejects_non_global_resolved_ip(self, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_client.get = AsyncMock()
+        mock_client.post = AsyncMock()
+
+        fake_loop = MagicMock()
+        fake_loop.getaddrinfo = AsyncMock(return_value=[(0, 0, 0, "", ("100.64.0.1", 443))])
+        with patch("obs.logic.manager.asyncio.get_running_loop", return_value=fake_loop):
+            outputs = self._run_notify_pushover("https://example.com/image.png")
+
+        mock_client.get.assert_not_called()
+        mock_client.post.assert_not_called()
+        assert outputs["po"]["sent"] is False
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    def test_binds_fetch_to_validated_ip_with_host_and_sni(self, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        img_resp = MagicMock()
+        img_resp.raise_for_status = MagicMock()
+        img_resp.headers = {"content-type": "image/png"}
+        img_resp.content = b"\x89PNG"
+        mock_client.get = AsyncMock(return_value=img_resp)
+
+        post_resp = MagicMock()
+        post_resp.raise_for_status = MagicMock()
+        mock_client.post = AsyncMock(return_value=post_resp)
+
+        fake_loop = MagicMock()
+        fake_loop.getaddrinfo = AsyncMock(return_value=[(0, 0, 0, "", ("93.184.216.34", 443))])
+        with patch("obs.logic.manager.asyncio.get_running_loop", return_value=fake_loop):
+            outputs = self._run_notify_pushover("https://example.com/path/image.png?size=1")
+
+        assert outputs["po"]["sent"] is True
+        assert mock_client.get.await_count == 1
+        get_call = mock_client.get.await_args
+        assert get_call.args[0] == "https://93.184.216.34/path/image.png?size=1"
+        assert get_call.kwargs["headers"] == {"Host": "example.com"}
+        assert get_call.kwargs["extensions"] == {"sni_hostname": "example.com"}
+        assert get_call.kwargs["follow_redirects"] is False

@@ -16,7 +16,7 @@ import socket
 import uuid
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -40,20 +40,44 @@ def _msg_to_str(v: object) -> str:
     return str(v)
 
 
-def _is_safe_remote_image_url(url: str) -> bool:
-    """Best-effort SSRF guard for remote image downloads."""
+def _is_global_ip(ip_text: str) -> bool:
     try:
-        parsed = urlparse(url)
-        if parsed.scheme.lower() != "https" or not parsed.hostname:
-            return False
-        infos = socket.getaddrinfo(parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)
-        for info in infos:
-            ip = ipaddress.ip_address(info[4][0])
-            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_multicast or ip.is_reserved or ip.is_unspecified:
-                return False
-        return True
-    except Exception:
+        return ipaddress.ip_address(ip_text).is_global
+    except ValueError:
         return False
+
+
+async def _resolve_safe_remote_image_targets(url: str) -> tuple[list[str], str, str]:
+    """Resolve a public HTTPS URL to global IP targets for rebinding-safe fetches."""
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() != "https" or not parsed.hostname:
+        raise ValueError("image_url must be a public https URL")
+
+    host = parsed.hostname
+    port = parsed.port or 443
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+
+    ips: list[str] = []
+    seen: set[str] = set()
+    for info in infos:
+        ip_text = info[4][0]
+        if ip_text in seen or not _is_global_ip(ip_text):
+            continue
+        seen.add(ip_text)
+        ips.append(ip_text)
+
+    if not ips:
+        raise ValueError("image_url must resolve to global IP addresses")
+
+    host_header = host if parsed.port in (None, 443) else f"{host}:{parsed.port}"
+    path = parsed.path or "/"
+    targets: list[str] = []
+    for ip_text in ips:
+        ip_host = f"[{ip_text}]" if ":" in ip_text else ip_text
+        netloc = ip_host if parsed.port in (None, 443) else f"{ip_host}:{parsed.port}"
+        targets.append(urlunsplit(("https", netloc, path, parsed.query, "")))
+    return targets, host_header, host
 
 
 _THROTTLE_UNITS: dict[str, float] = {
@@ -541,9 +565,24 @@ class LogicManager:
 
                     if image_url:
                         # Download image and attach as multipart
-                        if not _is_safe_remote_image_url(image_url):
-                            raise ValueError("image_url must be a public https URL")
-                        img_r = await client.get(image_url, timeout=10.0, follow_redirects=False)
+                        targets, host_header, sni_hostname = await _resolve_safe_remote_image_targets(image_url)
+                        img_r = None
+                        last_err: Exception | None = None
+                        for target in targets:
+                            try:
+                                img_r = await client.get(
+                                    target,
+                                    timeout=10.0,
+                                    follow_redirects=False,
+                                    headers={"Host": host_header},
+                                    extensions={"sni_hostname": sni_hostname},
+                                )
+                                img_r.raise_for_status()
+                                break
+                            except Exception as exc:
+                                last_err = exc
+                        if img_r is None:
+                            raise ValueError(f"image_url fetch failed: {last_err}")
                         img_r.raise_for_status()
                         content_type = img_r.headers.get("content-type", "").split(";")[0].strip().lower()
                         if not content_type.startswith("image/"):
