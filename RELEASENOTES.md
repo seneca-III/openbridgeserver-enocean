@@ -19,7 +19,7 @@
 * General: Implement contract tests for dependencies
 * Backend: History give only last 1000 entries now default 10'000 with amximum of 100'000
 * Adapter ioBroker browse/import preview are blocked when the instance status lags behind the live socket connection
-* Adapter ioBroker Security (Upstream PR #PENDING): skip watchdog resync publishes when state reads fail
+* Adapter ioBroker Security (Upstream PR #566): skip watchdog resync publishes when state reads fail
 * Adapter: "Zeitschaltuhr" support for multiple "Schaltpunkte" and own public holidays
 * Logicmodule: Functional Block: Sommer/Winter Umschaltung nach DIN Functional Block does now work as expected
 * Logicmodule: Functional Block: Read object / Write object: Renamed objects will be reflected in the Logicmodule now
