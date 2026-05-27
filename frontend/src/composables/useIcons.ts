@@ -7,41 +7,39 @@ const svgCache: Record<string, string> = {}  // name → normalised SVG string
 let listPromise: Promise<void> | null = null
 const BLOCKED_URL_SCHEMES = ['javascript:', 'data:', 'http:', 'https:']
 
-function normalizeSvg(raw: string): string {
-  // Parse and sanitize untrusted SVG to prevent script execution via v-html.
+function sanitizeSvg(raw: string): string {
   const parser = new DOMParser()
   const doc = parser.parseFromString(raw, 'image/svg+xml')
-  const root = doc.documentElement
+  const svg = doc.documentElement
 
-  if (!root || root.tagName.toLowerCase() !== 'svg') return ''
+  if (!svg || svg.tagName.toLowerCase() !== 'svg') return ''
 
   // Drop executable, externally embeddable, or dynamic mutation content.
-  root.querySelectorAll('script,foreignObject,iframe,object,embed,audio,video,animate,set,animateMotion,animateTransform').forEach((el) => el.remove())
+  doc.querySelectorAll('script,foreignObject,iframe,object,embed,audio,video,animate,set,animateMotion,animateTransform').forEach((el) => el.remove())
 
-  for (const el of [root, ...root.querySelectorAll('*')]) {
-    for (const attr of [...el.attributes]) {
+  for (const el of [svg, ...Array.from(doc.querySelectorAll('*'))]) {
+    for (const attr of Array.from(el.attributes)) {
       const name = attr.name.toLowerCase()
       const localName = (attr.localName || attr.name).toLowerCase()
       const normalizedValue = attr.value.toLowerCase().replace(/[\u0000-\u0020]+/g, '')
 
-      // Remove event handlers and dangerous URL-bearing attributes.
+      if (name === 'width' || name === 'height') {
+        el.removeAttribute(attr.name)
+        continue
+      }
+
       if (name.startsWith('on')) {
         el.removeAttribute(attr.name)
         continue
       }
+
       if ((localName === 'href' || localName === 'src') && BLOCKED_URL_SCHEMES.some((scheme) => normalizedValue.startsWith(scheme))) {
         el.removeAttribute(attr.name)
       }
     }
   }
 
-  // Strip fixed width/height from root <svg> so CSS can control the size
-  return root.outerHTML.replace(/<svg([^>]*)>/, (_, attrs: string) => {
-    const cleaned = attrs
-      .replace(/\s+width="[^"]*"/g, '')
-      .replace(/\s+height="[^"]*"/g, '')
-    return `<svg${cleaned}>`
-  })
+  return svg.outerHTML
 }
 
 export function useIcons() {
@@ -52,7 +50,7 @@ export function useIcons() {
       .then(({ icons }) => {
         // Populate cache from the list response (content is already included)
         for (const icon of icons) {
-          svgCache[icon.name] = normalizeSvg(icon.content)
+          svgCache[icon.name] = sanitizeSvg(icon.content)
         }
         iconNames.value = icons.map((i) => i.name)
       })
