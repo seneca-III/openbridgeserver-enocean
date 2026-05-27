@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { marked } from 'marked'
+import { useI18n } from 'vue-i18n'
 import type { DataPointValue } from '@/types'
 
 function escapeHtml(raw: string): string {
@@ -20,6 +21,8 @@ marked.use({
     },
   },
 })
+
+const { t } = useI18n()
 
 const props = defineProps<{
   config: Record<string, unknown>
@@ -65,7 +68,7 @@ const html = computed(() => {
       class="markdown-body"
       v-html="html"
     />
-    <span v-else class="text-gray-400 dark:text-gray-600 text-sm italic">Kein Text</span>
+    <span v-else class="text-gray-400 dark:text-gray-600 text-sm italic">{{ t('widgets.text.noText') }}</span>
   </div>
 </template>
 
