@@ -45,8 +45,11 @@ class WebSocketManager:
         # concurrent asyncio.gather calls in EventBus would otherwise race.
         self._connections: dict[str, tuple[WebSocket, set[str], asyncio.Lock]] = {}
 
-    async def connect(self, ws: WebSocket) -> str:
-        await ws.accept()
+    async def connect(self, ws: WebSocket, subprotocol: str | None = None) -> str:
+        if subprotocol:
+            await ws.accept(subprotocol=subprotocol)
+        else:
+            await ws.accept()
         conn_id = str(uuid.uuid4())
         self._connections[conn_id] = (ws, set(), asyncio.Lock())
         logger.debug("WS client connected: %s  (total: %d)", conn_id[:8], len(self._connections))
@@ -198,16 +201,20 @@ def init_ws_manager() -> WebSocketManager:
 async def websocket_endpoint(
     ws: WebSocket,
 ) -> None:
+    requested_subprotocol = _requested_jwt_subprotocol(ws)
     auth_ok, reason = await _authenticate_ws_request(ws)
     if not auth_ok:
         # Accept then close so browser clients receive a concrete WS close code
         # (e.g. 4001) instead of only an HTTP upgrade rejection.
-        await ws.accept()
+        if requested_subprotocol:
+            await ws.accept(subprotocol=requested_subprotocol)
+        else:
+            await ws.accept()
         await ws.close(code=4001, reason=reason)
         return
 
     manager = get_ws_manager()
-    conn_id = await manager.connect(ws)
+    conn_id = await manager.connect(ws, subprotocol=requested_subprotocol)
 
     try:
         while True:
@@ -243,10 +250,17 @@ async def websocket_endpoint(
 
 def _extract_subprotocol_jwt(ws: WebSocket) -> str | None:
     """Extract JWT from subprotocol token: `obs.jwt.<jwt>`."""
+    requested = _requested_jwt_subprotocol(ws)
+    if requested:
+        return requested.removeprefix("obs.jwt.")
+    return None
+
+
+def _requested_jwt_subprotocol(ws: WebSocket) -> str | None:
     subprotocols = ws.scope.get("subprotocols", [])
     for subprotocol in subprotocols:
         if subprotocol.startswith("obs.jwt.") and len(subprotocol) > len("obs.jwt."):
-            return subprotocol.removeprefix("obs.jwt.")
+            return subprotocol
     return None
 
 
@@ -287,4 +301,42 @@ async def _authenticate_ws_request(ws: WebSocket) -> tuple[bool, str]:
         await db.execute_and_commit("UPDATE api_keys SET last_used_at=? WHERE key_hash=?", (now, key_hash))
         return True, "OK"
 
+    page_scope_ok, page_scope_reason = await _authenticate_visu_page_scope(ws)
+    if page_scope_ok:
+        return True, "OK"
+    if page_scope_reason != "Missing credentials":
+        return False, page_scope_reason
+
     return False, "Missing credentials"
+
+
+async def _authenticate_visu_page_scope(ws: WebSocket) -> tuple[bool, str]:
+    """Validate page-scoped visu websocket access without JWT.
+
+    Query params:
+    - page_id: required for page-scoped mode
+    - session_token: required for protected pages
+    """
+    page_id = ws.query_params.get("page_id")
+    if not page_id:
+        return False, "Missing credentials"
+
+    db = get_db()
+    page_row = await db.fetchone("SELECT type FROM visu_nodes WHERE id = ?", (page_id,))
+    if not page_row or page_row["type"] != "PAGE":
+        return False, "Invalid visu page"
+
+    from obs.api.v1.sessions import validate_session
+    from obs.api.v1.visu import _resolve_access_with_node
+
+    access, defining_node_id = await _resolve_access_with_node(db, page_id)
+    if access in ("public", "readonly"):
+        return True, "OK"
+    if access == "protected":
+        session_token = ws.query_params.get("session_token")
+        validate_id = defining_node_id or page_id
+        if session_token and validate_session(session_token, validate_id):
+            return True, "OK"
+        return False, "Valid session token required"
+
+    return False, "Authentication required"

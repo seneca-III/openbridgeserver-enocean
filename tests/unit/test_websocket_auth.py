@@ -19,10 +19,12 @@ class _FakeWebSocket:
         self.query_params = query_params or {}
         self.scope = {"subprotocols": subprotocols or []}
         self.accepted = False
+        self.accepted_subprotocol: str | None = None
         self.close_calls: list[tuple[int | None, str | None]] = []
 
-    async def accept(self) -> None:
+    async def accept(self, subprotocol: str | None = None) -> None:
         self.accepted = True
+        self.accepted_subprotocol = subprotocol
 
     async def close(self, code: int | None = None, reason: str | None = None) -> None:
         self.close_calls.append((code, reason))
@@ -35,13 +37,16 @@ class _FakeWebSocket:
 
 
 class _DbStub:
-    def __init__(self, has_key: bool) -> None:
+    def __init__(self, has_key: bool, page_type: str | None = None) -> None:
         self.has_key = has_key
+        self.page_type = page_type
         self.updated = False
 
-    async def fetchone(self, _query: str, _params: tuple):
-        if self.has_key:
+    async def fetchone(self, query: str, _params: tuple):
+        if "FROM api_keys" in query and self.has_key:
             return {"name": "automation-client"}
+        if "FROM visu_nodes" in query and self.page_type:
+            return {"type": self.page_type}
         return None
 
     async def execute_and_commit(self, _query: str, _params: tuple) -> None:
@@ -74,6 +79,7 @@ async def test_websocket_endpoint_closes_invalid_subprotocol_token_with_4001(mon
     ws = _FakeWebSocket(subprotocols=["obs.jwt.invalid.jwt.token"])
     await ws_api.websocket_endpoint(ws)
     assert ws.accepted is True
+    assert ws.accepted_subprotocol == "obs.jwt.invalid.jwt.token"
     assert ws.close_calls == [(4001, "Invalid token")]
 
 
@@ -94,6 +100,7 @@ async def test_websocket_endpoint_accepts_subprotocol_jwt(monkeypatch):
         ws_api.reset_ws_manager()
 
     assert ws.accepted is True
+    assert ws.accepted_subprotocol == "obs.jwt.valid.jwt.token"
 
 
 @pytest.mark.asyncio
@@ -111,3 +118,60 @@ async def test_websocket_endpoint_accepts_api_key(monkeypatch):
 
     assert ws.accepted is True
     assert db.updated is True
+
+
+@pytest.mark.asyncio
+async def test_websocket_endpoint_accepts_public_visu_page_scope(monkeypatch):
+    db = _DbStub(has_key=False, page_type="PAGE")
+    monkeypatch.setattr(ws_api, "get_db", lambda: db)
+    monkeypatch.setattr("obs.api.v1.visu._resolve_access_with_node", _resolve_public_access)
+
+    ws = _FakeWebSocket(query_params={"page_id": "page-public"})
+    ws_api.init_ws_manager()
+    try:
+        await ws_api.websocket_endpoint(ws)
+    finally:
+        ws_api.reset_ws_manager()
+
+    assert ws.accepted is True
+    assert ws.close_calls == [(None, None)]
+
+
+@pytest.mark.asyncio
+async def test_websocket_endpoint_rejects_protected_visu_page_without_valid_session(monkeypatch):
+    db = _DbStub(has_key=False, page_type="PAGE")
+    monkeypatch.setattr(ws_api, "get_db", lambda: db)
+    monkeypatch.setattr("obs.api.v1.visu._resolve_access_with_node", _resolve_protected_access)
+    monkeypatch.setattr("obs.api.v1.sessions.validate_session", lambda _token, _node_id: False)
+
+    ws = _FakeWebSocket(query_params={"page_id": "page-protected"})
+    await ws_api.websocket_endpoint(ws)
+
+    assert ws.accepted is True
+    assert ws.close_calls == [(4001, "Valid session token required")]
+
+
+@pytest.mark.asyncio
+async def test_websocket_endpoint_accepts_protected_visu_page_with_valid_session(monkeypatch):
+    db = _DbStub(has_key=False, page_type="PAGE")
+    monkeypatch.setattr(ws_api, "get_db", lambda: db)
+    monkeypatch.setattr("obs.api.v1.visu._resolve_access_with_node", _resolve_protected_access)
+    monkeypatch.setattr("obs.api.v1.sessions.validate_session", lambda token, node_id: token == "ok" and node_id == "node-protected")
+
+    ws = _FakeWebSocket(query_params={"page_id": "page-protected", "session_token": "ok"})
+    ws_api.init_ws_manager()
+    try:
+        await ws_api.websocket_endpoint(ws)
+    finally:
+        ws_api.reset_ws_manager()
+
+    assert ws.accepted is True
+    assert ws.close_calls == [(None, None)]
+
+
+async def _resolve_public_access(_db, _node_id: str) -> tuple[str, str | None]:
+    return "public", None
+
+
+async def _resolve_protected_access(_db, _node_id: str) -> tuple[str, str | None]:
+    return "protected", "node-protected"
