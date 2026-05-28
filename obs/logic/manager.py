@@ -237,17 +237,38 @@ def _build_cookie_header(cookie_store: dict[tuple[str, str, str, bool], tuple[st
     is_https_request = parsed.scheme.lower() == "https"
     matched: list[tuple[str, str]] = []
     for (domain, path, name, host_only), (value, secure) in cookie_store.items():
-        if host_only and hostname != domain:
-            continue
-        if not host_only and not _cookie_domain_matches(hostname, domain):
-            continue
-        if not _cookie_path_matches(req_path, path):
-            continue
-        secure_only = bool(secure)
-        if secure_only and not is_https_request:
+        if not _should_send_cookie(
+            req_hostname=hostname,
+            req_path=req_path,
+            req_is_https=is_https_request,
+            cookie_domain=domain,
+            cookie_path=path,
+            cookie_host_only=host_only,
+            cookie_secure=secure,
+        ):
             continue
         matched.append((name, value))
     return "; ".join(f"{name}={value}" for name, value in matched)
+
+
+def _should_send_cookie(
+    req_hostname: str,
+    req_path: str,
+    req_is_https: bool,
+    cookie_domain: str,
+    cookie_path: str,
+    cookie_host_only: bool,
+    cookie_secure: bool,
+) -> bool:
+    if cookie_host_only and req_hostname != cookie_domain:
+        return False
+    if not cookie_host_only and not _cookie_domain_matches(req_hostname, cookie_domain):
+        return False
+    if not _cookie_path_matches(req_path, cookie_path):
+        return False
+    if bool(cookie_secure) and not req_is_https:
+        return False
+    return True
 
 
 def _build_ical_fetch_targets(url: str) -> tuple[list[str], dict[str, str], dict[str, str]]:
