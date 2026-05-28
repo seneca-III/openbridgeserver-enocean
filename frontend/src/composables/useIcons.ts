@@ -6,6 +6,30 @@ const iconNames = ref<string[]>([])
 const svgCache: Record<string, string> = {}  // name → normalised SVG string
 let listPromise: Promise<void> | null = null
 const BLOCKED_URL_SCHEMES = ['javascript:', 'data:', 'http:', 'https:']
+const URL_FUNCTION_ATTRIBUTES = new Set([
+  'fill',
+  'stroke',
+  'filter',
+  'clip-path',
+  'mask',
+  'marker-start',
+  'marker-mid',
+  'marker-end',
+  'cursor',
+])
+
+function isBlockedUrlReference(rawValue: string): boolean {
+  const normalized = rawValue.toLowerCase().replace(/[\u0000-\u0020]+/g, '')
+  return normalized.startsWith('//') || BLOCKED_URL_SCHEMES.some((scheme) => normalized.startsWith(scheme))
+}
+
+function hasBlockedCssUrlFunction(value: string): boolean {
+  for (const match of value.matchAll(/url\(([^)]*)\)/gi)) {
+    const rawRef = (match[1] || '').trim().replace(/^['"]|['"]$/g, '')
+    if (isBlockedUrlReference(rawRef)) return true
+  }
+  return false
+}
 
 function sanitizeSvg(raw: string): string {
   const parser = new DOMParser()
@@ -43,6 +67,11 @@ function sanitizeSvg(raw: string): string {
         normalizedValue.startsWith('//') ||
         BLOCKED_URL_SCHEMES.some((scheme) => normalizedValue.startsWith(scheme))
       )) {
+        el.removeAttribute(attr.name)
+        continue
+      }
+
+      if (URL_FUNCTION_ATTRIBUTES.has(localName) && hasBlockedCssUrlFunction(attr.value)) {
         el.removeAttribute(attr.name)
       }
     }
