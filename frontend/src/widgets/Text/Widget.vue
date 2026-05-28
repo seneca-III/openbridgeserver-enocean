@@ -14,13 +14,74 @@ function escapeHtml(raw: string): string {
   }[ch] ?? ch))
 }
 
-marked.use({
-  renderer: {
-    html({ text }) {
-      return escapeHtml(text)
-    },
+function stripAsciiControlsAndWhitespace(raw: string): string {
+  return raw.replace(/[\u0000-\u001F\u007F-\u009F\s]+/g, '')
+}
+
+function isSafeUrl(raw: string): boolean {
+  const value = raw.trim()
+  if (!value) return false
+
+  if (value.startsWith('#')) return true
+  if (value.startsWith('/')) return true
+  if (value.startsWith('./') || value.startsWith('../')) return true
+
+  const normalized = stripAsciiControlsAndWhitespace(value).toLowerCase()
+  if (
+    normalized.startsWith('javascript:') ||
+    normalized.startsWith('vbscript:') ||
+    normalized.startsWith('data:') ||
+    normalized.startsWith('file:')
+  ) {
+    return false
+  }
+
+  const hasExplicitScheme = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(value)
+
+  try {
+    const parsed = new URL(value, 'https://openbridge.invalid')
+    if (!hasExplicitScheme) return true
+    return (
+      parsed.protocol === 'http:' ||
+      parsed.protocol === 'https:' ||
+      parsed.protocol === 'mailto:' ||
+      parsed.protocol === 'tel:'
+    )
+  } catch {
+    return false
+  }
+}
+
+function sanitizeRenderedHtml(html: string): string {
+  const doc = new DOMParser().parseFromString(`<div>${html}</div>`, 'text/html')
+  const root = doc.body.firstElementChild
+  if (!root) return ''
+
+  root.querySelectorAll('script, iframe, object, embed, form, meta, link').forEach((el) => el.remove())
+
+  for (const el of Array.from(root.querySelectorAll('*'))) {
+    for (const attr of Array.from(el.attributes)) {
+      const name = attr.name.toLowerCase()
+
+      if (name.startsWith('on')) {
+        el.removeAttribute(attr.name)
+        continue
+      }
+
+      if (name === 'href' || name === 'src' || name === 'xlink:href') {
+        if (!isSafeUrl(attr.value)) el.removeAttribute(attr.name)
+      }
+    }
+  }
+
+  return root.innerHTML
+}
+
+const markdownRenderer = {
+  html({ text }: { text: string }) {
+    return escapeHtml(text)
   },
-})
+}
 
 const { t } = useI18n()
 
@@ -54,7 +115,8 @@ const alignClass = computed(() => ({
 const html = computed(() => {
   const raw = content.value.trim()
   if (!raw) return ''
-  return marked.parse(raw) as string
+  const rendered = marked.parse(raw, { renderer: markdownRenderer }) as string
+  return sanitizeRenderedHtml(rendered)
 })
 </script>
 

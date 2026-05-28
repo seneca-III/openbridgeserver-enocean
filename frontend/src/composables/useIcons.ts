@@ -6,6 +6,20 @@ const iconNames = ref<string[]>([])
 const svgCache: Record<string, string> = {}  // name → normalised SVG string
 let listPromise: Promise<void> | null = null
 
+function stripAsciiControlsAndWhitespace(raw: string): string {
+  return raw.replace(/[\u0000-\u001F\u007F-\u009F\s]+/g, '')
+}
+
+function hasUnsafeProtocol(raw: string): boolean {
+  const normalized = stripAsciiControlsAndWhitespace(raw).toLowerCase()
+  return (
+    normalized.startsWith('javascript:') ||
+    normalized.startsWith('vbscript:') ||
+    normalized.startsWith('data:') ||
+    normalized.startsWith('file:')
+  )
+}
+
 function sanitizeSvg(raw: string): string {
   const parser = new DOMParser()
   const doc = parser.parseFromString(raw, 'image/svg+xml')
@@ -19,9 +33,9 @@ function sanitizeSvg(raw: string): string {
   for (const el of Array.from(doc.querySelectorAll('*'))) {
     for (const attr of Array.from(el.attributes)) {
       const name = attr.name.toLowerCase()
-      const value = attr.value.trim().toLowerCase()
+      const value = attr.value.trim()
 
-      if (name === 'width' || name === 'height') {
+      if ((name === 'width' || name === 'height') && el === svg) {
         el.removeAttribute(attr.name)
         continue
       }
@@ -31,7 +45,7 @@ function sanitizeSvg(raw: string): string {
         continue
       }
 
-      if ((name === 'href' || name === 'xlink:href') && value.startsWith('javascript:')) {
+      if ((name === 'href' || name === 'xlink:href') && hasUnsafeProtocol(value)) {
         el.removeAttribute(attr.name)
       }
     }
