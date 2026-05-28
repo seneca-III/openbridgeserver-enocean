@@ -135,6 +135,17 @@ def _preserve_same_origin_credentials(current_url: str, redirected_url: str) -> 
     return redirected_parsed._replace(netloc=netloc).geturl()
 
 
+def _build_http_host_header(hostname_ascii: str, scheme: str, port: int | None) -> str:
+    host_header = hostname_ascii
+    if ":" in host_header and not host_header.startswith("["):
+        host_header = f"[{host_header}]"
+    if port is not None:
+        default_port = 443 if scheme == "https" else 80
+        if port != default_port:
+            host_header = f"{host_header}:{port}"
+    return host_header
+
+
 def _build_ical_fetch_targets(url: str) -> tuple[list[str], dict[str, str], dict[str, str]]:
     parsed = _parse_http_url(url)
     if not parsed:
@@ -150,14 +161,7 @@ def _build_ical_fetch_targets(url: str) -> tuple[list[str], dict[str, str], dict
     addresses = _resolve_public_http_host(hostname_ascii, port)
     if not addresses:
         raise ValueError(f"Blocked non-public iCal URL: {url}")
-    host_header = hostname_ascii
-    if ":" in host_header and not host_header.startswith("["):
-        host_header = f"[{host_header}]"
-    if port is not None:
-        default_port = 443 if parsed.scheme == "https" else 80
-        if port != default_port:
-            host_header = f"{host_header}:{port}"
-    headers = {"Host": host_header}
+    headers = {"Host": _build_http_host_header(hostname_ascii, parsed.scheme, port)}
     if parsed.username is not None:
         username = unquote(parsed.username)
         password = unquote(parsed.password or "")
