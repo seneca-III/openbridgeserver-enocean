@@ -85,6 +85,15 @@ def test_build_ical_fetch_target_preserves_embedded_basic_auth(monkeypatch) -> N
     assert extensions == {"sni_hostname": "example.com"}
 
 
+def test_build_ical_fetch_target_decodes_urlencoded_credentials(monkeypatch) -> None:
+    def _fake_getaddrinfo(*_args, **_kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", _fake_getaddrinfo)
+    _fetch_url, headers, _extensions = _build_ical_fetch_target("https://user:p%40ss%3Aword@example.com/calendar.ics")
+    assert headers["Authorization"] == f"Basic {base64.b64encode(b'user:p@ss:word').decode('ascii')}"
+
+
 def test_build_ical_fetch_target_encodes_idn_host_for_dns_and_sni(monkeypatch) -> None:
     captured_hostnames: list[str] = []
 

@@ -17,7 +17,7 @@ import socket
 import uuid
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 
@@ -101,8 +101,9 @@ def _build_ical_fetch_targets(url: str) -> tuple[list[str], dict[str, str], dict
             host_header = f"{host_header}:{port}"
     headers = {"Host": host_header}
     if parsed.username is not None:
-        password = parsed.password or ""
-        token = base64.b64encode(f"{parsed.username}:{password}".encode("utf-8")).decode("ascii")
+        username = unquote(parsed.username)
+        password = unquote(parsed.password or "")
+        token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("ascii")
         headers["Authorization"] = f"Basic {token}"
     extensions = {"sni_hostname": hostname_ascii} if parsed.scheme == "https" else {}
     fetch_urls: list[str] = []
