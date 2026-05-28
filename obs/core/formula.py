@@ -143,6 +143,10 @@ def apply_formula(formula: str, value: Any) -> Any:
     try:
         locals_: dict[str, Any] = {**_SAFE_GLOBALS, "x": x}
         tree = ast.parse(formula, mode="eval")
+        err = _validate_tree(tree)
+        if err:
+            logger.warning("Formula '%s' rejected by AST validation: %s", formula, err)
+            return value
         code = compile(tree, "<formula>", "eval")
         result = eval(code, {"__builtins__": {}}, locals_)  # noqa: S307
 
