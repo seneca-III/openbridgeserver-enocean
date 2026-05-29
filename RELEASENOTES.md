@@ -73,6 +73,7 @@
 * Visu: RTR Widget now use correct values for room controller (heating) DPT 20.102 https://github.com/abeggled/openbridgeserver/issues/461
 * Visu #440: Widget positioning broken if floorplan is rotated
 * Visu: Slider widget values are now written on pointer release and keyboard commit, avoiding missed writes in browsers that do not reliably fire change after dragging. https://github.com/abeggled/openbridgeserver/pull/559
+* Backend/UI: History default window changed from 24h to 7d and is now configurable via `history.default_window_hours` (Settings → Historie DB). https://github.com/abeggled/openbridgeserver/pull/582
 
 ### Known Issues 🔔
 * Some issues with KNX IP Secure interfaces: https://github.com/abeggled/openbridgeserver/issues/393
