@@ -761,7 +761,11 @@
       "minimum": "Minimum",
       "maximum": "Maximum",
       "gaugeColors": "Farbe / Farbverlauf (1–4 Farben, niedrig → hoch)",
-      "colorIndex": "Farbe {n}"
+      "colorIndex": "Farbe {n}",
+      "clickForFullViewTitle": "Klicken für Vollansicht",
+      "qualityBadTitle": "Qualität: schlecht",
+      "qualityUncertainTitle": "Qualität: undefiniert",
+      "selectTimeRangeTitle": "Zeitbereich wählen"
     },
     "wetter": {
       "labelCity": "Bezeichnung (Ortname)",

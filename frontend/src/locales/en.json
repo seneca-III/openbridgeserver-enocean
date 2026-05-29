@@ -761,7 +761,11 @@
       "minimum": "Minimum",
       "maximum": "Maximum",
       "gaugeColors": "Colour / gradient (1–4 colours, low → high)",
-      "colorIndex": "Colour {n}"
+      "colorIndex": "Colour {n}",
+      "clickForFullViewTitle": "Click for full view",
+      "qualityBadTitle": "Quality: bad",
+      "qualityUncertainTitle": "Quality: uncertain",
+      "selectTimeRangeTitle": "Select time range"
     },
     "wetter": {
       "labelCity": "Label (location name)",

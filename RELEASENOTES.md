@@ -47,14 +47,17 @@
   
 ### Fixes 🐞
 * General #375: Proxmox LXC, confusing checksum field content within release notes. https://github.com/abeggled/openbridgeserver/issues/375
+* Security: Preserve legacy `OPENTWS_*`/`OPENTWS_CONFIG` compatibility with case-insensitive `OBS_CONFIG` precedence and keep `opentws.db` fallback active even with partial `database.*` overrides to avoid unintended default-admin re-bootstrap on upgrades. https://github.com/abeggled/openbridgeserver/pull/554
 * Security: Require admin privileges for datapoint and logic mutations. https://github.com/abeggled/openbridgeserver/pull/456
 * Security: Restrict datapoint writes to widgets referenced by the current page. https://github.com/abeggled/openbridgeserver/pull/457
 * Security: Restrict anonymous datapoint writes to page widget membership. https://github.com/abeggled/openbridgeserver/pull/458
 * Security: Enforce admin or page-scoped authorization for datapoint writes. https://github.com/abeggled/openbridgeserver/pull/459
 * Security: Stop exposing WebSocket JWTs in URL query strings. https://github.com/abeggled/openbridgeserver/pull/518
+* Security: Restore public/protected viewer bootstrap reads and WebSocket connectivity without forcing JWT, reconnect page-scoped WS sessions on context changes, include WidgetRef target datapoints in anonymous allowlists, restrict anonymous WS allowlists to explicit datapoint fields, and stop passing JWT/session credentials via WS query params. https://github.com/abeggled/openbridgeserver/pull/553
 * Security: Prevent logic formula sandbox escape via custom round helper. https://github.com/abeggled/openbridgeserver/pull/504
 * Security: Validate imported binding formulas to prevent untrusted formula execution. https://github.com/abeggled/openbridgeserver/pull/505
 * Security: Bound write-router value cache to mitigate MQTT payload-retention DoS risk. https://github.com/abeggled/openbridgeserver/pull/524
+* Security: Harden SVG icon import sanitization (obfuscated javascript href, deep nesting guard, stable `<svg>` serialization), make ZIP imports atomic on sanitize errors, preserve API-key flows across username changes, and allow imports for authenticated users. https://github.com/abeggled/openbridgeserver/pull/555
 * Security: Harden LXC first-boot and release handling (per-container JWT secret, stricter env/tag handling). https://github.com/abeggled/openbridgeserver/pull/455 https://github.com/abeggled/openbridgeserver/pull/506 https://github.com/abeggled/openbridgeserver/pull/512
 * Backend: Complete remaining UI translation fixes after i18n rollout. https://github.com/abeggled/openbridgeserver/pull/542
 * Backend: Validate `DataValueEvent` payloads before bridge propagation. https://github.com/abeggled/openbridgeserver/pull/519
@@ -68,6 +71,7 @@
 * Visu: History widget now updates automatically when new values arrive via WebSocket. https://github.com/abeggled/openbridgeserver/issues/408
 * Visu: RTR Widget now use correct values for room controller (heating) DPT 20.102 https://github.com/abeggled/openbridgeserver/issues/461
 * Visu #440: Widget positioning broken if floorplan is rotated
+* Visu: Slider widget values are now written on pointer release and keyboard commit, avoiding missed writes in browsers that do not reliably fire change after dragging. https://github.com/abeggled/openbridgeserver/pull/559
 
 ### Known Issues 🔔
 * Some issues with KNX IP Secure interfaces: https://github.com/abeggled/openbridgeserver/issues/393
@@ -100,10 +104,13 @@
 * Visu: Duplication, Import, Export of visu sites
   
 ### Fixes:
+* Logicmodule Security (Upstream PR #562): harden notify_pushover image_url fetching against DNS-rebinding SSRF bypass
+* Security: Sanitize uploaded SVG icon content before ValueDisplay `v-html` injection to prevent stored XSS.
 * General: Fix used tags at docker images
 * General: Implement contract tests for dependencies
 * Backend: History give only last 1000 entries now default 10'000 with amximum of 100'000
 * Adapter ioBroker browse/import preview are blocked when the instance status lags behind the live socket connection
+* Adapter Home Assistant Security (Upstream PR #560): remove startup initial-read REST fetch to prevent SSRF via binding-controlled entity IDs
 * Adapter: "Zeitschaltuhr" support for multiple "Schaltpunkte" and own public holidays
 * Logicmodule: Functional Block: Sommer/Winter Umschaltung nach DIN Functional Block does now work as expected
 * Logicmodule: Functional Block: Read object / Write object: Renamed objects will be reflected in the Logicmodule now
@@ -111,6 +118,7 @@
 * Visu Widget "Verlauf" has now the possibility to display multiple graphs with two units (left/right)
 * Visu Widget "Zeitschaltuhr" supports multiple "Schaltpunkte" and oother new functions of the adapter
 * Visu Security (Upstream PR #564): prevent stored XSS in IFrame widget by enforcing http/https URLs and sanitizing sandbox permissions (Visu)
+* Visu Security (Upstream PR #561): prevent stored XSS via SVG icon rendering (Visu)
 
 ### Breaking changes:
 * none
