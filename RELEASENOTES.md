@@ -73,6 +73,7 @@
 * Visu: RTR Widget now use correct values for room controller (heating) DPT 20.102 https://github.com/abeggled/openbridgeserver/issues/461
 * Visu #440: Widget positioning broken if floorplan is rotated
 * Visu: Slider widget values are now written on pointer release and keyboard commit, avoiding missed writes in browsers that do not reliably fire change after dragging. https://github.com/abeggled/openbridgeserver/pull/559
+* Backend/UI: History default window changed from 24h to 7d and is now configurable via `history.default_window_hours` (Settings → Historie DB). https://github.com/abeggled/openbridgeserver/pull/582
 
 ### Known Issues 🔔
 * Some issues with KNX IP Secure interfaces: https://github.com/abeggled/openbridgeserver/issues/393
@@ -112,7 +113,6 @@
 * General: Implement contract tests for dependencies
 * General Security (Upstream PR #574): harden LXC updater by verifying app bundle checksums against the original release artifact filename
 * Backend: History give only last 1000 entries now default 10'000 with amximum of 100'000
-* Backend/UI: History default window changed from 24h to 7d and is now configurable via `history.default_window_hours` (Settings → Historie DB)
 * Adapter ioBroker browse/import preview are blocked when the instance status lags behind the live socket connection
 * Adapter ioBroker Security (Upstream PR #566): skip watchdog resync publishes when state reads fail
 * Adapter Home Assistant Security (Upstream PR #560): remove startup initial-read REST fetch to prevent SSRF via binding-controlled entity IDs
