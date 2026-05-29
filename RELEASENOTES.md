@@ -104,6 +104,7 @@
 * Visu: Duplication, Import, Export of visu sites
   
 ### Fixes:
+* Logicmodule Security (Upstream PR #562): harden notify_pushover image_url fetching against DNS-rebinding SSRF bypass
 * Security: Sanitize uploaded SVG icon content before ValueDisplay `v-html` injection to prevent stored XSS.
 * General: Fix used tags at docker images
 * General: Implement contract tests for dependencies
