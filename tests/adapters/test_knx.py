@@ -1289,7 +1289,8 @@ class TestBuildSniffer:
         sniffer = _build_sniffer(mock_xknx, ga_map, adapter)
         assert isinstance(sniffer, XknxDevice)
 
-    def test_sniffer_process_schedules_on_telegram(self):
+    @pytest.mark.asyncio
+    async def test_sniffer_process_schedules_on_telegram(self):
         from unittest.mock import AsyncMock, MagicMock
 
         from obs.adapters.knx.adapter import _build_sniffer
@@ -1310,6 +1311,7 @@ class TestBuildSniffer:
         )
         result = sniffer.process(telegram)
         assert result is True
+        await asyncio.sleep(0)  # let ensure_future task run
 
     def test_sniffer_iter_remote_values_returns_all_gas(self):
         from unittest.mock import MagicMock
