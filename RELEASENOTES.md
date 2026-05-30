@@ -50,6 +50,7 @@
 
 ### Fixes 🐞
 * Visu Security (Upstream PR #551): sanitize markdown HTML rendering in Text widget to prevent stored XSS.
+* Visu Security (Upstream PR #575): prevent stored XSS via SVG icon rendering in Stufenschalter widget
 * Visu Security (Upstream PR #568): prevent stored XSS via SVG icon rendering (Visu)
 * Logic Security (Upstream PR #563): harden Pushover `image_url` fetch against non-global targets, event-loop DNS blocking, and DNS rebinding
 * Visu Security (Upstream PR #565): prevent stored XSS via obfuscated `javascript:`/`data:` URLs in Toggle SVG icon rendering
