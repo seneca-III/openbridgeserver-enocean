@@ -36,7 +36,5 @@ def test_public_allowlist_is_explicit_and_covers_weather() -> None:
     assert weather_route in PUBLIC_ROUTE_ALLOWLIST
     assert ROUTE_CLASSIFICATIONS[weather_route] == "public"
 
-    public_classified = {
-        route for route, category in ROUTE_CLASSIFICATIONS.items() if category == "public"
-    }
+    public_classified = {route for route, category in ROUTE_CLASSIFICATIONS.items() if category == "public"}
     assert public_classified == set(PUBLIC_ROUTE_ALLOWLIST)
