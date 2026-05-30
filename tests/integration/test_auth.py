@@ -131,7 +131,7 @@ async def test_me_returns_admin_info(client, auth_headers):
     assert body["is_admin"] is True
 
 
-async def test_api_key_owner_is_synced_on_username_rename(client, auth_headers):
+async def test_api_key_does_not_inherit_admin_rights_after_username_rename(client, auth_headers):
     original = f"admin-rename-{uuid.uuid4().hex[:8]}"
     renamed = f"{original}-new"
     password = "pw-12345678"
@@ -162,7 +162,7 @@ async def test_api_key_owner_is_synced_on_username_rename(client, auth_headers):
         assert rename.status_code == 200, rename.text
 
         admin_call = await client.get("/api/v1/auth/users", headers={"X-API-Key": api_key})
-        assert admin_call.status_code == 200, admin_call.text
+        assert admin_call.status_code == 403, admin_call.text
     finally:
         await client.delete(f"/api/v1/auth/users/{renamed}", headers=auth_headers)
         await client.delete(f"/api/v1/auth/users/{original}", headers=auth_headers)
