@@ -62,6 +62,7 @@
 * Security: Enforce admin or page-scoped authorization for datapoint writes. https://github.com/abeggled/openbridgeserver/pull/459
 * Security: Stop exposing WebSocket JWTs in URL query strings. https://github.com/abeggled/openbridgeserver/pull/518
 * Security: Restore public/protected viewer bootstrap reads and WebSocket connectivity without forcing JWT, reconnect page-scoped WS sessions on context changes, include WidgetRef target datapoints in anonymous allowlists, restrict anonymous WS allowlists to explicit datapoint fields, and stop passing JWT/session credentials via WS query params. https://github.com/abeggled/openbridgeserver/pull/553
+* Backend Security (Upstream PR #570): restore authenticated WebSocket access via header/subprotocol/API-key auth while keeping URL token transport disabled.
 * Security: Prevent logic formula sandbox escape via custom round helper. https://github.com/abeggled/openbridgeserver/pull/504
 * Security: Validate imported binding formulas to prevent untrusted formula execution. https://github.com/abeggled/openbridgeserver/pull/505
 * Security: Reject active/scriptable SVG payloads on icon/config import to prevent stored XSS. https://github.com/abeggled/openbridgeserver/pull/558
