@@ -141,6 +141,47 @@ async def test_fetch_invalid_token_is_ignored_for_public_route(client, bypass_ss
         srv.shutdown()
 
 
+async def test_fetch_public_request_uses_private_network_blocking_mode(client, monkeypatch, bypass_ssrf):
+    observed: dict[str, bool] = {}
+    original = _weather_module._check_ssrf
+
+    async def _wrapped_check(url: str, *, allow_private_networks: bool):
+        observed["allow_private_networks"] = allow_private_networks
+        await original(url, allow_private_networks=allow_private_networks)
+
+    monkeypatch.setattr(_weather_module, "_check_ssrf", _wrapped_check)
+
+    srv = _MockWeatherServer()
+    try:
+        resp = await client.get(f"/api/v1/weather/fetch?url={srv.base_url}/weather")
+        assert resp.status_code == 200
+        assert observed["allow_private_networks"] is False
+    finally:
+        srv.shutdown()
+
+
+async def test_fetch_authenticated_request_allows_private_network_mode(client, auth_headers, monkeypatch, bypass_ssrf):
+    observed: dict[str, bool] = {}
+    original = _weather_module._check_ssrf
+
+    async def _wrapped_check(url: str, *, allow_private_networks: bool):
+        observed["allow_private_networks"] = allow_private_networks
+        await original(url, allow_private_networks=allow_private_networks)
+
+    monkeypatch.setattr(_weather_module, "_check_ssrf", _wrapped_check)
+
+    srv = _MockWeatherServer()
+    try:
+        resp = await client.get(
+            f"/api/v1/weather/fetch?url={srv.base_url}/weather",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert observed["allow_private_networks"] is True
+    finally:
+        srv.shutdown()
+
+
 # 3. Ungültiges URL-Schema
 async def test_fetch_invalid_scheme_returns_400(client, auth_headers):
     resp = await client.get(
@@ -304,5 +345,11 @@ async def test_fetch_ssrf_loopback_ipv6_blocked(client, auth_headers):
         "/api/v1/weather/fetch?url=http://[::1]/secret",
         headers=auth_headers,
     )
+    assert resp.status_code == 400
+    assert "gesperrt" in resp.json().get("detail", "").lower()
+
+
+async def test_fetch_ssrf_private_network_without_auth_blocked(client):
+    resp = await client.get("/api/v1/weather/fetch?url=http://192.168.1.10/weather")
     assert resp.status_code == 400
     assert "gesperrt" in resp.json().get("detail", "").lower()
