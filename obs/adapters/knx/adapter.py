@@ -198,6 +198,7 @@ class KnxAdapter(AdapterBase):
 
         # Build SecureConfig for KNX IP Secure modes
         secure_config = None
+        resolved_individual_address = cfg.individual_address
         if cfg.connection_type in ("tunneling_secure", "routing_secure"):
             try:
                 from xknx.io import SecureConfig
@@ -207,19 +208,20 @@ class KnxAdapter(AdapterBase):
                     # und übergibt sie explizit an SecureConfig.  Dadurch entfällt der interne
                     # UDP-DescriptionRequest von xknx, der in Docker-Bridge-Netzwerken scheitert,
                     # weil keine Route zurück zum Container besteht (Issue #393).
-                    secure_config = _secure_config_from_keyfile(
+                    keyfile_result = _secure_config_from_keyfile(
                         cfg.knxkeys_file_path,
                         cfg.knxkeys_password,
                         cfg.connection_type,
                         cfg.individual_address,
                     )
-                    if secure_config is None:
-                        await self._publish_status(
-                            False,
-                            "Kein passendes Interface im Keyfile gefunden — bitte Individual Address prüfen.",
-                            severity="error",
-                        )
+                    if keyfile_result is None:
+                        if cfg.connection_type == "routing_secure":
+                            detail = "Kein Backbone-Key im Keyfile — das Keyfile enthält keinen Backbone-Eintrag für Routing Secure."
+                        else:
+                            detail = "Keine Tunneling-Interfaces im Keyfile gefunden — bitte Individual Address im Keyfile prüfen."
+                        await self._publish_status(False, detail, severity="error")
                         return
+                    secure_config, resolved_individual_address = keyfile_result
                     logger.info("KNX IP Secure: Keyfile-Modus (%s), Credentials direkt extrahiert", cfg.knxkeys_file_path)
                 elif cfg.connection_type == "tunneling_secure":
                     # Manueller Modus Tunneling: Credentials einzeln angeben
@@ -260,7 +262,7 @@ class KnxAdapter(AdapterBase):
                 multicast_group=cfg.multicast_group,
                 multicast_port=cfg.multicast_port,
                 local_ip=cfg.local_ip,
-                individual_address=IndividualAddress(cfg.individual_address),
+                individual_address=IndividualAddress(resolved_individual_address),
                 secure_config=secure_config,
             )
         else:
@@ -269,7 +271,7 @@ class KnxAdapter(AdapterBase):
                 gateway_ip=cfg.host,
                 gateway_port=cfg.port,
                 local_ip=cfg.local_ip,
-                individual_address=IndividualAddress(cfg.individual_address),
+                individual_address=IndividualAddress(resolved_individual_address),
                 secure_config=secure_config,
             )
 
@@ -696,8 +698,10 @@ def _secure_config_from_keyfile(
     knxkeys_password: str,
     connection_type: str,
     individual_address: str,
-) -> Any:
-    """Extract KNX IP Secure credentials from a .knxkeys file and return a SecureConfig.
+) -> tuple[Any, str] | None:
+    """Extract KNX IP Secure credentials from a .knxkeys file.
+
+    Returns ``(SecureConfig, resolved_individual_address)`` or ``None``.
 
     Explicit credentials (user_id + user_password + device_authentication_password)
     make xknx take the "Branch A" code path in _start_secure_tunnelling_tcp, which
@@ -709,7 +713,8 @@ def _secure_config_from_keyfile(
     of the transport layer.  Without it, group-value telegrams from data-secure GAs
     would be undecryptable even though the tunnel connects successfully.
 
-    Returns None if no matching interface is found.
+    The resolved_individual_address is the address of the actual keyfile interface used
+    (may differ from the configured address when the fallback to the first tunnel fires).
     """
     from xknx.io import SecureConfig
     from xknx.secure.keyring import InterfaceType
@@ -735,11 +740,14 @@ def _secure_config_from_keyfile(
             xml_iface.individual_address,
             xml_iface.user_id,
         )
-        return SecureConfig(
-            device_authentication_password=xml_iface.decrypted_authentication or "",
-            user_id=xml_iface.user_id,
-            user_password=xml_iface.decrypted_password or "",
-            keyring=keyring,
+        return (
+            SecureConfig(
+                device_authentication_password=xml_iface.decrypted_authentication or "",
+                user_id=xml_iface.user_id,
+                user_password=xml_iface.decrypted_password or "",
+                keyring=keyring,
+            ),
+            str(xml_iface.individual_address),
         )
 
     # routing_secure: Backbone-Key extrahieren
@@ -748,7 +756,7 @@ def _secure_config_from_keyfile(
         return None
     backbone_hex = keyring.backbone.decrypted_key.hex()
     logger.info("KNX IP Secure: Keyfile-Routing, Backbone-Key extrahiert (%d bytes)", len(keyring.backbone.decrypted_key))
-    return SecureConfig(backbone_key=backbone_hex, keyring=keyring)
+    return (SecureConfig(backbone_key=backbone_hex, keyring=keyring), individual_address)
 
 
 _DOCKER_BRIDGE_HINT = (

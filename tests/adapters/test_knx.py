@@ -731,7 +731,7 @@ class TestKnxAdapterConnectDisconnect:
 
         with (
             patch("xknx.XKNX", return_value=mock_xknx_instance),
-            patch("obs.adapters.knx.adapter._secure_config_from_keyfile", return_value=mock_secure_config),
+            patch("obs.adapters.knx.adapter._secure_config_from_keyfile", return_value=(mock_secure_config, "1.1.100")),
         ):
             await adapter._do_connect()
 
@@ -1800,14 +1800,18 @@ class TestSecureConfigFromKeyfile:
             "1.1.100",
         )
 
-        assert isinstance(result, SecureConfig)
-        assert result.user_id == 2
-        assert result.user_password == "tunnelpass"
-        assert result.device_authentication_password == "devauth"
+        assert result is not None
+        sc, resolved_ia = result
+        assert isinstance(sc, SecureConfig)
+        assert sc.user_id == 2
+        assert sc.user_password == "tunnelpass"
+        assert sc.device_authentication_password == "devauth"
         # keyring must be present so xknx can do data_secure_init
-        assert result.keyring is keyring
+        assert sc.keyring is keyring
         # but no file path — that would re-trigger UDP DescriptionRequest
-        assert result.knxkeys_file_path is None
+        assert sc.knxkeys_file_path is None
+        # resolved address must match the keyfile interface's address
+        assert resolved_ia == "1.1.100"
 
     def test_tunneling_secure_no_keyfile_path_in_result(self, monkeypatch):
         """The returned SecureConfig must NOT contain the keyfile path — that would
@@ -1820,7 +1824,8 @@ class TestSecureConfigFromKeyfile:
 
         result = _secure_config_from_keyfile("/data/knxkeys/test.knxkeys", "pw", "tunneling_secure", "1.1.100")
         assert result is not None
-        assert result.knxkeys_file_path is None
+        sc, _ = result
+        assert sc.knxkeys_file_path is None
 
     def test_tunneling_secure_fallback_when_ia_not_found(self, monkeypatch):
         """If the individual_address isn't in the keyfile, fall back to the first tunnel."""
@@ -1833,7 +1838,10 @@ class TestSecureConfigFromKeyfile:
         result = _secure_config_from_keyfile("/data/knxkeys/test.knxkeys", "pw", "tunneling_secure", "9.9.9")
         # Should still return a SecureConfig using the first available interface
         assert result is not None
-        assert result.user_id == iface.user_id
+        sc, resolved_ia = result
+        assert sc.user_id == iface.user_id
+        # resolved address must be the fallback interface's address, not the configured "9.9.9"
+        assert resolved_ia == "1.1.100"
 
     def test_tunneling_secure_returns_none_when_no_tunnels(self, monkeypatch):
         """Returns None when keyfile has no tunneling interfaces."""
@@ -1862,12 +1870,16 @@ class TestSecureConfigFromKeyfile:
         )
 
         result = _secure_config_from_keyfile("/data/knxkeys/test.knxkeys", "pw", "routing_secure", "1.1.255")
-        assert isinstance(result, SecureConfig)
+        assert result is not None
+        sc, resolved_ia = result
+        assert isinstance(sc, SecureConfig)
         # SecureConfig.backbone_key stores bytes internally (converts from hex)
         expected_bytes = bytes.fromhex("0102030405060708090a0b0c0d0e0f10")
-        assert result.backbone_key == expected_bytes
+        assert sc.backbone_key == expected_bytes
         # keyring must be passed for data_secure_init
-        assert result.keyring is keyring
+        assert sc.keyring is keyring
+        # routing keeps the configured individual_address unchanged
+        assert resolved_ia == "1.1.255"
 
     def test_routing_secure_returns_none_when_no_backbone(self, monkeypatch):
         """Returns None when keyfile has no backbone."""
@@ -1899,7 +1911,7 @@ class TestSecureConfigFromKeyfile:
         )
         monkeypatch.setattr(
             "obs.adapters.knx.adapter._secure_config_from_keyfile",
-            lambda *a, **kw: explicit_sc,
+            lambda *a, **kw: (explicit_sc, "1.1.100"),
         )
 
         captured_conn_cfg = {}
@@ -1942,3 +1954,83 @@ class TestSecureConfigFromKeyfile:
         assert sc is not None
         assert sc.knxkeys_file_path is None
         assert sc.user_id == 2
+        # individual_address in ConnectionConfig must come from the resolved keyfile address
+        assert str(conn_cfg.individual_address) == "1.1.100"
+
+    @pytest.mark.asyncio
+    async def test_do_connect_uses_fallback_individual_address(self, mock_bus, monkeypatch):
+        """When _secure_config_from_keyfile falls back to the first tunnel interface,
+        _do_connect() must use the fallback's individual_address in ConnectionConfig,
+        not the stale configured value (e.g. '1.1.255')."""
+        from unittest.mock import MagicMock
+        from xknx.io import SecureConfig
+
+        fallback_sc = SecureConfig(device_authentication_password="devauth", user_id=3, user_password="pw")
+        # Simulate fallback: configured address was "1.1.255", keyfile resolved to "1.1.50"
+        monkeypatch.setattr(
+            "obs.adapters.knx.adapter._secure_config_from_keyfile",
+            lambda *a, **kw: (fallback_sc, "1.1.50"),
+        )
+
+        captured_conn_cfg = {}
+
+        class _FakeXKNX:
+            def __init__(self, **kw):
+                captured_conn_cfg.update(kw)
+
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
+            devices = MagicMock()
+            devices.__iter__ = lambda self: iter([])
+            devices.__len__ = lambda self: 0
+            telegrams = MagicMock()
+
+        import xknx as _xknx_mod
+
+        monkeypatch.setattr(_xknx_mod, "XKNX", lambda **kw: _FakeXKNX(**kw))
+
+        adapter = KnxAdapter(
+            event_bus=mock_bus,
+            config={
+                "connection_type": "tunneling_secure",
+                "host": "192.168.1.152",
+                "knxkeys_file_path": "/data/knxkeys/test.knxkeys",
+                "knxkeys_password": "secret",
+                "individual_address": "1.1.255",  # stale/default — keyfile overrides to 1.1.50
+            },
+        )
+        await adapter._do_connect()
+
+        conn_cfg = captured_conn_cfg.get("connection_config")
+        assert conn_cfg is not None
+        # Must use fallback address from keyfile, not the configured "1.1.255"
+        assert str(conn_cfg.individual_address) == "1.1.50"
+
+    @pytest.mark.asyncio
+    async def test_do_connect_routing_secure_no_backbone_shows_backbone_error(self, mock_bus, monkeypatch):
+        """When routing_secure keyfile has no backbone, error message must mention backbone,
+        not individual_address (which is irrelevant for routing)."""
+        monkeypatch.setattr(
+            "obs.adapters.knx.adapter._secure_config_from_keyfile",
+            lambda *a, **kw: None,
+        )
+
+        adapter = KnxAdapter(
+            event_bus=mock_bus,
+            config={
+                "connection_type": "routing_secure",
+                "knxkeys_file_path": "/data/knxkeys/test.knxkeys",
+                "knxkeys_password": "secret",
+            },
+        )
+        await adapter._do_connect()
+
+        events = [c.args[0] for c in mock_bus.publish.call_args_list]
+        error_events = [e for e in events if hasattr(e, "connected") and not e.connected]
+        assert error_events
+        assert "Backbone" in error_events[-1].detail or "backbone" in error_events[-1].detail.lower()
+        assert "Individual Address" not in error_events[-1].detail

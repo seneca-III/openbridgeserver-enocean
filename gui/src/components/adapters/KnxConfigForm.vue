@@ -67,6 +67,17 @@
       </select>
     </div>
 
+    <!-- Docker warning for all secure connection types (tunneling_secure + routing_secure) -->
+    <div v-if="isSecure" class="flex gap-2 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-xs text-amber-300">
+      <svg class="w-4 h-4 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+      </svg>
+      <div>
+        <p class="font-medium mb-0.5">{{ $t('adapters.knx.docker.warningTitle') }}</p>
+        <p>{{ $t('adapters.knx.docker.warningDescription') }}</p>
+      </div>
+    </div>
+
     <!-- ── Tunneling ──────────────────────────────────────────────────────── -->
     <template v-if="isTunneling">
       <div class="form-group">
@@ -86,17 +97,6 @@
           :placeholder="$t('adapters.knx.form.localIpPlaceholder')"
           @input="setLocalIp($event.target.value)"
         />
-      </div>
-
-      <!-- Docker bridge warning for secure connections -->
-      <div v-if="isSecure" class="flex gap-2 p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-xs text-amber-300">
-        <svg class="w-4 h-4 shrink-0 mt-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-        </svg>
-        <div>
-          <p class="font-medium mb-0.5">{{ $t('adapters.knx.docker.warningTitle') }}</p>
-          <p>{{ $t('adapters.knx.docker.warningDescription') }}</p>
-        </div>
       </div>
 
       <!-- Plain tunneling: individual address -->
