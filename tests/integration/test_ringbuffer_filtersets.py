@@ -107,9 +107,7 @@ async def _seed_knx_pa_ga_link(pa: str, ga: str) -> None:
     else:
         # Fallback for pre-V34 or reduced local schemas.
         await db.execute("CREATE TABLE IF NOT EXISTS knx_comm_objects (id TEXT PRIMARY KEY, physical_address TEXT NOT NULL)")
-        await db.execute(
-            "CREATE TABLE IF NOT EXISTS knx_co_ga_links (comm_object_id TEXT NOT NULL, group_address TEXT NOT NULL)"
-        )
+        await db.execute("CREATE TABLE IF NOT EXISTS knx_co_ga_links (comm_object_id TEXT NOT NULL, group_address TEXT NOT NULL)")
         await db.execute(
             "INSERT INTO knx_comm_objects (id, physical_address) VALUES (?, ?)",
             (co_id, pa),

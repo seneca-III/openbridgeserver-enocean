@@ -493,11 +493,7 @@ def parse_knxproj_devices(
                 text=str(comm_obj.get("text") or "").strip(),
                 function_text=str(comm_obj.get("function_text") or "").strip(),
                 description=str(comm_obj.get("description") or "").strip(),
-                device_application=(
-                    str(comm_obj.get("device_application")).strip()
-                    if comm_obj.get("device_application")
-                    else None
-                ),
+                device_application=(str(comm_obj.get("device_application")).strip() if comm_obj.get("device_application") else None),
                 channel=str(comm_obj.get("channel")).strip() if comm_obj.get("channel") else None,
                 dpts=[dpt for dpt in dpt_values if dpt],
                 object_size=str(comm_obj.get("object_size") or "").strip(),
@@ -520,9 +516,7 @@ def parse_knxproj_devices(
                 function_text=str(getattr(comm_obj, "function_text", "") or "").strip(),
                 description=str(getattr(comm_obj, "description", "") or "").strip(),
                 device_application=(
-                    str(getattr(comm_obj, "device_application", "")).strip()
-                    if getattr(comm_obj, "device_application", None)
-                    else None
+                    str(getattr(comm_obj, "device_application", "")).strip() if getattr(comm_obj, "device_application", None) else None
                 ),
                 channel=str(getattr(comm_obj, "channel", "")).strip() if getattr(comm_obj, "channel", None) else None,
                 dpts=[dpt for dpt in dpt_values if dpt],

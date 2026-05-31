@@ -79,4 +79,3 @@ async def test_build_query_from_filter_criteria_applies_device_group_address_met
         assert query.filters.metadata.group_addresses_any_of == ["2/1/5"]
     finally:
         await db.disconnect()
-

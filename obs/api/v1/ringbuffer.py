@@ -609,11 +609,7 @@ def _apply_group_addresses_to_filter_query(
 
     metadata_payload["group_addresses_any_of"] = allowed
     return query.model_copy(
-        update={
-            "filters": query.filters.model_copy(
-                update={"metadata": RingBufferMetadataFilterV2.model_validate(metadata_payload)}
-            )
-        }
+        update={"filters": query.filters.model_copy(update={"metadata": RingBufferMetadataFilterV2.model_validate(metadata_payload)})}
     )
 
 
