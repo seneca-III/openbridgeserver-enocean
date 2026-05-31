@@ -73,11 +73,10 @@
 * Visu: RTR Widget now use correct values for room controller (heating) DPT 20.102 https://github.com/abeggled/openbridgeserver/issues/461
 * Visu #440: Widget positioning broken if floorplan is rotated
 * Visu: Slider widget values are now written on pointer release and keyboard commit, avoiding missed writes in browsers that do not reliably fire change after dragging. https://github.com/abeggled/openbridgeserver/pull/559
-* Adapter: KNX IP Secure now works correctly in Docker bridge networks — credentials are extracted directly from the .knxkeys file and passed explicitly to xknx, bypassing the internal UDP DescriptionRequest that fails without host networking. Connection errors now include actionable hints (Docker network mode, gateway tunnel-slot exhaustion). https://github.com/abeggled/openbridgeserver/issues/393
 * Logic engine: Sommer/Winter (DIN) block now fills T1/T2/T3 slots correctly when sensors report at intervals that do not hit hours 7, 12, or 22 exactly (e.g. every 2 or 4 hours). "First-crossing" semantics: each slot is captured on the first measurement at or after its target hour, so daily_avg is always computed and heating mode switches reliably. https://github.com/abeggled/openbridgeserver/issues/548
 
 ### Known Issues 🔔
-* none
+* Some issues with KNX IP Secure interfaces: https://github.com/abeggled/openbridgeserver/issues/393
 
 ## 2026.5.2
 ### Breaking changes 🚨
