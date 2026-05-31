@@ -199,7 +199,6 @@
                 v-model="form.valuePattern"
                 class="input"
                 data-testid="filter-editor-value-pattern"
-                placeholder="^temp"
                 @input="markDirty"
               />
             </div>
