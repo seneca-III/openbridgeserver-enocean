@@ -194,11 +194,11 @@ const def = computed(() => {
     if (Array.isArray(pathList) && pathList.length > 0) {
       const outputs = pathList.map((entry, i) => ({
         id:    `out_${i + 1}`,
-        label: (entry?.label || `Wert ${i + 1}`),
+        label: (entry?.label || t('logic.nodeConfig.extractor.valueN', { n: i + 1 })),
       }))
-      return { ...base, outputs }
+      return { ...base, label, outputs }
     }
-    return base
+    return { ...base, label }
   }
   if (props.type === 'xml_extractor') {
     let pathList = []
@@ -206,11 +206,11 @@ const def = computed(() => {
     if (Array.isArray(pathList) && pathList.length > 0) {
       const outputs = pathList.map((entry, i) => ({
         id:    `out_${i + 1}`,
-        label: (entry?.label || `Wert ${i + 1}`),
+        label: (entry?.label || t('logic.nodeConfig.extractor.valueN', { n: i + 1 })),
       }))
-      return { ...base, outputs }
+      return { ...base, label, outputs }
     }
-    return base
+    return { ...base, label }
   }
   return { ...base, label }
 })
