@@ -851,6 +851,27 @@
       "saveFailed": "Save failed",
       "deleteFailed": "Delete failed",
       "expandChipTitle": "Expand node: materialise DPs as chips"
+    },
+    "filter": {
+      "rangeSection": "Range",
+      "rangeOverridden": "overridden by point-mode input",
+      "from": "From",
+      "fromPlaceholder": "-1h 10min, 14:30, 2026-05-11 14:30",
+      "to": "To",
+      "toPlaceholder": "-5min, 14:50, empty = now",
+      "pointSection": "Point ± Span",
+      "at": "At",
+      "pointPlaceholder": "-1h, 14:00, 2026-05-11 14:00",
+      "span": "±",
+      "spanPlaceholder": "10min, 1h",
+      "clear": "Clear filter",
+      "apply": "Apply",
+      "invalid": "invalid",
+      "off": "off",
+      "last": "Last {duration}",
+      "range": "Range {from} … {to}",
+      "fromShort": "From {from}",
+      "toShort": "To {to}"
     }
   },
   "logs": {

@@ -851,6 +851,27 @@
       "saveFailed": "Speichern fehlgeschlagen",
       "deleteFailed": "Löschen fehlgeschlagen",
       "expandChipTitle": "Knoten auflösen: DPs als Chips materialisieren"
+    },
+    "filter": {
+      "rangeSection": "Bereich",
+      "rangeOverridden": "wird durch Zeitpunkt-Eingabe überschrieben",
+      "from": "Ab",
+      "fromPlaceholder": "-1h 10min, 14:30, 2026-05-11 14:30",
+      "to": "Bis",
+      "toPlaceholder": "-5min, 14:50, leer = jetzt",
+      "pointSection": "Zeitpunkt ± Spanne",
+      "at": "Um",
+      "pointPlaceholder": "-1h, 14:00, 2026-05-11 14:00",
+      "span": "±",
+      "spanPlaceholder": "10min, 1h",
+      "clear": "Filter aus",
+      "apply": "Anwenden",
+      "invalid": "ungültig",
+      "off": "aus",
+      "last": "Letzte {duration}",
+      "range": "Bereich {from} … {to}",
+      "fromShort": "Ab {from}",
+      "toShort": "Bis {to}"
     }
   },
   "logs": {
