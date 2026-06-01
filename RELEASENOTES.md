@@ -55,7 +55,8 @@
 * Backend: The adapter page automatically reloaded every few seconds, making configuration difficult. https://github.com/abeggled/openbridgeserver/issues/394
 * Backend: Fix view permissions of Demo User https://github.com/abeggled/openbridgeserver/issues/471
 * Backend: History default window changed from 24h to 7d and is now configurable via `history.default_window_hours` (Settings → Historie DB). https://github.com/abeggled/openbridgeserver/pull/582
-GUI: Fixed MQTT binding edit/create dialog becoming blank when switching to write direction; adapter-type resolution and i18n handling in BindingForm were hardened. https://github.com/abeggled/openbridgeserver/issues/656
+* GUI: Fixed MQTT binding edit/create dialog becoming blank when switching to write direction; adapter-type resolution and i18n handling in BindingForm were hardened. https://github.com/abeggled/openbridgeserver/issues/656
+* Visu: History (Chart) widget and Value Display widget time-range dropdowns now show translated labels instead of raw i18n key strings. https://github.com/abeggled/openbridgeserver/issues/662
 * General #375: Proxmox LXC, confusing checksum field content within release notes. https://github.com/abeggled/openbridgeserver/issues/375
 * Logic engine: The object selector now uses the entire available window space. https://github.com/abeggled/openbridgeserver/issues/345
 * Logic engine: Sommer/Winter (DIN) block now fills T1/T2/T3 slots correctly when sensors report at intervals that do not hit hours 7, 12, or 22 exactly (e.g. every 2 or 4 hours). "First-crossing" semantics: each slot is captured on the first measurement at or after its target hour, so daily_avg is always computed and heating mode switches reliably. https://github.com/abeggled/openbridgeserver/issues/548

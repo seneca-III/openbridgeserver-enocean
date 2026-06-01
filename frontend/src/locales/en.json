@@ -769,7 +769,8 @@
       "clickForFullViewTitle": "Click for full view",
       "qualityBadTitle": "Quality: bad",
       "qualityUncertainTitle": "Quality: uncertain",
-      "selectTimeRangeTitle": "Select time range"
+      "selectTimeRangeTitle": "Select time range",
+      "historyFallback": "History"
     },
     "wetter": {
       "labelCity": "Label (location name)",

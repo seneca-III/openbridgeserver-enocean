@@ -769,7 +769,8 @@
       "clickForFullViewTitle": "Klicken für Vollansicht",
       "qualityBadTitle": "Qualität: schlecht",
       "qualityUncertainTitle": "Qualität: undefiniert",
-      "selectTimeRangeTitle": "Zeitbereich wählen"
+      "selectTimeRangeTitle": "Zeitbereich wählen",
+      "historyFallback": "Verlauf"
     },
     "wetter": {
       "labelCity": "Bezeichnung (Ortname)",
