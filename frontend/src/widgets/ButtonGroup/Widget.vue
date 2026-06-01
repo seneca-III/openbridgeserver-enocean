@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { datapoints } from '@/api/client'
 import VisuIcon from '@/components/VisuIcon.vue'
 import type { DataPointValue } from '@/types'
@@ -24,6 +25,8 @@ const props = defineProps<{
   readonly?: boolean
 }>()
 
+const { t } = useI18n()
+
 const label = computed(() => (props.config.label as string | undefined) ?? '')
 const showLabel = computed(() => props.config.showLabel !== false)
 const columns = computed(() => {
@@ -36,7 +39,7 @@ const buttons = computed<ButtonConfig[]>(() => {
   if (!Array.isArray(raw) || raw.length === 0) return []
   return raw.map((button, index) => ({
     id: button.id || `button-${index + 1}`,
-    label: button.label ?? `Taste ${index + 1}`,
+    label: normalizeButtonLabel(button.label, index),
     icon: button.icon ?? '',
     color: button.color ?? '#3b82f6',
     value: String(button.value ?? 'true'),
@@ -67,6 +70,17 @@ function parseBoolean(raw: unknown, fallback: boolean): boolean {
 function parseDelay(raw: unknown): number {
   const delay = Number(raw)
   return Number.isFinite(delay) ? Math.max(0, Math.round(delay)) : 300
+}
+
+function defaultButtonLabel(index: number): string {
+  return t('widgets.buttongroup.defaultButtonWithNumber', { number: index + 1 })
+}
+
+function normalizeButtonLabel(raw: unknown, index: number): string {
+  if (typeof raw !== 'string') return defaultButtonLabel(index)
+  const label = raw.trim()
+  if (!label || label === 'widgets.buttongroup.defaultButton') return defaultButtonLabel(index)
+  return raw
 }
 
 function parseValue(raw: string): unknown {
@@ -152,15 +166,14 @@ onUnmounted(() => {
             class="max-w-full truncate leading-tight"
             :style="{ color: feedback[button.id] === 'error' ? undefined : button.color }"
           >
-            {{ pendingId === button.id ? '...' : feedback[button.id] === 'success' ? 'Gesendet' : feedback[button.id] === 'error' ? 'Fehler' : button.label }}
+            {{ pendingId === button.id ? '...' : feedback[button.id] === 'success' ? $t('widgets.buttongroup.sent') : feedback[button.id] === 'error' ? $t('widgets.buttongroup.error') : button.label }}
           </span>
         </span>
       </button>
     </div>
 
     <div v-else class="flex-1 flex items-center justify-center text-xs text-gray-400 dark:text-gray-500 text-center">
-      Keine Tasten konfiguriert.
+      {{ $t('widgets.buttongroup.empty') }}
     </div>
   </div>
 </template>
-

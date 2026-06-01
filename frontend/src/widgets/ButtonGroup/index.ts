@@ -4,7 +4,7 @@ import Config from './Config.vue'
 
 WidgetRegistry.register({
   type: 'ButtonGroup',
-  label: 'Taster',
+  label: 'widgets.buttongroup.title',
   icon: '🔳',
   group: 'Steuerung',
   minW: 2, minH: 2,
@@ -18,7 +18,7 @@ WidgetRegistry.register({
     buttons: [
       {
         id: 'button-1',
-        label: 'Taste 1',
+        label: '',
         icon: '',
         color: '#3b82f6',
         value: 'true',
@@ -31,4 +31,3 @@ WidgetRegistry.register({
   compatibleTypes: ['BOOLEAN', 'INTEGER'],
   supportsStatusDatapoint: false,
 })
-

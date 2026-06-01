@@ -1,14 +1,21 @@
 <!-- Widget-Palette für den Editor: zeigt alle registrierten Widgets, gruppiert nach Kategorie -->
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { WidgetRegistry } from '@/widgets/registry'
 
 const emit = defineEmits<{
   (e: 'insert', type: string): void
 }>()
 
+const { t } = useI18n()
+
 const GROUP_ORDER = ['Steuerung', 'Anzeige', 'Medien & Sonstiges']
 const DEFAULT_GROUP = 'Sonstiges'
+
+function widgetLabel(label: string): string {
+  return t(label, label)
+}
 
 const groups = computed(() => {
   const map = new Map<string, ReturnType<typeof WidgetRegistry.all>>()
@@ -45,7 +52,7 @@ const groups = computed(() => {
           @click="emit('insert', w.type)"
         >
           <span class="text-xl leading-none w-6 text-center">{{ w.icon }}</span>
-          <span>{{ w.label }}</span>
+          <span>{{ widgetLabel(w.label) }}</span>
         </button>
       </div>
     </div>

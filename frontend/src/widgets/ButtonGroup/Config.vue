@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { reactive, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import IconPicker from '@/components/IconPicker.vue'
 
 interface ButtonConfig {
@@ -25,6 +26,7 @@ const MAX_BUTTONS = 12
 
 const props = defineProps<{ modelValue: Record<string, unknown> }>()
 const emit = defineEmits<{ (e: 'update:modelValue', val: Record<string, unknown>): void }>()
+const { t } = useI18n()
 
 function newId(): string {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -53,6 +55,17 @@ function parseDelay(raw: unknown): number {
   return Number.isFinite(delay) ? Math.max(0, Math.round(delay)) : 300
 }
 
+function defaultButtonLabel(index: number): string {
+  return t('widgets.buttongroup.defaultButtonWithNumber', { number: index + 1 })
+}
+
+function normalizeButtonLabel(raw: unknown, index: number): string {
+  if (typeof raw !== 'string') return defaultButtonLabel(index)
+  const label = raw.trim()
+  if (!label || label === 'widgets.buttongroup.defaultButton') return defaultButtonLabel(index)
+  return raw
+}
+
 function parseButtons(raw: unknown): ButtonConfig[] {
   const buttons = raw as Partial<ButtonConfig>[] | undefined
   if (!Array.isArray(buttons) || buttons.length < MIN_BUTTONS) {
@@ -60,7 +73,7 @@ function parseButtons(raw: unknown): ButtonConfig[] {
   }
   return buttons.slice(0, MAX_BUTTONS).map((button, index) => ({
     id: button.id || newId(),
-    label: button.label ?? `Taste ${index + 1}`,
+    label: normalizeButtonLabel(button.label, index),
     icon: button.icon ?? '',
     color: button.color ?? '#3b82f6',
     value: String(button.value ?? 'true'),
@@ -73,7 +86,7 @@ function parseButtons(raw: unknown): ButtonConfig[] {
 function createButton(index: number): ButtonConfig {
   return {
     id: newId(),
-    label: `Taste ${index}`,
+    label: t('widgets.buttongroup.defaultButtonWithNumber', { number: index }),
     icon: '',
     color: '#3b82f6',
     value: 'true',
@@ -90,7 +103,11 @@ const cfg = reactive<Cfg>({
   buttons: parseButtons(props.modelValue.buttons),
 })
 
-watch(cfg, () => emit('update:modelValue', JSON.parse(JSON.stringify(cfg)) as Record<string, unknown>), { deep: true })
+watch(
+  cfg,
+  () => emit('update:modelValue', JSON.parse(JSON.stringify(cfg)) as Record<string, unknown>),
+  { deep: true, immediate: true },
+)
 
 function addButton() {
   if (cfg.buttons.length >= MAX_BUTTONS) return
@@ -116,18 +133,18 @@ function moveDown(index: number) {
 <template>
   <div class="space-y-4 text-sm">
     <div>
-      <label class="block text-xs text-gray-400 mb-1">Beschriftung</label>
+      <label class="block text-xs text-gray-400 mb-1">{{ $t('widgets.common.label') }}</label>
       <input
         v-model="cfg.label"
         type="text"
-        placeholder="z.B. Szenen"
+        :placeholder="$t('widgets.buttongroup.labelPlaceholder')"
         class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-sm text-gray-100 focus:outline-none focus:border-blue-500"
       />
     </div>
 
     <div class="grid grid-cols-2 gap-2">
       <label class="block">
-        <span class="block text-xs text-gray-400 mb-1">Spalten</span>
+        <span class="block text-xs text-gray-400 mb-1">{{ $t('widgets.buttongroup.columns') }}</span>
         <input
           v-model.number="cfg.columns"
           type="number"
@@ -138,25 +155,25 @@ function moveDown(index: number) {
       </label>
       <label class="flex items-end gap-2 text-xs text-gray-400 pb-2">
         <input v-model="cfg.showLabel" type="checkbox" />
-        Titel anzeigen
+        {{ $t('widgets.buttongroup.showTitle') }}
       </label>
     </div>
 
     <div>
       <div class="flex items-center justify-between mb-2">
         <p class="text-xs font-semibold text-gray-400 uppercase tracking-wider">
-          Tasten ({{ cfg.buttons.length }}/{{ MAX_BUTTONS }})
+          {{ $t('widgets.buttongroup.buttons', { count: cfg.buttons.length, max: MAX_BUTTONS }) }}
         </p>
         <button
           type="button"
           :disabled="cfg.buttons.length >= MAX_BUTTONS"
           class="text-xs px-2 py-1 rounded border border-dashed border-gray-600 text-gray-400 hover:border-blue-500 hover:text-blue-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
           @click="addButton"
-        >+ Taste</button>
+        >{{ $t('widgets.buttongroup.addButton') }}</button>
       </div>
 
       <p class="text-xs text-gray-600 mb-2">
-        Beim Drücken wird der konfigurierte Wert auf das verknüpfte Objekt gesendet.
+        {{ $t('widgets.buttongroup.writeHint') }}
       </p>
 
       <div class="space-y-2">
@@ -170,62 +187,62 @@ function moveDown(index: number) {
             <input
               v-model="button.label"
               type="text"
-              placeholder="Beschriftung"
+              :placeholder="$t('widgets.common.label')"
               class="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-blue-500"
             />
             <button
               type="button"
               :disabled="index === 0"
               class="w-5 h-5 flex items-center justify-center rounded text-gray-500 hover:text-gray-300 disabled:opacity-20 text-xs"
-              title="Nach oben"
+              :title="$t('widgets.buttongroup.moveUp')"
               @click="moveUp(index)"
             >▲</button>
             <button
               type="button"
               :disabled="index === cfg.buttons.length - 1"
               class="w-5 h-5 flex items-center justify-center rounded text-gray-500 hover:text-gray-300 disabled:opacity-20 text-xs"
-              title="Nach unten"
+              :title="$t('widgets.buttongroup.moveDown')"
               @click="moveDown(index)"
             >▼</button>
             <button
               type="button"
               :disabled="cfg.buttons.length <= MIN_BUTTONS"
               class="w-5 h-5 flex items-center justify-center rounded text-gray-500 hover:text-red-400 disabled:opacity-20 text-xs"
-              title="Entfernen"
+              :title="$t('common.delete')"
               @click="removeButton(index)"
             >✕</button>
           </div>
 
           <div class="flex gap-2 items-center">
-            <span class="text-xs text-gray-500 w-10 shrink-0">Icon</span>
+            <span class="text-xs text-gray-500 w-10 shrink-0">{{ $t('widgets.buttongroup.icon') }}</span>
             <IconPicker v-model="button.icon" :dark="true" />
             <input
               v-model="button.color"
               type="color"
               class="w-7 h-7 rounded cursor-pointer border border-gray-700 bg-transparent p-0.5 shrink-0"
-              title="Farbe"
+              :title="$t('widgets.buttongroup.color')"
             />
           </div>
 
           <div class="grid grid-cols-2 gap-2">
             <label class="block">
-              <span class="block text-xs text-gray-500 mb-1">Sendewert</span>
+              <span class="block text-xs text-gray-500 mb-1">{{ $t('widgets.buttongroup.value') }}</span>
               <input
                 v-model="button.value"
                 type="text"
-                placeholder="true, false, 1 ..."
+                :placeholder="$t('widgets.buttongroup.valuePlaceholder')"
                 class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-blue-500"
               />
             </label>
             <label class="flex items-end gap-2 text-xs text-gray-400 pb-1">
               <input v-model="button.resetEnabled" type="checkbox" />
-              Rückfall
+              {{ $t('widgets.buttongroup.reset') }}
             </label>
           </div>
 
           <div v-if="button.resetEnabled" class="grid grid-cols-2 gap-2">
             <label class="block">
-              <span class="block text-xs text-gray-500 mb-1">Rückfallwert</span>
+              <span class="block text-xs text-gray-500 mb-1">{{ $t('widgets.buttongroup.resetValue') }}</span>
               <input
                 v-model="button.resetValue"
                 type="text"
@@ -234,7 +251,7 @@ function moveDown(index: number) {
               />
             </label>
             <label class="block">
-              <span class="block text-xs text-gray-500 mb-1">Delay (ms)</span>
+              <span class="block text-xs text-gray-500 mb-1">{{ $t('widgets.buttongroup.resetDelay') }}</span>
               <input
                 v-model.number="button.resetDelayMs"
                 type="number"
@@ -249,4 +266,3 @@ function moveDown(index: number) {
     </div>
   </div>
 </template>
-
