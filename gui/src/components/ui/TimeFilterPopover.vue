@@ -193,11 +193,13 @@ function previewBound(text) {
     const d = parseDurationToken(raw)
     if (!d) return { value: null, label: t('ringbuffer.filter.invalid'), error: true }
     const target = new Date(Date.now() + d.sign * d.seconds * 1000)
-    return { value: d, label: `→ ${labelDate(target)}`, error: false }
+    const preview = `→ ${labelDate(target)}`
+    return { value: d, label: preview, error: false }
   }
   const dt = parseTimePointToken(raw)
   if (!dt) return { value: null, label: t('ringbuffer.filter.invalid'), error: true }
-  return { value: dt, label: `→ ${labelDate(dt)}`, error: false }
+  const preview = `→ ${labelDate(dt)}`
+  return { value: dt, label: preview, error: false }
 }
 
 function previewDuration(text) {
@@ -205,7 +207,8 @@ function previewDuration(text) {
   if (!raw) return { value: null, label: '', error: false }
   const d = parseDurationToken(raw)
   if (!d) return { value: null, label: t('ringbuffer.filter.invalid'), error: true }
-  return { value: { ...d, sign: 1 }, label: `→ ± ${formatDurationLocal(d.seconds)}`, error: false }
+  const preview = `→ ± ${formatDurationLocal(d.seconds)}`
+  return { value: { ...d, sign: 1 }, label: preview, error: false }
 }
 
 function labelDate(d) {
