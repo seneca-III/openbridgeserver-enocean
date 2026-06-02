@@ -103,6 +103,13 @@ class DataPointRegistry:
                 value = _json.loads(row["value"])
             except Exception:
                 value = row["value"]
+            if dp.data_type == "TIME" and isinstance(value, str):
+                import datetime as _dt
+
+                try:
+                    value = _dt.time.fromisoformat(value)
+                except ValueError:
+                    pass
             state.value = value
             state.quality = "good"
             from datetime import datetime
