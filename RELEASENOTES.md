@@ -88,6 +88,7 @@
 * Security: (Upstream PR #565): prevent stored XSS via obfuscated `javascript:`/`data:` URLs in Toggle SVG icon rendering
 * Security: (Upstream PR #572): prevent stored XSS by rejecting SVG uploads in the background catalog.
 * Security: (Upstream PR #551): sanitize markdown HTML rendering in Text widget to prevent stored XSS.
+* Security: (Upstream PR #684): prevent stored XSS via `data:` SVG href rendering in icon sanitization.
 * Test stability: Monitor/Ringbuffer E2E scenarios stabilized. https://github.com/abeggled/openbridgeserver/pull/494
 * Visu: Internal API base URL usage fixed for E2E/runtime alignment. https://github.com/abeggled/openbridgeserver/pull/484
 * Visu: History widget now updates automatically when new values arrive via WebSocket. https://github.com/abeggled/openbridgeserver/issues/408
