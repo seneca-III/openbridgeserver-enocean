@@ -1563,7 +1563,7 @@ async function doKnxImport() {
     knxResult.value = { ok: true, text: data.message }
     await loadKnxGaCount()
   } catch (err) {
-    knxResult.value = { ok: false, text: err.response?.data?.detail ?? 'Import fehlgeschlagen' }
+    knxResult.value = { ok: false, text: err.response?.data?.detail ?? t('settings.importexport.importFailed') }
   } finally {
     knxImporting.value = false
   }

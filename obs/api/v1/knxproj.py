@@ -346,10 +346,10 @@ async def import_knxproj_file(
     except Exception as e:
         logger.warning("Gebäude/Gewerke-Import fehlgeschlagen (wird ignoriert): %s", e)
 
-    # Import Trades (Gewerke) — direct ZIP/XML parsing, no xknxproject needed
+    # Import Trades (Gewerke) — direct ZIP/XML parsing; password forwarded for protected files
     trades_count = 0
     try:
-        trade_records = parse_knxproj_trades(content)
+        trade_records = parse_knxproj_trades(content, password or None)
         if trade_records:
             await db.execute_and_commit("DELETE FROM knx_trades")
             await db.executemany(
