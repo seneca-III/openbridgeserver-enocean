@@ -21,6 +21,7 @@ from typing import Any
 
 from obs.core.json import json_dumps
 from obs.models.datapoint import DataPoint, DataPointCreate, DataPointUpdate
+from obs.models.types import DataTypeRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -103,12 +104,10 @@ class DataPointRegistry:
                 value = _json.loads(row["value"])
             except Exception:
                 value = row["value"]
-            if dp.data_type == "TIME" and isinstance(value, str):
-                import datetime as _dt
-
+            if dp.data_type in {"DATE", "TIME", "DATETIME"}:
                 try:
-                    value = _dt.time.fromisoformat(value)
-                except ValueError:
+                    value = DataTypeRegistry.get(dp.data_type).mqtt_deserializer(row["value"])
+                except Exception:
                     pass
             state.value = value
             state.quality = "good"

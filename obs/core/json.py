@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+from datetime import date, datetime, time
 from typing import Any
 
 
 def json_default(value: Any) -> Any:
-    if hasattr(value, "isoformat"):
+    if isinstance(value, (date, datetime, time)):
         return value.isoformat()
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
@@ -23,6 +24,6 @@ def jsonable(value: Any) -> Any:
         return [jsonable(item) for item in value]
     if isinstance(value, tuple):
         return [jsonable(item) for item in value]
-    if hasattr(value, "isoformat"):
+    if isinstance(value, (date, datetime, time)):
         return value.isoformat()
     return value

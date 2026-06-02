@@ -29,6 +29,7 @@ Implementierte DPTs:
 
 from __future__ import annotations
 
+import datetime
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -235,9 +236,7 @@ def _dpt3_encode(v: Any) -> bytes:
 # Byte0: DoW(7..5)|Hour(4..0)  Byte1: Minutes(5..0)  Byte2: Seconds(5..0)
 # DoW: 1=Mon…7=Sun, 0=any day
 # Return datetime.time to match the OBS TIME datapoint type.
-def _dpt10_decode(b: bytes):
-    import datetime
-
+def _dpt10_decode(b: bytes) -> datetime.time:
     try:
         hour = b[0] & 0x1F
         minute = b[1] & 0x3F
