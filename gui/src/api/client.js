@@ -266,6 +266,7 @@ export const iconsApi = {
   delete:         (names)                  => api.delete('/icons/', { data: { names } }),
   export:         (names = [])             => api.post('/icons/export', { names }, { responseType: 'blob' }),
   importFa:       (data)                   => api.post('/icons/fontawesome', data),
+  importKnxuf:    ()                       => api.post('/icons/knxuf'),
   getSettings:    ()                       => api.get('/icons/settings'),
   saveSettings:   (data)                   => api.put('/icons/settings', data),
 }

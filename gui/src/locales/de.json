@@ -1727,7 +1727,12 @@
       "faDeleted": "API Key gelöscht.",
       "deleted": "{n} Icon(s) gelöscht",
       "loadError": "Fehler beim Laden der Icons",
-      "faImportFailed": "FontAwesome Import fehlgeschlagen"
+      "faImportFailed": "FontAwesome Import fehlgeschlagen",
+      "knxufTitle": "KNX UF Iconset importieren",
+      "knxufDesc": "Lädt alle Icons aus dem ha-knx-uf-iconset direkt aus dem GitHub-Repository und speichert sie mit dem Präfix kuf_ in der Icon-Bibliothek. Bereits vorhandene kuf_-Icons werden überschrieben.",
+      "knxufButton": "KNX UF Icons importieren",
+      "knxufImporting": "Importiere KNX UF Icons…",
+      "knxufFailed": "KNX UF Import fehlgeschlagen"
     },
     "links": {
       "title": "Eigene Links",

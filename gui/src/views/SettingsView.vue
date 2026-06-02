@@ -662,6 +662,23 @@
         </div>
       </div>
 
+      <!-- KNX UF Iconset Import -->
+      <div class="card">
+        <div class="card-header">
+          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.icons.knxufTitle') }}</h3>
+        </div>
+        <div class="card-body flex flex-col gap-4">
+          <p class="text-sm text-slate-400">{{ $t('settings.icons.knxufDesc') }}</p>
+          <div v-if="knxufMsg" :class="['p-3 rounded-lg text-sm border', knxufMsg.ok ? 'bg-green-500/10 text-green-400 border-green-500/30' : 'bg-red-500/10 text-red-400 border-red-500/30']">
+            {{ knxufMsg.text }}
+          </div>
+          <button @click="doKnxufImport" class="btn-primary btn-sm w-fit" :disabled="knxufImporting" data-testid="btn-knxuf-import">
+            <Spinner v-if="knxufImporting" size="sm" color="white" />
+            {{ knxufImporting ? $t('settings.icons.knxufImporting') : $t('settings.icons.knxufButton') }}
+          </button>
+        </div>
+      </div>
+
       <!-- FontAwesome Import -->
       <div class="card">
         <div class="card-header">
@@ -1644,6 +1661,23 @@ const iconsSelected = ref(new Set())
 const iconsSearch   = ref('')
 const iconsMsg      = ref(null)
 const iconsDragOver = ref(false)
+
+// KNX UF Iconset
+const knxufImporting = ref(false)
+const knxufMsg       = ref(null)
+
+async function doKnxufImport() {
+  knxufImporting.value = true; knxufMsg.value = null
+  try {
+    const { data } = await iconsApi.importKnxuf()
+    knxufMsg.value = { ok: data.imported > 0, text: data.message }
+    if (data.imported > 0) await loadIcons()
+  } catch (e) {
+    knxufMsg.value = { ok: false, text: e.response?.data?.detail ?? t('settings.icons.knxufFailed') }
+  } finally {
+    knxufImporting.value = false
+  }
+}
 
 // FontAwesome form
 const faIconNames = ref('')
