@@ -31,6 +31,11 @@ import aiosqlite
 logger = logging.getLogger(__name__)
 _UNSET = object()
 _ALLOWED_STORAGE_MODELS = {"memory", "disk", "file"}
+_SQLITE_CORRUPTION_MARKERS = (
+    "database disk image is malformed",
+    "file is not a database",
+    "integrity_check failed",
+)
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ringbuffer (
@@ -127,15 +132,13 @@ class RingBuffer:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
-        path = ":memory:" if self._storage == "memory" else self._disk_path
-        self._conn = await aiosqlite.connect(path)
-        self._conn.row_factory = aiosqlite.Row
-        await self._conn.execute("PRAGMA foreign_keys=ON")
-        if self._storage in {"disk", "file"}:
-            await self._conn.execute("PRAGMA journal_mode=WAL")
-        await self._conn.executescript(_SCHEMA)
-        await self._ensure_compat_schema()
-        await self._conn.commit()
+        async with self._lock:
+            try:
+                await self._open_connection_locked()
+            except Exception as exc:
+                if not self._can_recover_from(exc):
+                    raise
+                await self._recover_corrupt_storage_locked(exc)
         logger.info(
             "RingBuffer started (%s, max_entries=%s, max_file_size_bytes=%s, max_age=%s)",
             self._storage,
@@ -145,9 +148,7 @@ class RingBuffer:
         )
 
     async def stop(self) -> None:
-        if self._conn:
-            await self._conn.close()
-            self._conn = None
+        await self._close_connection()
 
     # ------------------------------------------------------------------
     # Runtime config switch
@@ -202,8 +203,7 @@ class RingBuffer:
 
             # Model switch: close old connection and start empty without migration.
             old_storage = self._storage
-            if self._conn:
-                await self._conn.close()
+            await self._close_connection()
 
             self._storage = storage
             self._max_entries = resolved_max_entries
@@ -211,14 +211,7 @@ class RingBuffer:
             self._max_age = int(resolved_max_age) if resolved_max_age is not None else None
 
             # Open new connection
-            path = ":memory:" if storage == "memory" else self._disk_path
-            self._conn = await aiosqlite.connect(path)
-            self._conn.row_factory = aiosqlite.Row
-            await self._conn.execute("PRAGMA foreign_keys=ON")
-            if storage in {"disk", "file"}:
-                await self._conn.execute("PRAGMA journal_mode=WAL")
-            await self._conn.executescript(_SCHEMA)
-            await self._ensure_compat_schema()
+            await self._open_connection_locked()
             await self._conn.execute("DELETE FROM ringbuffer")
             await self._conn.commit()
             self._last_values.clear()
@@ -251,25 +244,67 @@ class RingBuffer:
             return
         metadata_obj = metadata or {}
         async with self._lock:
-            cursor = await self._conn.execute(
-                """INSERT INTO ringbuffer
-                   (ts, datapoint_id, topic, old_value, new_value, source_adapter, quality, metadata_version, metadata)
-                   VALUES (?,?,?,?,?,?,?,?,?)""",
-                (
+            try:
+                await self._record_locked(
                     ts,
                     datapoint_id,
                     topic,
-                    json.dumps(old_value),
-                    json.dumps(new_value),
+                    old_value,
+                    new_value,
                     source_adapter,
                     quality,
                     metadata_version,
-                    json.dumps(metadata_obj),
-                ),
-            )
-            await self._persist_metadata_indexes(cursor.lastrowid, metadata_obj)
-            await self._conn.commit()
-            await self._trim(reference_ts=ts)
+                    metadata_obj,
+                )
+            except Exception as exc:
+                if not self._can_recover_from(exc):
+                    raise
+                await self._recover_corrupt_storage_locked(exc)
+                await self._record_locked(
+                    ts,
+                    datapoint_id,
+                    topic,
+                    old_value,
+                    new_value,
+                    source_adapter,
+                    quality,
+                    metadata_version,
+                    metadata_obj,
+                )
+
+    async def _record_locked(
+        self,
+        ts: str,
+        datapoint_id: str,
+        topic: str,
+        old_value: Any,
+        new_value: Any,
+        source_adapter: str,
+        quality: str,
+        metadata_version: int,
+        metadata_obj: dict[str, Any],
+    ) -> None:
+        if not self._conn:
+            return
+        cursor = await self._conn.execute(
+            """INSERT INTO ringbuffer
+               (ts, datapoint_id, topic, old_value, new_value, source_adapter, quality, metadata_version, metadata)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (
+                ts,
+                datapoint_id,
+                topic,
+                json.dumps(old_value),
+                json.dumps(new_value),
+                source_adapter,
+                quality,
+                metadata_version,
+                json.dumps(metadata_obj),
+            ),
+        )
+        await self._persist_metadata_indexes(cursor.lastrowid, metadata_obj)
+        await self._conn.commit()
+        await self._trim(reference_ts=ts)
 
     async def _trim(self, reference_ts: str | None = None) -> None:
         """Apply retention rules and keep max_entries compatibility."""
@@ -668,12 +703,16 @@ class RingBuffer:
             sql += f" ORDER BY id {direction}"
 
         rows: list[Any]
-        if value_filters:
-            rows = await self._fetchall(sql, params)
-        else:
+        if not value_filters:
             sql += " LIMIT ? OFFSET ?"
             params.append(limit)
             params.append(offset)
+        try:
+            rows = await self._fetchall(sql, params)
+        except Exception as exc:
+            if not self._can_recover_from(exc):
+                raise
+            await self._recover_corrupt_storage(exc)
             rows = await self._fetchall(sql, params)
 
         entries = [
@@ -723,8 +762,15 @@ class RingBuffer:
                 "max_age": self._max_age,
                 "file_size_bytes": 0,
             }
-        async with self._conn.execute("SELECT COUNT(*) AS c, MIN(ts) AS oldest, MAX(ts) AS newest FROM ringbuffer") as cur:
-            row = await cur.fetchone()
+        try:
+            async with self._conn.execute("SELECT COUNT(*) AS c, MIN(ts) AS oldest, MAX(ts) AS newest FROM ringbuffer") as cur:
+                row = await cur.fetchone()
+        except Exception as exc:
+            if not self._can_recover_from(exc):
+                raise
+            await self._recover_corrupt_storage(exc)
+            async with self._conn.execute("SELECT COUNT(*) AS c, MIN(ts) AS oldest, MAX(ts) AS newest FROM ringbuffer") as cur:
+                row = await cur.fetchone()
         oldest_ts = row[1] if row else None
         return {
             "total": row[0] if row else 0,
@@ -766,6 +812,79 @@ class RingBuffer:
         async with self._conn.execute(sql, params) as cur:
             return await cur.fetchall()
 
+    async def _open_connection_locked(self) -> None:
+        path = ":memory:" if self._storage == "memory" else self._disk_path
+        if self._storage in {"disk", "file"}:
+            directory = os.path.dirname(path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+        conn: aiosqlite.Connection | None = None
+        try:
+            conn = await aiosqlite.connect(path)
+            conn.row_factory = aiosqlite.Row
+            await conn.execute("PRAGMA foreign_keys=ON")
+            if self._storage in {"disk", "file"}:
+                await conn.execute("PRAGMA journal_mode=WAL")
+            self._conn = conn
+            await self._conn.executescript(_SCHEMA)
+            await self._ensure_compat_schema()
+            if self._storage in {"disk", "file"}:
+                await self._assert_integrity_ok()
+            await self._conn.commit()
+        except Exception:
+            if conn:
+                await conn.close()
+            if self._conn is conn:
+                self._conn = None
+            raise
+
+    async def _assert_integrity_ok(self) -> None:
+        if not self._conn:
+            return
+        async with self._conn.execute("PRAGMA integrity_check") as cur:
+            row = await cur.fetchone()
+        result = row[0] if row else ""
+        if str(result).lower() != "ok":
+            raise aiosqlite.DatabaseError(f"SQLite integrity_check failed: {result}")
+
+    async def _close_connection(self) -> None:
+        if self._conn:
+            await self._conn.close()
+            self._conn = None
+
+    async def _recover_corrupt_storage(self, exc: Exception) -> None:
+        async with self._lock:
+            await self._recover_corrupt_storage_locked(exc)
+
+    async def _recover_corrupt_storage_locked(self, exc: Exception) -> None:
+        if self._storage == "memory":
+            logger.warning("RingBuffer in-memory SQLite connection is corrupt; recreating empty database: %s", exc)
+            await self._close_connection()
+            await self._open_connection_locked()
+            self._last_values.clear()
+            return
+
+        logger.warning("RingBuffer SQLite database is corrupt; quarantining and recreating empty database: %s", exc)
+        await self._close_connection()
+        moved_paths = self._quarantine_storage_files()
+        await self._open_connection_locked()
+        self._last_values.clear()
+        logger.warning("RingBuffer recovered with empty database; quarantined files=%s", moved_paths)
+
+    def _quarantine_storage_files(self) -> list[str]:
+        stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+        moved: list[str] = []
+        for path in (self._disk_path, f"{self._disk_path}-wal", f"{self._disk_path}-shm"):
+            if not os.path.exists(path):
+                continue
+            target = f"{path}.corrupt-{stamp}"
+            os.replace(path, target)
+            moved.append(target)
+        return moved
+
+    def _can_recover_from(self, exc: Exception) -> bool:
+        return self._storage in {"disk", "file", "memory"} and _is_sqlite_corruption(exc)
+
 
 def _safe_loads(s: str | None) -> Any:
     if s is None:
@@ -779,6 +898,13 @@ def _safe_loads(s: str | None) -> Any:
 def _safe_loads_dict(s: str | None) -> dict[str, Any]:
     loaded = _safe_loads(s)
     return loaded if isinstance(loaded, dict) else {}
+
+
+def _is_sqlite_corruption(exc: Exception) -> bool:
+    if not isinstance(exc, aiosqlite.Error):
+        return False
+    message = str(exc).lower()
+    return any(marker in message for marker in _SQLITE_CORRUPTION_MARKERS)
 
 
 def _normalize_string_filters(values: list[str] | None) -> list[str]:
