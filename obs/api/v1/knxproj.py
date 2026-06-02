@@ -297,11 +297,19 @@ async def import_knxproj_file(
     except ValueError as e:
         msg = str(e)
         code = "INVALID_PASSWORD" if ("passwort" in msg.lower() or "verschl" in msg.lower()) else "PARSE_ERROR"
-        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"detail": msg, "error_code": code})
-    except Exception as e:
+        logger.warning("Fehler beim Parsen der .knxproj-Datei", exc_info=True)
+        detail = (
+            "Die .knxproj-Datei konnte nicht verarbeitet werden. "
+            "Bitte prüfe Datei und Passwort."
+            if code == "INVALID_PASSWORD"
+            else "Die .knxproj-Datei konnte nicht verarbeitet werden."
+        )
+        return JSONResponse(status_code=status.HTTP_400_BAD_REQUEST, content={"detail": detail, "error_code": code})
+    except Exception:
+        logger.exception("Unerwarteter Fehler beim Parsen der .knxproj-Datei")
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"detail": f"Unerwarteter Fehler beim Parsen: {e}", "error_code": "PARSE_ERROR"},
+            content={"detail": "Unerwarteter Fehler beim Parsen.", "error_code": "PARSE_ERROR"},
         )
 
     if not records:
