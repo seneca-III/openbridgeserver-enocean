@@ -32,13 +32,6 @@ from obs.security.url_targets import evaluate_url_target, resolve_url_target
 logger = logging.getLogger(__name__)
 
 
-def _is_private_host(hostname: str) -> bool:
-    host = (hostname or "").strip()
-    if not host:
-        return True
-    return not evaluate_url_target(f"http://{host}", allow_loopback=True).allowed
-
-
 def _msg_to_str(v: object) -> str:
     """Convert any node output value to a message string.
 
@@ -141,17 +134,6 @@ async def _resolve_safe_image_url(url: str) -> tuple[str, str, str] | None:
     pinned_url = urlunparse((parsed.scheme, netloc, parsed.path, parsed.params, parsed.query, parsed.fragment))
     host_header = f"{target.hostname_ascii}:{port}" if has_explicit_port else target.hostname_ascii
     return pinned_url, host_header, pinned_ip
-
-
-def _resolve_public_http_host(hostname: str, port: int | None) -> list[str]:
-    scheme = "https" if port == 443 else "http"
-    netloc = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
-    if port is not None:
-        netloc = f"{netloc}:{port}"
-    try:
-        return resolve_url_target(f"{scheme}://{netloc}").addresses
-    except ValueError:
-        return []
 
 
 def _origin_tuple(parsed: Any) -> tuple[str, str, int] | None:

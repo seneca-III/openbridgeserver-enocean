@@ -14,9 +14,9 @@ import asyncio
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from obs.logic.manager import LogicManager, _is_private_host, _read_secret_file
+from obs.logic.manager import LogicManager, _read_secret_file
 from obs.logic.models import FlowData
-from obs.security.url_targets import UrlTargetDecision
+from obs.security.url_targets import UrlTargetDecision, evaluate_url_target
 from tests.unit.conftest import edge, make_executor, node
 
 # ===========================================================================
@@ -52,28 +52,28 @@ def _mock_response(status_code: int, json_data: object | None = None, text: str 
 
 
 class TestApiClientSsrfHostGuard:
-    """Unit tests for low-level host classification in SSRF guard."""
+    """Unit tests for api_client URL target policy settings."""
 
     def test_empty_host_is_blocked(self):
-        assert _is_private_host("") is True
+        assert evaluate_url_target("http://", allow_loopback=True).allowed is False
 
     def test_localhost_localdomain_is_allowed(self):
-        assert _is_private_host("localhost.localdomain") is False
+        assert evaluate_url_target("http://localhost.localdomain", allow_loopback=True).allowed is True
 
     def test_direct_loopback_ip_is_allowed(self):
-        assert _is_private_host("127.0.0.1") is False
+        assert evaluate_url_target("http://127.0.0.1", allow_loopback=True).allowed is True
 
     @patch("obs.security.url_targets.socket.getaddrinfo", side_effect=OSError("dns fail"))
     def test_dns_failure_is_blocked(self, _mock_getaddrinfo):
-        assert _is_private_host("example.com") is True
+        assert evaluate_url_target("http://example.com", allow_loopback=True).allowed is False
 
     @patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(None, None, None, None, ("not-an-ip", 0))])
     def test_invalid_dns_answer_is_blocked(self, _mock_getaddrinfo):
-        assert _is_private_host("example.com") is True
+        assert evaluate_url_target("http://example.com", allow_loopback=True).allowed is False
 
     @patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 0))])
     def test_loopback_dns_answer_is_allowed(self, _mock_getaddrinfo):
-        assert _is_private_host("example.com") is False
+        assert evaluate_url_target("http://example.com", allow_loopback=True).allowed is True
 
 
 class TestApiClientSecretFileGuard:
@@ -375,7 +375,17 @@ class TestApiClientManagerHttp:
                 "headers_secret_file": str(headers_file),
             },
         )
-        with patch("obs.logic.manager._is_private_host", return_value=False):
+        with patch(
+            "obs.logic.manager.evaluate_url_target",
+            return_value=UrlTargetDecision(
+                allowed=True,
+                url="http://example.com/api",
+                host="example.com",
+                resolved_ips=["93.184.216.34"],
+                blocked_ips=[],
+                reason="URL target is allowed",
+            ),
+        ):
             with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
                 outputs = self._run(manager, flow)
 
