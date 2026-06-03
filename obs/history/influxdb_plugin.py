@@ -32,6 +32,7 @@ from typing import Any
 
 import httpx
 
+from obs.core.json import json_dumps
 from obs.history.base import HistoryPlugin
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,7 @@ class InfluxDBHistoryPlugin(HistoryPlugin):
         ts_ns = int(ts.timestamp() * 1_000_000_000)
 
         dp_tag = self._escape_tag(str(datapoint_id))
-        raw_str = self._escape_field_str(json.dumps(value))
+        raw_str = self._escape_field_str(json_dumps(value))
         unit_str = self._escape_field_str(unit or "")
         quality_str = self._escape_field_str(quality)
 

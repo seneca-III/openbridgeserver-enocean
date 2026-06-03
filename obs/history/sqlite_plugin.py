@@ -15,6 +15,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from obs.core.json import json_dumps
 from obs.history.base import HistoryPlugin
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ class SQLiteHistoryPlugin(HistoryPlugin):
                VALUES (?,?,?,?,?,?)""",
             (
                 str(datapoint_id),
-                json.dumps(value),
+                json_dumps(value),
                 unit,
                 quality,
                 ts_str,

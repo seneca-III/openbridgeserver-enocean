@@ -28,6 +28,8 @@ from typing import Any
 
 import aiosqlite
 
+from obs.core.json import json_dumps
+
 logger = logging.getLogger(__name__)
 _UNSET = object()
 _ALLOWED_STORAGE_MODELS = {"memory", "disk", "file"}
@@ -307,8 +309,8 @@ class RingBuffer:
                 ts,
                 datapoint_id,
                 topic,
-                json.dumps(old_value),
-                json.dumps(new_value),
+                json_dumps(old_value),
+                json_dumps(new_value),
                 source_adapter,
                 quality,
                 metadata_version,

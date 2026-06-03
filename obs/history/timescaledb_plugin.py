@@ -29,6 +29,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from obs.core.json import json_dumps
 from obs.history.base import HistoryPlugin
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,7 @@ class TimescaleDBHistoryPlugin(HistoryPlugin):
         except (TypeError, ValueError):
             v_float = None
 
-        raw_str = json.dumps(value)
+        raw_str = json_dumps(value)
 
         async with self._pool.acquire() as conn:
             await conn.execute(
