@@ -7,6 +7,10 @@ PUSH_REFS="$(cat)"
 
 cd "$REPO_ROOT"
 
+if [ -d .venv ]; then
+  export PATH="$REPO_ROOT/.venv/bin:$PATH"
+fi
+
 changed_files_for_push() {
   if git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' >/dev/null 2>&1; then
     git diff --name-only --diff-filter=ACMR '@{upstream}...HEAD'
