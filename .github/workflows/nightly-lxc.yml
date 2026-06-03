@@ -1,0 +1,53 @@
+name: Nightly LXC Template
+
+on:
+  schedule:
+    - cron: '25 2 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: nightly-lxc
+  cancel-in-progress: false
+
+env:
+  LXC_ARTIFACT_RETENTION_DAYS: 14
+
+jobs:
+  dispatch:
+    name: Dispatch LXC template build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prune old LXC artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          RETENTION_DAYS: ${{ env.LXC_ARTIFACT_RETENTION_DAYS }}
+        run: |
+          set -euo pipefail
+
+          CUTOFF_EPOCH="$(date -u -d "${RETENTION_DAYS} days ago" +%s)"
+          gh api --paginate "/repos/${REPO}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select((.name == "lxc-amd64") or (.name == "lxc-arm64") or (.name == "app-bundle")) | [.id, .created_at, .name] | @tsv' \
+            > artifacts.tsv
+
+          while IFS=$'\t' read -r ARTIFACT_ID CREATED_AT ARTIFACT_NAME; do
+            [[ -z "$ARTIFACT_ID" ]] && continue
+            CREATED_EPOCH="$(date -u -d "$CREATED_AT" +%s)"
+            if (( CREATED_EPOCH < CUTOFF_EPOCH )); then
+              echo "Deleting old LXC artifact ${ARTIFACT_NAME} (${ARTIFACT_ID}) from ${CREATED_AT}"
+              gh api --method DELETE "/repos/${REPO}/actions/artifacts/${ARTIFACT_ID}"
+            fi
+          done < artifacts.tsv
+
+      - name: Dispatch existing LXC template workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh workflow run lxc-template.yml \
+            --repo "$REPO" \
+            --ref main
