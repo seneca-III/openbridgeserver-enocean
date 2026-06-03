@@ -90,6 +90,7 @@ _NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 _PUSHOVER_ATTACHMENT_MAX_BYTES = 5_000_000
 _SECRET_FILE_MAX_BYTES = 8192
 _SECRET_FILE_DEFAULT_ROOT = "/run/secrets"
+_API_CLIENT_RETRYABLE_METHODS = {"GET", "HEAD", "OPTIONS"}
 
 
 def _secret_file_root() -> Path:
@@ -1139,6 +1140,8 @@ class LogicManager:
                             break
                         except httpx.RequestError as req_exc:
                             last_transport_error = req_exc
+                            if method not in _API_CLIENT_RETRYABLE_METHODS:
+                                break
                             continue
                 if resp is None:
                     raise last_transport_error

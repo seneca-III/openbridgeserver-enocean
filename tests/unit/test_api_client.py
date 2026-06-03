@@ -173,6 +173,14 @@ class TestApiClientFetchTarget:
         assert headers == {"Host": "example.com"}
         assert extensions == {}
 
+    @patch("obs.logic.manager._resolve_public_http_host", return_value=["2001:4860:4860::8888"])
+    def test_builds_bracketed_host_header_for_ipv6_target(self, _mock_resolve):
+        pinned_urls, headers, extensions = _build_api_client_fetch_targets("https://[2001:4860:4860::8888]/path")
+
+        assert pinned_urls == ["https://[2001:4860:4860::8888]/path"]
+        assert headers == {"Host": "[2001:4860:4860::8888]"}
+        assert extensions == {"sni_hostname": "2001:4860:4860::8888"}
+
     @patch("obs.logic.manager._resolve_public_http_host", return_value=["93.184.216.34", "93.184.216.35", "93.184.216.34"])
     def test_preserves_userinfo_and_returns_unique_pinned_targets(self, _mock_resolve):
         pinned_urls, headers, extensions = _build_api_client_fetch_targets("https://user:pa%3Ass@example.com:8443/api?x=1")
@@ -322,6 +330,21 @@ class TestApiClientManagerHttp:
 
         mock_client.request.assert_not_called()
         assert outputs["ac"]["success"] is False  # placeholder stays
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    def test_empty_url_skips_http_call(self, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_client.request = AsyncMock()
+
+        manager = _make_manager()
+        _, flow = self._build_graph(extra_data={"url": ""})
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            outputs = self._run(manager, flow)
+
+        mock_client.request.assert_not_called()
+        assert outputs["ac"]["success"] is False
 
     @patch("obs.logic.manager.httpx.AsyncClient")
     def test_get_request_does_not_send_body(self, mock_client_cls):
@@ -512,6 +535,35 @@ class TestApiClientManagerHttp:
             "https://93.184.216.35/api",
         ]
         assert outputs["ac"]["response"] == "all addresses refused"
+        assert outputs["ac"]["status"] is None
+        assert outputs["ac"]["success"] is False
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    def test_post_request_does_not_retry_next_ip_after_transport_error(self, mock_client_cls):
+        captured_urls: list[str] = []
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        async def _fail(method, url, **kwargs):
+            captured_urls.append(url)
+            request = httpx.Request(method, url)
+            raise httpx.ConnectError("post address refused", request=request)
+
+        mock_client.request = _fail
+
+        manager = _make_manager()
+        _, flow = self._build_graph("POST", {"url": "https://example.com/api"})
+        dns_answers = [
+            (None, None, None, None, ("93.184.216.34", 443)),
+            (None, None, None, None, ("93.184.216.35", 443)),
+        ]
+        with patch("obs.logic.manager.socket.getaddrinfo", return_value=dns_answers):
+            with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+                outputs = self._run(manager, flow, {"ac": {"trigger": True, "body": {"x": 1}}})
+
+        assert captured_urls == ["https://93.184.216.34/api"]
+        assert outputs["ac"]["response"] == "post address refused"
         assert outputs["ac"]["status"] is None
         assert outputs["ac"]["success"] is False
 
