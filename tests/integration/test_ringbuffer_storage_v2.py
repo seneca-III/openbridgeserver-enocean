@@ -210,7 +210,7 @@ async def test_file_storage_recovers_malformed_database_during_query(tmp_path: P
 
         async def _raise_malformed_once(*args, **kwargs):
             calls["count"] += 1
-            if calls["count"] == 1:
+            if calls["count"] <= 2:
                 raise aiosqlite.DatabaseError("file is not a database")
             return await original_fetchall(*args, **kwargs)
 
@@ -218,9 +218,40 @@ async def test_file_storage_recovers_malformed_database_during_query(tmp_path: P
 
         entries = await rb.query(q="dp-storage-v2", limit=10)
 
-        assert calls["count"] == 2
+        assert calls["count"] == 3
         assert entries == []
         assert list(tmp_path.glob("ringbuffer-malformed-query.db.corrupt-*"))
+    finally:
+        await rb.stop()
+
+
+async def test_file_storage_skips_duplicate_recovery_after_stale_query_error(tmp_path: Path, monkeypatch):
+    db_path = tmp_path / "ringbuffer-stale-query-error.db"
+    rb = RingBuffer(storage="file", max_entries=100, disk_path=str(db_path))
+    await rb.start()
+    try:
+        await _record_value(rb, 1, "2026-01-01T00:00:00.000Z")
+
+        calls = {"count": 0, "recoveries": 0}
+        original_fetchall = rb._fetchall  # noqa: SLF001
+
+        async def _raise_stale_malformed_once(*args, **kwargs):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                raise aiosqlite.DatabaseError("file is not a database")
+            return await original_fetchall(*args, **kwargs)
+
+        async def _count_recovery(*args, **kwargs):
+            calls["recoveries"] += 1
+
+        monkeypatch.setattr(rb, "_fetchall", _raise_stale_malformed_once)
+        monkeypatch.setattr(rb, "_recover_corrupt_storage_locked", _count_recovery)
+
+        entries = await rb.query(q="dp-storage-v2", limit=10)
+
+        assert calls == {"count": 2, "recoveries": 0}
+        assert [entry.new_value for entry in entries] == [1]
+        assert not list(tmp_path.glob("ringbuffer-stale-query-error.db.corrupt-*"))
     finally:
         await rb.stop()
 
@@ -238,7 +269,7 @@ async def test_file_storage_recovers_malformed_database_during_stats(tmp_path: P
         def _raise_malformed_once(sql, *args, **kwargs):
             if str(sql).startswith("SELECT COUNT(*) AS c"):
                 calls["count"] += 1
-                if calls["count"] == 1:
+                if calls["count"] <= 2:
                     raise aiosqlite.DatabaseError("SQLite integrity_check failed: bad page")
             return original_execute(sql, *args, **kwargs)
 
@@ -246,7 +277,7 @@ async def test_file_storage_recovers_malformed_database_during_stats(tmp_path: P
 
         stats = await rb.stats()
 
-        assert calls["count"] == 1
+        assert calls["count"] == 2
         assert stats["total"] == 0
         assert stats["file_size_bytes"] >= 0
         assert list(tmp_path.glob("ringbuffer-malformed-stats.db.corrupt-*"))

@@ -721,8 +721,13 @@ class RingBuffer:
             if not self._can_recover_from(exc):
                 raise
             async with self._lock:
-                await self._recover_corrupt_storage_locked(exc)
-                rows = await self._fetchall(sql, params)
+                try:
+                    rows = await self._fetchall(sql, params)
+                except Exception as locked_exc:
+                    if not self._can_recover_from(locked_exc):
+                        raise
+                    await self._recover_corrupt_storage_locked(locked_exc)
+                    rows = await self._fetchall(sql, params)
 
         entries = [
             RingBufferEntry(
@@ -780,9 +785,15 @@ class RingBuffer:
             if not self._can_recover_from(exc):
                 raise
             async with self._lock:
-                await self._recover_corrupt_storage_locked(exc)
-                async with self._conn.execute("SELECT COUNT(*) AS c, MIN(ts) AS oldest, MAX(ts) AS newest FROM ringbuffer") as cur:
-                    row = await cur.fetchone()
+                try:
+                    async with self._conn.execute("SELECT COUNT(*) AS c, MIN(ts) AS oldest, MAX(ts) AS newest FROM ringbuffer") as cur:
+                        row = await cur.fetchone()
+                except Exception as locked_exc:
+                    if not self._can_recover_from(locked_exc):
+                        raise
+                    await self._recover_corrupt_storage_locked(locked_exc)
+                    async with self._conn.execute("SELECT COUNT(*) AS c, MIN(ts) AS oldest, MAX(ts) AS newest FROM ringbuffer") as cur:
+                        row = await cur.fetchone()
         oldest_ts = row[1] if row else None
         return {
             "total": row[0] if row else 0,
