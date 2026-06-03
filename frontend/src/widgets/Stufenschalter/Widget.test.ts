@@ -40,13 +40,17 @@ function mountWidget(config: Record<string, unknown>, value: unknown) {
   })
 }
 
+function legacyStepLabel(n: number): string {
+  return `Stufe ${n}`
+}
+
 describe('Stufenschalter widget labels', () => {
   it('localizes legacy German default labels without reopening the config', () => {
     const wrapper = mountWidget({
       steps: [
         { label: 'Aus', value: '0', icon: '', color: '#6b7280' },
-        { label: 'Stufe 1', value: '1', icon: '', color: '#3b82f6' },
-        { label: 'Stufe 2', value: '2', icon: '', color: '#10b981' },
+        { label: legacyStepLabel(1), value: '1', icon: '', color: '#3b82f6' },
+        { label: legacyStepLabel(2), value: '2', icon: '', color: '#10b981' },
       ],
     }, 2)
 

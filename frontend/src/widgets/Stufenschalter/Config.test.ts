@@ -50,12 +50,12 @@ describe('Stufenschalter config serialization', () => {
     expect((textInputs[3].element as HTMLInputElement).value).toBe('Step 1')
     expect((textInputs[5].element as HTMLInputElement).value).toBe('Step 2')
 
-    await textInputs[0].setValue('Fan speed')
+    await textInputs[0].setValue('FanSpeed')
 
     const emitted = wrapper.emitted('update:modelValue')
     expect(emitted).toHaveLength(1)
     expect(emitted![0][0]).toMatchObject({
-      label: 'Fan speed',
+      label: 'FanSpeed',
       steps: [
         { label: 'widgets.stufenschalter.defaultOffLabel', value: '0' },
         { label: 'widgets.stufenschalter.defaultStepLabel', value: '1' },

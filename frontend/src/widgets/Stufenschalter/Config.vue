@@ -25,17 +25,21 @@ const emit  = defineEmits<{ (e: 'update:modelValue', val: Record<string, unknown
 
 const { t } = useI18n()
 
-function defaultStepLabel(index: number): string {
-  return t(DEFAULT_STEP_LABEL, { n: index + 1 })
+function defaultStepLabelForValue(value: unknown, index: number): string {
+  return t(defaultStepLabelKeyForValue(value, index), defaultStepLabelParamsForValue(value, index))
 }
 
-function defaultStepLabelForValue(value: unknown, index: number): string {
+function defaultStepLabelKeyForValue(value: unknown, index: number): string {
   const numericValue = Number(value)
-  if (String(value ?? '') === '0') return t(DEFAULT_OFF_LABEL)
-  if (Number.isInteger(numericValue) && numericValue > 0) {
-    return t(DEFAULT_STEP_LABEL, { n: numericValue })
-  }
-  return defaultStepLabel(index)
+  if (String(value ?? '') === '0') return DEFAULT_OFF_LABEL
+  if (Number.isInteger(numericValue) && numericValue > 0) return DEFAULT_STEP_LABEL
+  return index === 0 ? DEFAULT_OFF_LABEL : DEFAULT_STEP_LABEL
+}
+
+function defaultStepLabelParamsForValue(value: unknown, index: number): Record<string, number> {
+  const numericValue = Number(value)
+  if (Number.isInteger(numericValue) && numericValue > 0) return { n: numericValue }
+  return { n: index + 1 }
 }
 
 function defaultStepLabelKey(index: number, value?: unknown): string {
@@ -202,7 +206,7 @@ function moveDown(i: number) {
               <input
                 :value="displayStepLabel(step, i)"
                 type="text"
-                :placeholder="defaultStepLabelForValue(step.value, i)"
+                :placeholder="$t(defaultStepLabelKeyForValue(step.value, i), defaultStepLabelParamsForValue(step.value, i))"
                 class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-blue-500"
                 @input="updateStepLabel(step, i, $event)"
               />
