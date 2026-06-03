@@ -15,6 +15,8 @@ from obs.api.v1.security import (
 )
 from obs.config import SecuritySettings, Settings, override_settings
 from obs.security.url_targets import (
+    UrlTargetDecision,
+    _match_allowlist,
     add_allowed_url_target,
     evaluate_url_target,
     list_allowed_url_targets,
@@ -146,15 +148,35 @@ def test_hostname_allowlist_allows_dns_failure(tmp_path):
     assert decision.resolved_ips == []
 
 
-def test_exact_hostname_allowlist_matches_resolved_private_ip(tmp_path):
+def test_exact_hostname_allowlist_does_not_override_resolved_private_ip(tmp_path):
     override_settings(_settings_for(tmp_path / "allow.yaml"))
     add_allowed_url_target("internal.example")
 
     with patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(None, None, None, None, ("10.38.113.23", 0))]):
         decision = evaluate_url_target("http://internal.example/status")
 
+    assert decision.allowed is False
+    assert decision.allowlisted_by is None
+    assert decision.blocked_ips == ["10.38.113.23"]
+    assert decision.suggested_target == "10.38.113.23/32"
+
+
+def test_hostname_allowlist_entry_is_skipped_for_resolved_public_ip(tmp_path):
+    override_settings(_settings_for(tmp_path / "allow.yaml"))
+    add_allowed_url_target("other.example")
+
+    with patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 0))]):
+        decision = evaluate_url_target("http://internal.example/status")
+
     assert decision.allowed is True
-    assert decision.allowlisted_by == "internal.example"
+    assert decision.allowlisted_by is None
+
+
+def test_hostname_allowlist_match_tolerates_unencodable_hostname(tmp_path):
+    override_settings(_settings_for(tmp_path / "allow.yaml"))
+    add_allowed_url_target("internal.example")
+
+    assert _match_allowlist("\udcff") is None
 
 
 def test_evaluate_rejects_wrong_scheme_and_missing_host(tmp_path):
@@ -163,6 +185,15 @@ def test_evaluate_rejects_wrong_scheme_and_missing_host(tmp_path):
     assert evaluate_url_target("ftp://example.com/file").reason == "Only HTTP/HTTPS URLs are allowed"
     assert evaluate_url_target("http:///path").reason == "URL has no hostname"
     assert evaluate_url_target("http://example.com", require_https=True).reason == "Only HTTPS URLs are allowed"
+
+
+def test_evaluate_reports_urlparse_exception(tmp_path):
+    override_settings(_settings_for(tmp_path / "allow.yaml"))
+
+    decision = evaluate_url_target("http://[::1")
+
+    assert decision.allowed is False
+    assert decision.reason.startswith("Invalid URL:")
 
 
 def test_evaluate_rejects_invalid_port(tmp_path):
@@ -181,6 +212,17 @@ def test_evaluate_allows_loopback_when_requested(tmp_path):
 
     assert decision.allowed is True
     assert decision.resolved_ips == ["127.0.0.1"]
+
+
+def test_evaluate_blocks_nat64_embedded_private_address(tmp_path):
+    override_settings(_settings_for(tmp_path / "allow.yaml"))
+
+    with patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(None, None, None, None, ("64:ff9b::a00:1", 0))]):
+        decision = evaluate_url_target("http://nat64.example/status")
+
+    assert decision.allowed is False
+    assert decision.blocked_ips == ["64:ff9b::a00:1"]
+    assert decision.suggested_target == "64:ff9b::a00:1/128"
 
 
 def test_evaluate_handles_invalid_dns_answer(tmp_path):
@@ -214,6 +256,30 @@ def test_resolve_url_target_returns_dns_pinned_target(tmp_path):
     assert target.hostname_ascii == "example.com"
     assert target.port == 8443
     assert target.addresses == ["93.184.216.34"]
+
+
+def test_url_target_decision_api_detail():
+    decision = UrlTargetDecision(
+        allowed=False,
+        url="http://internal.example/status",
+        host="internal.example",
+        resolved_ips=["10.38.113.23"],
+        blocked_ips=["10.38.113.23"],
+        reason="blocked",
+        allowlisted_by=None,
+        suggested_target="10.38.113.23/32",
+    )
+
+    assert decision.api_detail() == {
+        "code": "url_target_blocked",
+        "message": "blocked",
+        "url": "http://internal.example/status",
+        "host": "internal.example",
+        "resolved_ips": ["10.38.113.23"],
+        "blocked_ips": ["10.38.113.23"],
+        "allowlisted_by": None,
+        "suggested_target": "10.38.113.23/32",
+    }
 
 
 @pytest.mark.asyncio

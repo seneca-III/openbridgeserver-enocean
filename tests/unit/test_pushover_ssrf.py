@@ -28,19 +28,21 @@ def _resolved_target(
     url: str = "https://example.com/path.png",
     host: str = "example.com",
     ip: str = "93.184.216.34",
+    addresses: list[str] | None = None,
 ) -> ResolvedUrlTarget:
+    resolved_ips = addresses if addresses is not None else [ip]
     return ResolvedUrlTarget(
         original_url=url,
         scheme="https",
         hostname=host,
         hostname_ascii=host,
         port=None,
-        addresses=[ip],
+        addresses=resolved_ips,
         decision=UrlTargetDecision(
             allowed=True,
             url=url,
             host=host,
-            resolved_ips=[ip],
+            resolved_ips=resolved_ips,
             blocked_ips=[],
             reason="URL target is allowed",
         ),
@@ -58,6 +60,12 @@ class TestResolveSafeImageUrl:
     @patch("obs.logic.manager.asyncio.to_thread", new_callable=AsyncMock)
     async def test_rejects_non_global_ip_ranges(self, mock_to_thread):
         mock_to_thread.side_effect = ValueError("URL target resolves to a non-public address")
+        resolved = await _resolve_safe_image_url("https://example.com/path.png")
+        assert resolved is None
+
+    @patch("obs.logic.manager.asyncio.to_thread", new_callable=AsyncMock)
+    async def test_rejects_allowed_target_without_resolved_addresses(self, mock_to_thread):
+        mock_to_thread.return_value = _resolved_target(addresses=[])
         resolved = await _resolve_safe_image_url("https://example.com/path.png")
         assert resolved is None
 

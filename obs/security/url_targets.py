@@ -218,7 +218,7 @@ def _match_allowlist(hostname: str, addr: ipaddress._BaseAddress | None = None) 
         try:
             network = ipaddress.ip_network(entry.target, strict=False)
         except ValueError:
-            if host == entry.target:
+            if addr is None and host == entry.target:
                 return entry.target
             continue
         if addr is not None and addr in network:
