@@ -26,8 +26,16 @@ const emit  = defineEmits<{ (e: 'update:modelValue', val: Record<string, unknown
 const { t } = useI18n()
 
 function defaultStepLabel(index: number): string {
-  if (index === 0) return t(DEFAULT_OFF_LABEL)
-  return t(DEFAULT_STEP_LABEL, { n: index })
+  return t(DEFAULT_STEP_LABEL, { n: index + 1 })
+}
+
+function defaultStepLabelForValue(value: unknown, index: number): string {
+  const numericValue = Number(value)
+  if (String(value ?? '') === '0') return t(DEFAULT_OFF_LABEL)
+  if (Number.isInteger(numericValue) && numericValue > 0) {
+    return t(DEFAULT_STEP_LABEL, { n: numericValue })
+  }
+  return defaultStepLabel(index)
 }
 
 function defaultStepLabelKey(index: number, value?: unknown): string {
@@ -38,7 +46,7 @@ function normalizeStepLabel(raw: unknown, index: number, value?: unknown): strin
   const defaultKey = defaultStepLabelKey(index, value)
   if (typeof raw !== 'string') return defaultKey
   const label = raw.trim()
-  if (!label || label === DEFAULT_STEP_LABEL || label === DEFAULT_OFF_LABEL || label === defaultStepLabel(index)) {
+  if (!label || label === DEFAULT_STEP_LABEL || label === DEFAULT_OFF_LABEL || label === defaultStepLabelForValue(value, index)) {
     return defaultKey
   }
   return raw
@@ -80,7 +88,7 @@ watch(cfg, () => emit('update:modelValue', serializedConfig()), { deep: true })
 
 function displayStepLabel(step: Step, index: number): string {
   const label = normalizeStepLabel(step.label, index, step.value)
-  return label === DEFAULT_OFF_LABEL || label === DEFAULT_STEP_LABEL ? defaultStepLabel(index) : step.label
+  return label === DEFAULT_OFF_LABEL || label === DEFAULT_STEP_LABEL ? defaultStepLabelForValue(step.value, index) : step.label
 }
 
 function updateStepLabel(step: Step, index: number, event: Event) {
@@ -194,7 +202,7 @@ function moveDown(i: number) {
               <input
                 :value="displayStepLabel(step, i)"
                 type="text"
-                :placeholder="defaultStepLabel(i)"
+                :placeholder="defaultStepLabelForValue(step.value, i)"
                 class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-100 focus:outline-none focus:border-blue-500"
                 @input="updateStepLabel(step, i, $event)"
               />

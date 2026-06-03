@@ -36,17 +36,30 @@ function sanitizeColor(value: unknown, fallback = '#6b7280'): string {
   return fallback
 }
 
-function normalizeStepLabel(raw: unknown, index: number): string {
-  if (typeof raw !== 'string') return index === 0 ? t(DEFAULT_OFF_LABEL) : t(DEFAULT_STEP_LABEL, { n: index })
+function defaultStepLabel(value: unknown, index: number): string {
+  const numericValue = Number(value)
+  if (String(value ?? '') === '0') return t(DEFAULT_OFF_LABEL)
+  if (Number.isInteger(numericValue) && numericValue > 0) {
+    return t(DEFAULT_STEP_LABEL, { n: numericValue })
+  }
+  return t(DEFAULT_STEP_LABEL, { n: index + 1 })
+}
+
+function normalizeStepLabel(raw: unknown, value: unknown, index: number): string {
+  if (typeof raw !== 'string') return defaultStepLabel(value, index)
+  const label = raw.trim()
   if (raw === DEFAULT_OFF_LABEL) return t(DEFAULT_OFF_LABEL)
-  if (raw === DEFAULT_STEP_LABEL) return index === 0 ? t(DEFAULT_OFF_LABEL) : t(DEFAULT_STEP_LABEL, { n: index })
+  if (raw === DEFAULT_STEP_LABEL) return defaultStepLabel(value, index)
+  if (label === 'Aus') return t(DEFAULT_OFF_LABEL)
+  const legacyStepMatch = label.match(/^Stufe\s+(\d+)$/)
+  if (legacyStepMatch) return t(DEFAULT_STEP_LABEL, { n: Number(legacyStepMatch[1]) })
   return raw
 }
 
 const steps = computed<Step[]>(() => {
   const raw = props.config.steps as Partial<Step>[] | undefined
   return (raw ?? []).map((s, index) => ({
-    label: normalizeStepLabel(s.label, index),
+    label: normalizeStepLabel(s.label, s.value, index),
     value: String(s.value ?? ''),
     icon:  s.icon  ?? '',
     color: sanitizeColor(s.color),
