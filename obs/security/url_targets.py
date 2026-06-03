@@ -210,6 +210,8 @@ def remove_allowed_url_target(target: str) -> bool:
 def _is_blocked_ip(addr: ipaddress._BaseAddress, *, allow_loopback: bool) -> bool:  # type: ignore[attr-defined]
     if allow_loopback and addr.is_loopback:
         return False
+    if addr.is_multicast:
+        return True
     if isinstance(addr, ipaddress.IPv6Address) and addr in _NAT64_WELL_KNOWN_PREFIX:
         embedded = ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
         return not embedded.is_global

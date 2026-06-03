@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -259,6 +259,17 @@ def test_evaluate_blocks_nat64_embedded_private_address(tmp_path):
     assert decision.suggested_target == "64:ff9b::a00:1/128"
 
 
+@pytest.mark.parametrize("address", ["224.0.0.1", "ff02::1"])
+def test_evaluate_blocks_multicast_addresses(tmp_path, address):
+    override_settings(_settings_for(tmp_path / "allow.yaml"))
+
+    with patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(None, None, None, None, (address, 0))]):
+        decision = evaluate_url_target("http://multicast.example/status")
+
+    assert decision.allowed is False
+    assert decision.blocked_ips == [address]
+
+
 def test_evaluate_handles_invalid_dns_answer(tmp_path):
     override_settings(_settings_for(tmp_path / "allow.yaml"))
 
@@ -356,6 +367,35 @@ async def test_security_api_happy_paths(tmp_path):
 
     deleted = await delete_url_target_allowlist_entry("10.38.113.23/32", _admin="admin")
     assert deleted == {"deleted": True}
+
+
+@pytest.mark.asyncio
+async def test_security_api_check_runs_target_evaluation_off_event_loop(tmp_path):
+    override_settings(_settings_for(tmp_path / "allow.yaml"))
+
+    with patch("obs.api.v1.security.asyncio.to_thread", new_callable=AsyncMock) as mock_to_thread:
+        mock_to_thread.return_value = UrlTargetDecision(
+            allowed=True,
+            url="http://example.com/status",
+            host="example.com",
+            resolved_ips=["93.184.216.34"],
+            blocked_ips=[],
+            reason="URL target is allowed",
+        )
+
+        checked = await check_url_target(
+            UrlTargetCheckIn(url="http://example.com/status", require_https=True, allow_loopback=True),
+            _admin="admin",
+        )
+
+    mock_to_thread.assert_awaited_once_with(
+        evaluate_url_target,
+        "http://example.com/status",
+        require_https=True,
+        allow_loopback=True,
+    )
+    assert checked.allowed is True
+    assert checked.resolved_ips == ["93.184.216.34"]
 
 
 @pytest.mark.asyncio

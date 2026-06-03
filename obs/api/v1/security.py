@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
@@ -95,7 +97,12 @@ async def delete_url_target_allowlist_entry(
 
 @router.post("/url-target-check", response_model=UrlTargetDecisionOut)
 async def check_url_target(body: UrlTargetCheckIn, _admin: str = Depends(get_admin_user)) -> UrlTargetDecisionOut:
-    decision = evaluate_url_target(body.url, require_https=body.require_https, allow_loopback=body.allow_loopback)
+    decision = await asyncio.to_thread(
+        evaluate_url_target,
+        body.url,
+        require_https=body.require_https,
+        allow_loopback=body.allow_loopback,
+    )
     return UrlTargetDecisionOut(
         allowed=decision.allowed,
         url=decision.url,
