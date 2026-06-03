@@ -32,6 +32,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import pytest
 
 import obs.api.v1.weather as _weather_module
+from obs.security.url_targets import UrlTargetDecision
 
 pytestmark = pytest.mark.integration
 
@@ -41,7 +42,18 @@ def bypass_ssrf():
     """Deaktiviert SSRF-Blocking für Tests die einen lokalen Mock-Server auf
     127.0.0.1 verwenden. Die SSRF-Tests (12–15) dürfen diese Fixture NICHT nutzen.
     """
-    with unittest.mock.patch.object(_weather_module, "_BLOCKED_NETWORKS", []):
+    with unittest.mock.patch.object(
+        _weather_module,
+        "evaluate_url_target",
+        return_value=UrlTargetDecision(
+            allowed=True,
+            url="http://127.0.0.1",
+            host="127.0.0.1",
+            resolved_ips=["127.0.0.1"],
+            blocked_ips=[],
+            reason="test bypass",
+        ),
+    ):
         yield
 
 
@@ -265,7 +277,7 @@ async def test_fetch_ssrf_loopback_ipv4_blocked(client, auth_headers):
         headers=auth_headers,
     )
     assert resp.status_code == 400
-    assert "gesperrt" in resp.json().get("detail", "").lower()
+    assert resp.json()["detail"]["code"] == "url_target_blocked"
 
 
 # 13. Loopback via localhost-Hostname
@@ -275,7 +287,7 @@ async def test_fetch_ssrf_localhost_blocked(client, auth_headers):
         headers=auth_headers,
     )
     assert resp.status_code == 400
-    assert "gesperrt" in resp.json().get("detail", "").lower()
+    assert resp.json()["detail"]["code"] == "url_target_blocked"
 
 
 # 14. Link-local / Cloud-Metadata-Endpunkt (AWS IMDSv1)
@@ -285,7 +297,7 @@ async def test_fetch_ssrf_metadata_ip_blocked(client, auth_headers):
         headers=auth_headers,
     )
     assert resp.status_code == 400
-    assert "gesperrt" in resp.json().get("detail", "").lower()
+    assert resp.json()["detail"]["code"] == "url_target_blocked"
 
 
 # 15. Loopback IPv6
@@ -295,4 +307,4 @@ async def test_fetch_ssrf_loopback_ipv6_blocked(client, auth_headers):
         headers=auth_headers,
     )
     assert resp.status_code == 400
-    assert "gesperrt" in resp.json().get("detail", "").lower()
+    assert resp.json()["detail"]["code"] == "url_target_blocked"

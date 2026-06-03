@@ -51,6 +51,7 @@ class DatabaseSettings(BaseModel):
 class SecuritySettings(BaseModel):
     jwt_secret: str = "changeme"
     jwt_expire_minutes: int = 1440
+    url_target_allowlist_path: str = "/data/secrets/url-target-allowlist.yaml"
 
     @field_validator("jwt_secret")
     @classmethod

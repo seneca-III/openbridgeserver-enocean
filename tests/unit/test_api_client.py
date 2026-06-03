@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from obs.logic.manager import LogicManager, _is_private_host, _read_secret_file
 from obs.logic.models import FlowData
+from obs.security.url_targets import UrlTargetDecision
 from tests.unit.conftest import edge, make_executor, node
 
 # ===========================================================================
@@ -62,15 +63,15 @@ class TestApiClientSsrfHostGuard:
     def test_direct_loopback_ip_is_allowed(self):
         assert _is_private_host("127.0.0.1") is False
 
-    @patch("obs.logic.manager.socket.getaddrinfo", side_effect=OSError("dns fail"))
+    @patch("obs.security.url_targets.socket.getaddrinfo", side_effect=OSError("dns fail"))
     def test_dns_failure_is_blocked(self, _mock_getaddrinfo):
         assert _is_private_host("example.com") is True
 
-    @patch("obs.logic.manager.socket.getaddrinfo", return_value=[(None, None, None, None, ("not-an-ip", 0))])
+    @patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(None, None, None, None, ("not-an-ip", 0))])
     def test_invalid_dns_answer_is_blocked(self, _mock_getaddrinfo):
         assert _is_private_host("example.com") is True
 
-    @patch("obs.logic.manager.socket.getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 0))])
+    @patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(None, None, None, None, ("127.0.0.1", 0))])
     def test_loopback_dns_answer_is_allowed(self, _mock_getaddrinfo):
         assert _is_private_host("example.com") is False
 
@@ -294,8 +295,19 @@ class TestApiClientManagerHttp:
         assert "data" not in captured
 
     @patch("obs.logic.manager.httpx.AsyncClient")
-    @patch("obs.logic.manager._is_private_host", return_value=True)
-    def test_blocked_target_sets_blocked_output(self, _mock_private_host, mock_client_cls):
+    @patch(
+        "obs.logic.manager.evaluate_url_target",
+        return_value=UrlTargetDecision(
+            allowed=False,
+            url="http://example.com/api",
+            host="example.com",
+            resolved_ips=["10.38.113.23"],
+            blocked_ips=["10.38.113.23"],
+            reason="URL target resolves to an internal address",
+            suggested_target="10.38.113.23/32",
+        ),
+    )
+    def test_blocked_target_sets_blocked_output(self, _mock_evaluate, mock_client_cls):
         """Blocked target must set explicit error output and skip HTTP call."""
         mock_client = AsyncMock()
         mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
@@ -308,7 +320,7 @@ class TestApiClientManagerHttp:
             outputs = self._run(manager, flow)
 
         mock_client.request.assert_not_called()
-        assert outputs["ac"]["response"] == "Blocked URL target"
+        assert outputs["ac"]["response"] == "Blocked URL target: URL target resolves to an internal address"
         assert outputs["ac"]["status"] is None
         assert outputs["ac"]["success"] is False
 
@@ -764,7 +776,7 @@ class TestNotifyPushoverImageUrlSecurity:
         mock_client.get = AsyncMock()
         mock_client.post = AsyncMock()
 
-        with patch("obs.logic.manager.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("100.64.0.1", 443))]):
+        with patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("100.64.0.1", 443))]):
             outputs = self._run_notify_pushover("https://example.com/image.png")
 
         mock_client.get.assert_not_called()
@@ -796,7 +808,7 @@ class TestNotifyPushoverImageUrlSecurity:
         post_resp.raise_for_status = MagicMock()
         mock_client.post = AsyncMock(return_value=post_resp)
 
-        with patch("obs.logic.manager.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]):
+        with patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]):
             outputs = self._run_notify_pushover("https://example.com/path/image.png?size=1")
 
         assert outputs["po"]["sent"] is True
