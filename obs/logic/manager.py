@@ -236,6 +236,32 @@ def _build_http_host_header(hostname_ascii: str, scheme: str, port: int | None) 
     return host_header
 
 
+def _build_api_client_fetch_target(url: str) -> tuple[str, dict[str, str], dict[str, str]]:
+    parsed = _parse_http_url(url)
+    if not parsed:
+        raise ValueError("Invalid URL target")
+    try:
+        hostname_ascii = parsed.hostname.encode("idna").decode("ascii")
+    except UnicodeError:
+        raise ValueError("Invalid URL target") from None
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError("Invalid URL target") from None
+
+    addresses = _resolve_public_http_host(hostname_ascii, port)
+    if not addresses:
+        raise ValueError("Blocked URL target")
+
+    pinned_ip = addresses[0]
+    pinned_host = f"[{pinned_ip}]" if ":" in pinned_ip else pinned_ip
+    netloc = f"{pinned_host}:{port}" if port is not None else pinned_host
+    pinned_url = parsed._replace(netloc=netloc).geturl()
+    headers = {"Host": _build_http_host_header(hostname_ascii, parsed.scheme, port)}
+    extensions = {"sni_hostname": hostname_ascii} if parsed.scheme == "https" else {}
+    return pinned_url, headers, extensions
+
+
 def _cookie_domain_matches(hostname: str, cookie_domain: str) -> bool:
     host = hostname.lower()
     domain = cookie_domain.lower().lstrip(".")
@@ -994,10 +1020,11 @@ class LogicManager:
             url = (node.data.get("url") or "").strip()
             if not url:
                 continue
-            parsed_url = urlparse(url)
-            if parsed_url.scheme not in {"http", "https"} or _is_private_host(parsed_url.hostname or ""):
-                logger.warning("Graph %s: blocked api_client target %s", graph_id[:8], url)
-                outputs[node.id].update({"response": "Blocked URL target", "status": None, "success": False})
+            try:
+                request_url, pinned_headers, request_extensions = _build_api_client_fetch_target(url)
+            except ValueError as exc:
+                logger.warning("Graph %s: blocked api_client target %s: %s", graph_id[:8], url, exc)
+                outputs[node.id].update({"response": str(exc), "status": None, "success": False})
                 continue
             method = (node.data.get("method", "GET") or "GET").upper()
             content_type = node.data.get("content_type", "application/json")
@@ -1060,8 +1087,12 @@ class LogicManager:
                             **extra_headers,
                             "Content-Type": "text/plain",
                         }
+                req_headers = {key: value for key, value in req_kwargs.get("headers", {}).items() if key.lower() != "host"}
+                req_kwargs["headers"] = {**req_headers, **pinned_headers}
+                if request_extensions:
+                    req_kwargs["extensions"] = request_extensions
                 async with httpx.AsyncClient(auth=auth, verify=verify_ssl) as client:
-                    resp = await client.request(method, url, **req_kwargs)
+                    resp = await client.request(method, request_url, **req_kwargs)
                     resp_text = resp.text
                     if len(resp_text) > 1_000_000:
                         resp_text = resp_text[:1_000_000]

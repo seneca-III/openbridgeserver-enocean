@@ -238,8 +238,8 @@ class TestApiClientManagerHttp:
         assert "data" not in captured
 
     @patch("obs.logic.manager.httpx.AsyncClient")
-    @patch("obs.logic.manager._is_private_host", return_value=True)
-    def test_blocked_target_sets_blocked_output(self, _mock_private_host, mock_client_cls):
+    @patch("obs.logic.manager._build_api_client_fetch_target", side_effect=ValueError("Blocked URL target"))
+    def test_blocked_target_sets_blocked_output(self, _mock_fetch_target, mock_client_cls):
         """Blocked target must set explicit error output and skip HTTP call."""
         mock_client = AsyncMock()
         mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
@@ -255,6 +255,39 @@ class TestApiClientManagerHttp:
         assert outputs["ac"]["response"] == "Blocked URL target"
         assert outputs["ac"]["status"] is None
         assert outputs["ac"]["success"] is False
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    def test_public_hostname_request_is_pinned_to_validated_ip(self, mock_client_cls):
+        """api_client must not let httpx re-resolve an already validated hostname."""
+        captured: dict = {}
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        async def _capture(method, url, **kwargs):
+            captured["method"] = method
+            captured["url"] = url
+            captured["kwargs"] = kwargs
+            return _mock_response(200, {"ok": True})
+
+        mock_client.request = _capture
+
+        manager = _make_manager()
+        _, flow = self._build_graph(
+            extra_data={
+                "url": "https://example.com:8443/api?x=1",
+                "headers": '{"host": "attacker.invalid", "X-Test": "kept"}',
+            },
+        )
+        with patch("obs.logic.manager.socket.getaddrinfo", return_value=[(None, None, None, None, ("93.184.216.34", 8443))]):
+            with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+                outputs = self._run(manager, flow)
+
+        assert outputs["ac"]["success"] is True
+        assert captured["method"] == "GET"
+        assert captured["url"] == "https://93.184.216.34:8443/api?x=1"
+        assert captured["kwargs"]["headers"] == {"X-Test": "kept", "Host": "example.com:8443"}
+        assert captured["kwargs"]["extensions"] == {"sni_hostname": "example.com"}
 
     @patch("obs.logic.manager.httpx.AsyncClient")
     def test_text_response_is_truncated_to_1mb(self, mock_client_cls):
