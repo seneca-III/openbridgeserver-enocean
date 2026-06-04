@@ -119,6 +119,7 @@ def test_rejects_url_target_without_hostname(tmp_path):
         "internal-.example",
         "internal..example",
         "10.38.113.23/33",
+        "10.38.113.23/24",
         "999.999.999.999",
         "http://exa mple.local/status",
         "http://internal.example:99999/status",

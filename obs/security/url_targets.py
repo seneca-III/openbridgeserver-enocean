@@ -118,7 +118,7 @@ def _normalise_target(raw: str) -> str:
     if not value:
         raise ValueError("target must not be empty")
     try:
-        return str(ipaddress.ip_network(value, strict=False))
+        return str(ipaddress.ip_network(value, strict=True))
     except ValueError:
         pass
     try:
@@ -137,7 +137,7 @@ def _normalise_target(raw: str) -> str:
     if hostname:
         value = hostname.lower()
         try:
-            return str(ipaddress.ip_network(value, strict=False))
+            return str(ipaddress.ip_network(value, strict=True))
         except ValueError:
             pass
         try:

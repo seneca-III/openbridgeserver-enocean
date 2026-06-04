@@ -107,7 +107,6 @@
 * Visu: Fixed-width Visu pages are now centered horizontally in the viewer. https://github.com/abeggled/openbridgeserver/pull/672
 
 ### Known Issues 🔔
-* Security: Camera proxy and weather API target validation still have a known DNS-rebinding TOCTOU limitation: the target is resolved and checked first, then `httpx` fetches the original URL and may resolve it again. This existed before PR #700 and is not a regression; DNS pinning similar to the iCal fetch path remains future hardening.
 * Security/UX: Hostname allowlist entries do not authorize unresolved hosts and do not unblock private-network DNS results. For LAN cameras, local calendars, local Pushover image sources, local weather endpoints, or similar internal services, use an IP address or CIDR allowlist entry instead of only a hostname.
 
 ## 2026.5.2
