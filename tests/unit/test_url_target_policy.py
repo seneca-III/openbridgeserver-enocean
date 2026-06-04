@@ -407,6 +407,19 @@ async def test_security_api_rejects_invalid_create_target(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_security_api_reports_allowlist_write_error(tmp_path):
+    override_settings(_settings_for(tmp_path / "allow.yaml"))
+
+    with patch("obs.api.v1.security.add_allowed_url_target", side_effect=OSError("permission denied")):
+        with pytest.raises(HTTPException) as exc:
+            await create_url_target_allowlist_entry(UrlTargetAllowlistCreate(target="10.38.113.23/32", reason="unit"), admin="admin")
+
+    assert exc.value.status_code == 500
+    assert "Could not write URL target allowlist" in exc.value.detail
+    assert "permission denied" in exc.value.detail
+
+
+@pytest.mark.asyncio
 async def test_security_api_happy_paths(tmp_path):
     override_settings(_settings_for(tmp_path / "allow.yaml"))
 

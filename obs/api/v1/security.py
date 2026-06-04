@@ -78,6 +78,8 @@ async def create_url_target_allowlist_entry(
         entry = add_allowed_url_target(body.target, reason=body.reason, created_by=admin)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Could not write URL target allowlist: {exc}") from exc
     return _entry_out(entry)
 
 
@@ -90,6 +92,8 @@ async def delete_url_target_allowlist_entry(
         deleted = remove_allowed_url_target(target)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    except OSError as exc:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Could not write URL target allowlist: {exc}") from exc
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Allowlist target not found")
     return {"deleted": True}
