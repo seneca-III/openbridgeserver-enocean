@@ -211,7 +211,9 @@ async def update_datapoint(
             )
         # Exclude 'value' from the metadata update — DataPoint has no value field.
     # The value is handled separately via DataValueEvent above.
-    dp = await reg.update(dp_id, body)
+    # Exclude 'value' from the metadata update: DataPoint has no value field.
+    # Setting value=None ensures exclude_none=True in reg.update() drops it.
+    dp = await reg.update(dp_id, body.model_copy(update={"value": None}))
 
     # If a value was explicitly supplied (even as null), publish a DataValueEvent
     # so the registry stores it and broadcasts it via MQTT (dp/{id}/value).
