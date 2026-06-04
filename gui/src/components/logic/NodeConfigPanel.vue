@@ -1598,7 +1598,6 @@ async function checkApiClientUrlTarget() {
   try {
     const { data } = await securityApi.checkUrlTarget({
       url: normaliseUrlTargetInput(localData.value.url),
-      allow_loopback: true,
     })
     urlTargetDecision.value = data
   } catch (e) {

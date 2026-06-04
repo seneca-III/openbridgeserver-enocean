@@ -117,6 +117,20 @@ def test_invalid_allowlist_documents_are_ignored(tmp_path):
     assert list_allowed_url_targets() == []
 
 
+def test_malformed_allowlist_yaml_is_ignored(tmp_path):
+    allowlist = tmp_path / "allow.yaml"
+    allowlist.write_text("version: 1\nallowed_targets:\n  - [broken\n", encoding="utf-8")
+    override_settings(_settings_for(allowlist))
+
+    assert list_allowed_url_targets() == []
+
+    with patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(None, None, None, None, ("10.38.113.23", 0))]):
+        decision = evaluate_url_target("http://internal.example/status")
+
+    assert decision.allowed is False
+    assert decision.blocked_ips == ["10.38.113.23"]
+
+
 def test_invalid_allowlist_items_are_skipped(tmp_path):
     allowlist = tmp_path / "allow.yaml"
     allowlist.write_text(

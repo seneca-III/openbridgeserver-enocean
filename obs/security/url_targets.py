@@ -109,8 +109,11 @@ def _read_allowlist_document(path: Path | None = None) -> dict[str, Any]:
     target_path = path or allowlist_path()
     if not target_path.exists():
         return {"version": 1, "allowed_targets": []}
-    with open(target_path, encoding="utf-8") as handle:
-        raw = yaml.safe_load(handle) or {}
+    try:
+        with open(target_path, encoding="utf-8") as handle:
+            raw = yaml.safe_load(handle) or {}
+    except yaml.YAMLError:
+        return {"version": 1, "allowed_targets": []}
     if isinstance(raw, list):
         return {"version": 1, "allowed_targets": raw}
     if not isinstance(raw, dict):
