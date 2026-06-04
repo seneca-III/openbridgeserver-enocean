@@ -65,6 +65,11 @@ class ModbusTcpAdapter(AdapterBase):
         super().__init__(event_bus, config, **kwargs)
         self._client: Any = None
         self._poll_tasks: list[asyncio.Task] = []
+        # Semaphore ensures only one Modbus read is in-flight at a time.
+        # Many embedded Modbus TCP devices (e.g. heating controllers) do not
+        # support concurrent requests — sending multiple requests before the
+        # previous response arrives causes timeouts and corrupts the TCP stream.
+        self._read_sem: asyncio.Semaphore = asyncio.Semaphore(1)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -148,6 +153,13 @@ class ModbusTcpAdapter(AdapterBase):
         except Exception:
             logger.warning("Invalid Modbus TCP binding config %s — skipped", binding.id)
             return
+
+        # Stagger the initial poll with a small random delay so that all tasks
+        # created simultaneously (e.g. on adapter start) do not all fire at once.
+        # Without jitter, N tasks × simultaneous reads overwhelm single-threaded
+        # Modbus TCP devices that only process one request at a time.
+        import random
+        await asyncio.sleep(random.uniform(0, min(bc.poll_interval * 0.5, 30)))
 
         while True:
             # Auto-reconnect if the client became disconnected (e.g. after a reload
@@ -270,29 +282,30 @@ class ModbusTcpAdapter(AdapterBase):
 
         count = register_count(bc.data_format)
 
-        if bc.register_type == "holding":
-            r = await self._modbus_call(
-                self._client.read_holding_registers,
-                bc.address,
-                count,
-                unit_id=bc.unit_id,
-            )
-        elif bc.register_type == "input":
-            r = await self._modbus_call(self._client.read_input_registers, bc.address, count, unit_id=bc.unit_id)
-        elif bc.register_type == "coil":
-            r = await self._modbus_call(self._client.read_coils, bc.address, count, unit_id=bc.unit_id)
-        elif bc.register_type == "discrete_input":
-            r = await self._modbus_call(self._client.read_discrete_inputs, bc.address, count, unit_id=bc.unit_id)
-        else:
-            return None
+        async with self._read_sem:
+            if bc.register_type == "holding":
+                r = await self._modbus_call(
+                    self._client.read_holding_registers,
+                    bc.address,
+                    count,
+                    unit_id=bc.unit_id,
+                )
+            elif bc.register_type == "input":
+                r = await self._modbus_call(self._client.read_input_registers, bc.address, count, unit_id=bc.unit_id)
+            elif bc.register_type == "coil":
+                r = await self._modbus_call(self._client.read_coils, bc.address, count, unit_id=bc.unit_id)
+            elif bc.register_type == "discrete_input":
+                r = await self._modbus_call(self._client.read_discrete_inputs, bc.address, count, unit_id=bc.unit_id)
+            else:
+                return None
 
-        if r.isError():
-            return None
+            if r.isError():
+                return None
 
-        if bc.register_type in ("coil", "discrete_input"):
-            return bool(r.bits[0])
+            if bc.register_type in ("coil", "discrete_input"):
+                return bool(r.bits[0])
 
-        return decode_registers(r.registers, bc.data_format, bc.byte_order, bc.word_order, bc.scale_factor)
+            return decode_registers(r.registers, bc.data_format, bc.byte_order, bc.word_order, bc.scale_factor)
 
     async def _write_register(self, bc: ModbusBindingConfig, value: Any) -> None:
         if bc.register_type == "coil":
