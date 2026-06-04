@@ -2256,8 +2256,21 @@ class TestCoerceValueForType:
         result = self.coerce("10:30:00", "TIME")
         assert result == datetime.time(10, 30, 0)
 
+    def test_time_invalid_string_raises(self):
+        with pytest.raises(ValueError):
+            self.coerce("not-a-time", "TIME")
+
     def test_datetime_from_iso_string(self):
         import datetime
 
         result = self.coerce("2025-01-15T10:30:00+00:00", "DATETIME")
         assert result == datetime.datetime(2025, 1, 15, 10, 30, 0, tzinfo=datetime.timezone.utc)
+
+    def test_datetime_invalid_string_raises(self):
+        with pytest.raises(ValueError):
+            self.coerce("not-a-datetime", "DATETIME")
+
+    def test_bool_on_integer_coerced_to_int(self):
+        assert self.coerce(True, "INTEGER") == 1
+        assert isinstance(self.coerce(True, "INTEGER"), int)
+        assert not isinstance(self.coerce(True, "INTEGER"), bool)

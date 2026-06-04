@@ -119,8 +119,10 @@ def _coerce_value_for_type(value: Any, data_type: str) -> Any:
 
     py_type = defn.python_type
 
-    if isinstance(value, py_type):
+    if isinstance(value, py_type) and not (py_type is int and isinstance(value, bool)):
         return value
+    if py_type is int and isinstance(value, bool):
+        return int(value)
     if py_type is float and isinstance(value, (int, float)) and not isinstance(value, bool):
         return float(value)
     if py_type is int and isinstance(value, float) and not isinstance(value, bool) and value == int(value):
@@ -241,8 +243,11 @@ async def update_datapoint(
     _user: str = Depends(get_current_user),
 ) -> DataPointOut:
     reg = get_registry()
-    if reg.get(dp_id) is None:
+    current_dp = reg.get(dp_id)
+    if current_dp is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"DataPoint {dp_id} not found")
+
+    # --- Validation phase (no side effects) ---
     if body.data_type is not None:
         from obs.models.types import DataTypeRegistry
 
@@ -251,21 +256,27 @@ async def update_datapoint(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 f"Unknown data_type '{body.data_type}'",
             )
-    # value=None in model_copy ensures exclude_none=True in reg.update() drops it —
-    # DataPoint has no value field.
-    dp = await reg.update(dp_id, body.model_copy(update={"value": None}))
 
-    # model_fields_set distinguishes "value omitted" from explicit "value": <v>/<null>.
+    coerced: Any = None
+    quality: str | None = None
     if "value" in body.model_fields_set:
         if body.value is not None:
+            # Use the incoming data_type when it changes in the same request.
+            effective_type = body.data_type if body.data_type is not None else current_dp.data_type
             try:
-                coerced = _coerce_value_for_type(body.value, dp.data_type)
+                coerced = _coerce_value_for_type(body.value, effective_type)
             except ValueError as exc:
                 raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
             quality = "good"
         else:
-            coerced = None
             quality = "uncertain"
+
+    # --- Mutation phase (all validation passed) ---
+    # value=None in model_copy ensures exclude_none=True in reg.update() drops it —
+    # DataPoint has no value field.
+    dp = await reg.update(dp_id, body.model_copy(update={"value": None}))
+
+    if "value" in body.model_fields_set:
         await get_event_bus().publish(
             DataValueEvent(
                 datapoint_id=dp_id,

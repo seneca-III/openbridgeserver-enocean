@@ -206,6 +206,21 @@ async def test_patch_value_type_mismatch_returns_422(client, auth_headers):
     assert resp.status_code == 422
 
 
+async def test_patch_value_mismatch_does_not_mutate_metadata(client, auth_headers):
+    dp = await _make_dp(client, auth_headers, name="OriginalName", data_type="INTEGER")
+    dp_id = dp["id"]
+
+    resp = await client.patch(
+        f"/api/v1/datapoints/{dp_id}",
+        json={"name": "ShouldNotChange", "value": "bad"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422
+
+    get_resp = await client.get(f"/api/v1/datapoints/{dp_id}", headers=auth_headers)
+    assert get_resp.json()["name"] == "OriginalName"
+
+
 async def test_patch_value_int_coerced_from_float(client, auth_headers):
     dp = await _make_dp(client, auth_headers, data_type="INTEGER")
     resp = await client.patch(
