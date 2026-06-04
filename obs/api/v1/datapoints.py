@@ -210,6 +210,26 @@ async def update_datapoint(
                 f"Unknown data_type '{body.data_type}'",
             )
     dp = await reg.update(dp_id, body)
+
+    # If a value was supplied, publish a DataValueEvent so the registry
+    # stores it and broadcasts it via MQTT (dp/{id}/value).
+    if body.value is not None:
+        from obs.core.event_bus import get_event_bus
+        from obs.models.events import DataValueEvent
+        import datetime
+
+        bus = get_event_bus()
+        await bus.publish(
+            DataValueEvent(
+                datapoint_id=dp_id,
+                value=body.value,
+                quality="good",
+                source_adapter="api",
+                binding_id=None,
+                ts=datetime.datetime.now(datetime.timezone.utc),
+            )
+        )
+
     return _enrich(dp)
 
 
