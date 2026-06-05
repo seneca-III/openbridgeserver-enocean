@@ -49,6 +49,10 @@ RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 # ── Stage 3: runtime image ──────────────────────────────────────────────────
 FROM python:3.14-slim AS runtime
 
+# Version stamp — passed via --build-arg OBS_VERSION=<ver> by CI and build-local.sh.
+# Falls back to "dev-version" so plain `docker build .` still works.
+ARG OBS_VERSION=dev-version
+
 LABEL org.opencontainers.image.title="open bridge server" \
       org.opencontainers.image.description="Open-Source Multiprotocol Server for Building Automation" \
       org.opencontainers.image.licenses="MIT"
@@ -59,6 +63,8 @@ COPY --from=py-builder /install /usr/local
 # Application source
 WORKDIR /app
 COPY obs/ ./obs/
+# Stamp the version into the image without touching the working tree
+RUN echo "$OBS_VERSION" > ./obs/version
 
 # Built Admin-GUI (served by FastAPI from /app/gui_dist)
 COPY --from=node-builder /gui_dist ./gui_dist/

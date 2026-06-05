@@ -6,7 +6,7 @@
 [![Tests][tests-badge]][tests]
 [![Coverage][coverage-badge]][coverage]
 
-Go to the [English version](/README.md) version of the documentation.
+> 🇬🇧 [English version](/README.md)
 
 **Offene Gebäudeautomations-Plattform — verbindet KNX, Modbus, MQTT, Home Assistant und mehr**
 
@@ -1640,6 +1640,10 @@ pytest tests/
 # Mit Auto-Fix
 ./tools/lint.sh --fix
 ```
+
+#### Lokale Builds (Docker-Image, LXC-Template, App-Bundle)
+
+Vollständige Dokumentation zu `build-local.sh` — Befehle, Optionen und das Docker-Image-Namensschema — siehe **[tools/README.de.md](tools/README.de.md)**.
 
 ### Lokale Git-Hooks (Pre-Push Gate)
 
