@@ -390,11 +390,14 @@ class ModbusTcpAdapter(AdapterBase):
             while self._lifecycle_busy:
                 await self._lifecycle_cond.wait()
             self._lifecycle_busy = True
-            while self._inflight_io:
-                await self._lifecycle_cond.wait()
-            try:
-                yield
-            finally:
+
+        try:
+            async with self._lifecycle_cond:
+                while self._inflight_io:
+                    await self._lifecycle_cond.wait()
+            yield
+        finally:
+            async with self._lifecycle_cond:
                 self._lifecycle_busy = False
                 self._lifecycle_cond.notify_all()
 

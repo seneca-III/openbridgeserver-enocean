@@ -1663,6 +1663,47 @@ class TestReloadIoSemaphoreForCloseConnect:
         await reload_task
         client.close.assert_called_once()
 
+    async def test_cancelled_lifecycle_wait_clears_busy_flag(self):
+        adapter, _ = _make_tcp({"host": "127.0.0.1", "port": 502, "timeout": 1.0})
+        client = _make_client(connected=True)
+        fake_mod = MagicMock()
+        fake_mod.AsyncModbusTcpClient = MagicMock(return_value=client)
+        with patch.dict("sys.modules", {"pymodbus.client": fake_mod}):
+            await adapter.connect()
+
+        write_started = asyncio.Event()
+        release_write = asyncio.Event()
+
+        async def slow_write_register(*args, **kwargs):
+            write_started.set()
+            await release_write.wait()
+            return _ok_response()
+
+        client.write_register = AsyncMock(side_effect=slow_write_register)
+        bc = ModbusBindingConfig(**{**_HOLDING_CFG, "data_format": "uint16"})
+        write_task = asyncio.create_task(adapter._write_register(bc, 42))
+        await write_started.wait()
+
+        lifecycle_entered = asyncio.Event()
+
+        async def wait_for_lifecycle():
+            async with adapter._client_lifecycle():
+                lifecycle_entered.set()
+
+        lifecycle_task = asyncio.create_task(wait_for_lifecycle())
+        await asyncio.sleep(0.05)
+        assert adapter._lifecycle_busy is True
+        assert not lifecycle_entered.is_set()
+
+        lifecycle_task.cancel()
+        await asyncio.gather(lifecycle_task, return_exceptions=True)
+        assert adapter._lifecycle_busy is False
+
+        release_write.set()
+        await write_task
+
+        await asyncio.wait_for(adapter._read_register(bc), timeout=0.5)
+
 
 class TestReloadPublishesStatus:
     """_on_bindings_reloaded publishes adapter status after reconnect."""
