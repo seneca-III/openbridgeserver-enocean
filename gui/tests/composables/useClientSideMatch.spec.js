@@ -158,9 +158,9 @@ describe('matchEntry — value_filter', () => {
     expect(matchEntry(makeEntry({ new_value: 'ERR-500' }), { value_filter: { operator: 'regex', pattern: '^OK-' } })).toBe(false)
   })
 
-  it('treats backend-valid but JavaScript-invalid regex syntax as pass-through', () => {
+  it('does not treat backend-valid but JavaScript-invalid regex syntax as a positive match', () => {
     const filter = { value_filter: { operator: 'regex', pattern: '(?P<name>temp)' } }
-    expect(matchEntry(makeEntry({ new_value: 'temp' }), filter)).toBe(true)
+    expect(matchEntry(makeEntry({ new_value: 'temp' }), filter)).toBe(false)
     expect(matchEntry(makeEntry({ source_adapter: 'mqtt', new_value: 'temp' }), { ...filter, adapters: ['knx'] })).toBe(false)
   })
 

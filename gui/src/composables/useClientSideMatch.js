@@ -63,8 +63,8 @@ function _matchValueFilter(entryValue, vf) {
       return re.test(String(entryValue ?? ''))
     } catch {
       // The backend accepts Python regex syntax that JavaScript cannot compile.
-      // Treat it as not client-evaluable instead of dropping live rows.
-      return true
+      // Do not count an unevaluable criterion as a positive live match.
+      return false
     }
   }
   // Unknown operator → don't drop the entry, defer to server.
