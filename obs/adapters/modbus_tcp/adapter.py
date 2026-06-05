@@ -26,6 +26,7 @@ import asyncio
 import contextlib
 import logging
 import random
+import time
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -81,13 +82,20 @@ class ModbusTcpAdapter(AdapterBase):
         super().__init__(event_bus, config, **kwargs)
         self._client: Any = None
         self._poll_tasks: list[asyncio.Task] = []
-        # I/O semaphore — serializes both reads *and* writes so that a concurrent
-        # DEST write cannot interleave with a SOURCE read and corrupt the TCP stream.
-        # None when serialize_reads=False (unlimited / no-op via nullcontext).
+        # I/O semaphore — serializes reads AND writes on the shared TCP socket.
+        # None when serialize_reads=False (no-op via nullcontext).
         # Reconfigured in connect() based on serialize_reads option.
         self._io_sem: asyncio.Semaphore | None = asyncio.Semaphore(1)
+        # Prevents concurrent _on_bindings_reloaded() calls from interleaving.
+        # Without this, two simultaneous REST binding changes can create orphan
+        # poll tasks that use the same TCP client alongside the tracked tasks.
+        self._reload_lock: asyncio.Lock = asyncio.Lock()
         # Serializes reconnect attempts from concurrent poll tasks (double-checked locking).
         self._reconnect_lock: asyncio.Lock = asyncio.Lock()
+        # Monotonic timestamp after which reconnect attempts are permitted again.
+        # Prevents N bindings from each firing a separate connect() timeout when
+        # the device is offline (e.g. 130 bindings × 3s timeout = 6+ min blocked).
+        self._reconnect_ok_after: float = 0.0
         # Parsed adapter config — populated in connect(), used in _poll_loop.
         self._adp_cfg: ModbusTcpAdapterConfig = ModbusTcpAdapterConfig()
         # True after the first _on_bindings_reloaded() call; jitter is only applied
@@ -153,46 +161,59 @@ class ModbusTcpAdapter(AdapterBase):
     # ------------------------------------------------------------------
 
     async def _on_bindings_reloaded(self) -> None:
-        # Cancel existing pollers and wait for them to actually finish.
-        # Without awaiting gather(), old tasks may still be executing a Modbus read
-        # concurrently with the new tasks, which corrupts the shared TCP connection.
-        for t in self._poll_tasks:
-            t.cancel()
-        if self._poll_tasks:
-            await asyncio.gather(*self._poll_tasks, return_exceptions=True)
-        self._poll_tasks.clear()
+        # Serialize concurrent reload calls so two simultaneous REST binding changes
+        # cannot interleave their cancel/create sequences and produce orphan tasks.
+        async with self._reload_lock:
+            # Cancel existing pollers and wait for them to actually finish.
+            # Without awaiting gather(), old tasks may still be executing a Modbus read
+            # concurrently with the new tasks, which corrupts the shared TCP connection.
+            for t in self._poll_tasks:
+                t.cancel()
+            if self._poll_tasks:
+                await asyncio.gather(*self._poll_tasks, return_exceptions=True)
+            self._poll_tasks.clear()
 
-        # Always close and reconnect after cancelling pollers to guarantee a clean
-        # TCP session. Cancelled tasks may have left a pending Modbus request
-        # mid-flight even when the transport still reports connected=True, so gating
-        # the reconnect solely on `not connected` is insufficient (P2 review comment).
-        if self._client:
-            try:
-                self._client.close()
-            except Exception:
-                pass
-            try:
-                await self._client.connect()
-                logger.info("Modbus TCP: reconnected after binding reload")
-            except Exception as exc:
-                logger.warning("Modbus TCP: reconnect after reload failed: %s", exc)
+            # Close and reconnect while holding _io_sem so any in-flight write
+            # finishes before close() tears down the socket underneath it.
+            if self._client:
+                async with (self._io_sem or contextlib.nullcontext()):
+                    try:
+                        self._client.close()
+                    except Exception:
+                        pass
+                    try:
+                        await self._client.connect()
+                        if self._client.connected:
+                            await self._publish_status(
+                                True, f"{self._adp_cfg.host}:{self._adp_cfg.port}"
+                            )
+                            logger.info("Modbus TCP: reconnected after binding reload")
+                        else:
+                            await self._publish_status(
+                                False,
+                                f"Could not reconnect to {self._adp_cfg.host}:{self._adp_cfg.port}",
+                            )
+                            logger.warning("Modbus TCP: reconnect after reload left client disconnected")
+                    except Exception as exc:
+                        await self._publish_status(False, str(exc))
+                        logger.warning("Modbus TCP: reconnect after reload failed: %s", exc)
 
-        # Jitter is only useful on the very first load (spreading out the initial
-        # burst after an adapter restart). Subsequent reloads triggered by binding
-        # changes affect only a few tasks and should not add unnecessary delay.
-        apply_jitter = not self._initial_load_done
-        self._initial_load_done = True
+            # Jitter is only useful on the very first load (spreading out the initial
+            # burst after an adapter restart). Subsequent reloads triggered by binding
+            # changes affect only a few tasks and should not add unnecessary delay.
+            apply_jitter = not self._initial_load_done
+            self._initial_load_done = True
 
-        # Start a poller task per SOURCE/BOTH binding
-        source_bindings = [b for b in self._bindings if b.direction in ("SOURCE", "BOTH")]
-        for binding in source_bindings:
-            t = asyncio.create_task(
-                self._poll_loop(binding, apply_jitter=apply_jitter),
-                name=f"modbus-tcp-poll-{binding.id}",
-            )
-            self._poll_tasks.append(t)
+            # Start a poller task per SOURCE/BOTH binding
+            source_bindings = [b for b in self._bindings if b.direction in ("SOURCE", "BOTH")]
+            for binding in source_bindings:
+                t = asyncio.create_task(
+                    self._poll_loop(binding, apply_jitter=apply_jitter),
+                    name=f"modbus-tcp-poll-{binding.id}",
+                )
+                self._poll_tasks.append(t)
 
-        logger.debug("Modbus TCP: %d poll tasks started", len(self._poll_tasks))
+            logger.debug("Modbus TCP: %d poll tasks started", len(self._poll_tasks))
 
     # ------------------------------------------------------------------
     # Polling
@@ -213,23 +234,40 @@ class ModbusTcpAdapter(AdapterBase):
                 await asyncio.sleep(random.uniform(0, min(bc.poll_interval * 0.5, _jitter_max)))
 
         while True:
-            # Auto-reconnect if the client became disconnected (e.g. after a reload
-            # that cancelled tasks mid-read, or a transient network failure).
-            # _reconnect_lock serializes attempts: when N tasks all detect
-            # connected=False simultaneously, only the first actually reconnects.
+            # Auto-reconnect if the client became disconnected.
+            # _reconnect_lock serializes attempts; _reconnect_ok_after provides a
+            # shared backoff so N bindings do not each fire a separate connect()
+            # timeout when the device is offline (avoids N × timeout seconds blocked).
             if self._client and not self._client.connected:
                 async with self._reconnect_lock:
                     if not self._client.connected:
+                        if time.monotonic() < self._reconnect_ok_after:
+                            # Backoff active — skip this attempt, publish bad quality.
+                            await self._bus.publish(
+                                DataValueEvent(
+                                    datapoint_id=binding.datapoint_id,
+                                    value=None,
+                                    quality="bad",
+                                    source_adapter=self.adapter_type,
+                                    binding_id=binding.id,
+                                ),
+                            )
+                            await asyncio.sleep(bc.poll_interval)
+                            continue
                         try:
                             await self._client.connect()
-                            # Verify connected before publishing healthy status (P2).
                             if self._client.connected:
+                                self._reconnect_ok_after = 0.0  # clear backoff on success
                                 host = self._adp_cfg.host
                                 port = self._adp_cfg.port
                                 await self._publish_status(True, f"{host}:{port}")
-                                logger.info("Modbus TCP: reconnected in poll loop (binding %s)", binding.id)
+                                logger.info(
+                                    "Modbus TCP: reconnected in poll loop (binding %s)",
+                                    binding.id,
+                                )
                             else:
-                                # connect() returned without error but socket is still down.
+                                # connect() returned without error but socket still down.
+                                self._reconnect_ok_after = time.monotonic() + bc.poll_interval
                                 logger.warning(
                                     "Modbus TCP: connect() succeeded but client still disconnected (binding %s)",
                                     binding.id,
@@ -246,7 +284,10 @@ class ModbusTcpAdapter(AdapterBase):
                                 await asyncio.sleep(bc.poll_interval)
                                 continue
                         except Exception as exc:
-                            logger.warning("Modbus TCP: reconnect failed (binding %s): %s", binding.id, exc)
+                            self._reconnect_ok_after = time.monotonic() + bc.poll_interval
+                            logger.warning(
+                                "Modbus TCP: reconnect failed (binding %s): %s", binding.id, exc
+                            )
                             await self._bus.publish(
                                 DataValueEvent(
                                     datapoint_id=binding.datapoint_id,
@@ -361,7 +402,7 @@ class ModbusTcpAdapter(AdapterBase):
         count = register_count(bc.data_format)
 
         # Use _io_sem to serialize I/O; None means no-op (serialize_reads=False).
-        async with self._io_sem or contextlib.nullcontext():
+        async with (self._io_sem or contextlib.nullcontext()):
             if bc.register_type == "holding":
                 r = await self._modbus_call(
                     self._client.read_holding_registers,
@@ -370,11 +411,17 @@ class ModbusTcpAdapter(AdapterBase):
                     unit_id=bc.unit_id,
                 )
             elif bc.register_type == "input":
-                r = await self._modbus_call(self._client.read_input_registers, bc.address, count, unit_id=bc.unit_id)
+                r = await self._modbus_call(
+                    self._client.read_input_registers, bc.address, count, unit_id=bc.unit_id
+                )
             elif bc.register_type == "coil":
-                r = await self._modbus_call(self._client.read_coils, bc.address, count, unit_id=bc.unit_id)
+                r = await self._modbus_call(
+                    self._client.read_coils, bc.address, count, unit_id=bc.unit_id
+                )
             elif bc.register_type == "discrete_input":
-                r = await self._modbus_call(self._client.read_discrete_inputs, bc.address, count, unit_id=bc.unit_id)
+                r = await self._modbus_call(
+                    self._client.read_discrete_inputs, bc.address, count, unit_id=bc.unit_id
+                )
             else:
                 return None
 
@@ -384,16 +431,22 @@ class ModbusTcpAdapter(AdapterBase):
             if bc.register_type in ("coil", "discrete_input"):
                 return bool(r.bits[0])
 
-            return decode_registers(r.registers, bc.data_format, bc.byte_order, bc.word_order, bc.scale_factor)
+            return decode_registers(
+                r.registers, bc.data_format, bc.byte_order, bc.word_order, bc.scale_factor
+            )
 
     async def _write_register(self, bc: ModbusBindingConfig, value: Any) -> None:
         # Use the same _io_sem as reads — a concurrent write and read on the same
         # TCP socket reproduce exactly the stream-corruption race the PR fixes.
-        async with self._io_sem or contextlib.nullcontext():
+        async with (self._io_sem or contextlib.nullcontext()):
             if bc.register_type == "coil":
-                await self._modbus_call(self._client.write_coil, bc.address, bool(value), unit_id=bc.unit_id)
+                await self._modbus_call(
+                    self._client.write_coil, bc.address, bool(value), unit_id=bc.unit_id
+                )
             elif bc.register_type == "holding":
-                registers = encode_value(value, bc.data_format, bc.byte_order, bc.word_order, bc.scale_factor)
+                registers = encode_value(
+                    value, bc.data_format, bc.byte_order, bc.word_order, bc.scale_factor
+                )
                 if len(registers) == 1:
                     await self._modbus_call(
                         self._client.write_register,
