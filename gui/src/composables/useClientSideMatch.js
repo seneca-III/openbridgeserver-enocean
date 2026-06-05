@@ -10,8 +10,8 @@
  *   - tags[]        — OR over entry.metadata.datapoint.tags
  *   - q             — substring (case-insensitive) over name | datapoint_id | source_adapter
  *   - value_filter  — operator + value/lower/upper/pattern over entry.new_value
- *   - hierarchy_nodes — server-side only. The frontend has no hierarchy
- *                       resolver, so hierarchy criteria never match locally.
+ *   - hierarchy_nodes — OR over entry.metadata.hierarchy_nodes for the same
+ *                       tree, respecting include_descendants.
  *
  * Multiple criteria within a single FilterCriteria are AND-combined.
  */
@@ -32,6 +32,39 @@ function _entryTags(entry) {
   }
   // Legacy test fixtures and pre-metadata live payloads used metadata.tags.
   return _normalizedStrings(metadata.tags)
+}
+
+function _entryHierarchyNodes(entry) {
+  const metadata = entry?.metadata
+  if (!metadata || typeof metadata !== 'object') return []
+  if (!Array.isArray(metadata.hierarchy_nodes)) return []
+  return metadata.hierarchy_nodes
+    .filter((node) => node && typeof node === 'object')
+    .map((node) => ({
+      treeId: String(node.tree_id ?? '').trim(),
+      nodeId: String(node.node_id ?? '').trim(),
+      ancestorNodeIds: Array.isArray(node.ancestor_node_ids)
+        ? node.ancestor_node_ids.map((id) => String(id ?? '').trim()).filter(Boolean)
+        : [],
+    }))
+    .filter((node) => node.treeId && node.nodeId)
+}
+
+function _matchHierarchy(entry, hierarchyNodes) {
+  const entryNodes = _entryHierarchyNodes(entry)
+  if (entryNodes.length === 0) return false
+
+  return hierarchyNodes.some((requested) => {
+    const requestedTreeId = String(requested?.tree_id ?? '').trim()
+    const requestedNodeId = String(requested?.node_id ?? '').trim()
+    if (!requestedTreeId || !requestedNodeId) return false
+    const includeDescendants = requested?.include_descendants !== false
+    return entryNodes.some((entryNode) => {
+      if (entryNode.treeId !== requestedTreeId) return false
+      if (!includeDescendants) return entryNode.nodeId === requestedNodeId
+      return entryNode.ancestorNodeIds.includes(requestedNodeId)
+    })
+  })
 }
 
 /**
@@ -83,32 +116,26 @@ function _matchValueFilter(entryValue, vf) {
 }
 
 /**
- * Returns true iff at least one *client-evaluable* criterion is populated AND
- * every populated criterion accepts the entry.
+ * Returns true iff at least one criterion is populated AND every populated
+ * criterion accepts the entry.
  *
  * Empty / null / undefined criteria match NOTHING (Phase-2 UX feedback).
- *
- * Hierarchy filters also match NOTHING on the client, even when combined with
- * other constraints: the server expands hierarchy_nodes to concrete datapoints
- * before applying the AND-combined criteria. Accepting locally would let rows
- * through that only match the non-hierarchy part.
  */
 export function matchEntry(entry, criteria) {
   if (!criteria || typeof criteria !== 'object') return false
   if (isEmptyFilter(criteria)) return false
   if (!entry) return false
 
-  if (Array.isArray(criteria.hierarchy_nodes) && criteria.hierarchy_nodes.length > 0) {
-    return false
-  }
-
-  const hasNonHierarchyConstraint =
+  const hasHierarchyConstraint = Array.isArray(criteria.hierarchy_nodes) && criteria.hierarchy_nodes.length > 0
+  const hasClientConstraint =
     (Array.isArray(criteria.datapoints) && criteria.datapoints.length > 0) ||
     (Array.isArray(criteria.adapters) && criteria.adapters.length > 0) ||
     (Array.isArray(criteria.tags) && criteria.tags.length > 0) ||
     (typeof criteria.q === 'string' && criteria.q.trim().length > 0) ||
     (criteria.value_filter && criteria.value_filter.operator)
-  if (!hasNonHierarchyConstraint) return false
+  if (!hasHierarchyConstraint && !hasClientConstraint) return false
+
+  if (hasHierarchyConstraint && !_matchHierarchy(entry, criteria.hierarchy_nodes)) return false
 
   // datapoints
   if (Array.isArray(criteria.datapoints) && criteria.datapoints.length > 0) {
@@ -143,7 +170,6 @@ export function matchEntry(entry, criteria) {
     if (!_matchValueFilter(entry.new_value, criteria.value_filter)) return false
   }
 
-  // hierarchy_nodes is pass-through on the client side.
   return true
 }
 

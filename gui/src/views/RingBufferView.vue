@@ -147,7 +147,6 @@ import ExportDialog from '@/views/ringbuffer/ExportDialog.vue'
 import MonitorConfigModal from '@/views/ringbuffer/MonitorConfigModal.vue'
 
 const DEFAULT_QUERY_LIMIT = 500
-const LIVE_SERVER_REFRESH_DELAY_MS = 120
 
 const { t } = useI18n()
 const { fmtDateTime } = useTz()
@@ -236,7 +235,6 @@ async function onTimeFilterChanged() {
 const tableWrapRef = ref(null)
 const filtersets = ref([])
 let liveIngressSeq = 0
-let liveServerRefreshTimer = null
 
 const { paused, queuedCount, enqueue: enqueueLive, pause: pauseLive, resume: resumeLive, clear: clearLiveQueue, dispose: disposeLiveQueue } =
   useLiveQueue(entries, {
@@ -260,19 +258,6 @@ function entryIdentity(entry) {
     JSON.stringify(entry?.new_value ?? null),
     JSON.stringify(entry?.old_value ?? null),
   ].join('|')
-}
-
-function hasHierarchyCriteria(set) {
-  return Array.isArray(set?.filter?.hierarchy_nodes) && set.filter.hierarchy_nodes.length > 0
-}
-
-function scheduleServerRefreshForLiveFilter() {
-  if (paused.value || liveServerRefreshTimer) return
-  liveServerRefreshTimer = setTimeout(() => {
-    liveServerRefreshTimer = null
-    if (paused.value) return
-    void load()
-  }, LIVE_SERVER_REFRESH_DELAY_MS)
 }
 
 function mergeEntriesKeepingLiveFirst(liveFirst, loaded) {
@@ -386,8 +371,9 @@ function onLiveEntry(entry) {
   //      (future-compatible path for when the WS push starts including the
   //      match annotation; the row-color spec exercises this case).
   //   3. Active sets present and entry has no preset → client-side match.
-  //      Empty FilterCriteria match nothing (#36 semantics, see useClientSideMatch);
-  //      an entry that matches none of the active sets is dropped.
+  //      Empty FilterCriteria match nothing (#36 semantics, see useClientSideMatch).
+  //      Hierarchy sets are matched from WS metadata; entries that match none
+  //      of the active sets are dropped.
   const activeSets = filtersets.value.filter((s) => s.topbar_active && s.is_active !== false)
   const presetMatched = Array.isArray(entry?.matched_set_ids) ? entry.matched_set_ids : null
 
@@ -400,10 +386,7 @@ function onLiveEntry(entry) {
     return
   }
   const ids = matchedSetIds(entry, activeSets)
-  if (ids.length === 0) {
-    if (activeSets.some(hasHierarchyCriteria)) scheduleServerRefreshForLiveFilter()
-    return
-  }
+  if (ids.length === 0) return
   markAndEnqueueLive({ ...entry, matched_set_ids: ids })
 }
 
@@ -427,8 +410,6 @@ onMounted(async () => {
 
 onUnmounted(() => {
   unregisterRb?.()
-  clearTimeout(liveServerRefreshTimer)
-  liveServerRefreshTimer = null
   disposeLiveQueue()
 })
 

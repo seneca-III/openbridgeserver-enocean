@@ -16,9 +16,8 @@
  *   tags       — list of tag strings, OR over entry.metadata.datapoint.tags
  *   q          — substring match over name | datapoint_id | source_adapter
  *   value_filter — operator over new_value
- *
- * hierarchy_nodes is server-side only: the frontend does not have a hierarchy
- * resolver, so RingBufferView falls back to a REST refresh for those sets.
+ *   hierarchy_nodes — node refs matched against entry.metadata.hierarchy_nodes
+ *                     including ancestor_node_ids for descendants.
  */
 import { describe, it, expect } from 'vitest'
 import { matchEntry, isEmptyFilter } from '@/composables/useClientSideMatch'
@@ -184,14 +183,56 @@ describe('matchEntry — AND across criteria', () => {
 })
 
 describe('matchEntry — hierarchy-only filters', () => {
-  it('returns false when only hierarchy_nodes is populated (no client-evaluable constraint)', () => {
-    // Hierarchy is server-resolved; the frontend cannot tell whether an
-    // entry belongs to a node, so a hierarchy-only filter does not match
-    // on the client (live pushes stay uncoloured until next REST refresh).
-    expect(matchEntry(makeEntry(), { hierarchy_nodes: [{ tree_id: 't', node_id: 'n', include_descendants: true }] })).toBe(false)
+  it('matches include_descendants filters via ancestor_node_ids', () => {
+    expect(matchEntry(makeEntry({
+      metadata: {
+        hierarchy_nodes: [
+          { tree_id: 't', node_id: 'leaf', ancestor_node_ids: ['leaf', 'floor-1', 'root'] },
+        ],
+      },
+    }), { hierarchy_nodes: [{ tree_id: 't', node_id: 'floor-1', include_descendants: true }] })).toBe(true)
   })
 
-  it('returns false when hierarchy_nodes is set alongside a client-evaluable criterion', () => {
+  it('matches non-descendant filters only against the direct node', () => {
+    const entry = makeEntry({
+      metadata: {
+        hierarchy_nodes: [
+          { tree_id: 't', node_id: 'leaf', ancestor_node_ids: ['leaf', 'floor-1', 'root'] },
+        ],
+      },
+    })
+    expect(matchEntry(entry, { hierarchy_nodes: [{ tree_id: 't', node_id: 'leaf', include_descendants: false }] })).toBe(true)
+    expect(matchEntry(entry, { hierarchy_nodes: [{ tree_id: 't', node_id: 'floor-1', include_descendants: false }] })).toBe(false)
+  })
+
+  it('does not match the wrong hierarchy node', () => {
+    expect(matchEntry(makeEntry({
+      metadata: {
+        hierarchy_nodes: [
+          { tree_id: 't', node_id: 'leaf', ancestor_node_ids: ['leaf', 'floor-1', 'root'] },
+        ],
+      },
+    }), { hierarchy_nodes: [{ tree_id: 't', node_id: 'floor-2', include_descendants: true }] })).toBe(false)
+  })
+
+  it('AND-combines hierarchy_nodes with other populated criteria', () => {
+    const filter = {
+      hierarchy_nodes: [{ tree_id: 't', node_id: 'floor-1', include_descendants: true }],
+      adapters: ['knx'],
+    }
+    const entry = makeEntry({
+      source_adapter: 'knx',
+      metadata: {
+        hierarchy_nodes: [
+          { tree_id: 't', node_id: 'leaf', ancestor_node_ids: ['leaf', 'floor-1', 'root'] },
+        ],
+      },
+    })
+    expect(matchEntry(entry, filter)).toBe(true)
+    expect(matchEntry({ ...entry, source_adapter: 'mqtt' }, filter)).toBe(false)
+  })
+
+  it('returns false without hierarchy metadata', () => {
     expect(matchEntry(makeEntry({ source_adapter: 'knx' }), {
       hierarchy_nodes: [{ tree_id: 't', node_id: 'n', include_descendants: true }],
       adapters: ['knx'],

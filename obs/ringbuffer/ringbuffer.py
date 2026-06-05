@@ -938,10 +938,12 @@ async def build_ringbuffer_metadata_snapshot(
     datapoint: Any,
 ) -> dict[str, Any]:
     bindings: list[dict[str, Any]] = []
+    hierarchy_nodes: list[dict[str, Any]] = []
     try:
         from obs.db.database import get_db
 
-        rows = await get_db().fetchall(
+        db = get_db()
+        rows = await db.fetchall(
             """SELECT adapter_type, adapter_instance_id, direction, config
                FROM adapter_bindings
                WHERE datapoint_id=? AND enabled=1
@@ -959,6 +961,38 @@ async def build_ringbuffer_metadata_snapshot(
                     "normalized": _normalize_binding_metadata(config),
                 }
             )
+        hierarchy_rows = await db.fetchall(
+            """WITH RECURSIVE ancestors(node_id, tree_id, ancestor_id, parent_id, depth) AS (
+                   SELECT hn.id, hn.tree_id, hn.id, hn.parent_id, 0
+                   FROM hierarchy_datapoint_links hdl
+                   JOIN hierarchy_nodes hn ON hn.id = hdl.node_id
+                   WHERE hdl.datapoint_id = ?
+                   UNION ALL
+                   SELECT ancestors.node_id, ancestors.tree_id, hn.id, hn.parent_id, ancestors.depth + 1
+                   FROM ancestors
+                   JOIN hierarchy_nodes hn ON hn.id = ancestors.parent_id
+               )
+               SELECT node_id, tree_id, ancestor_id
+               FROM ancestors
+               ORDER BY tree_id, node_id, depth""",
+            (dp_id,),
+        )
+        ancestors_by_node: dict[tuple[str, str], list[str]] = {}
+        for row in hierarchy_rows:
+            tree_id = str(row["tree_id"] or "")
+            node_id = str(row["node_id"] or "")
+            ancestor_id = str(row["ancestor_id"] or "")
+            if not tree_id or not node_id or not ancestor_id:
+                continue
+            ancestors_by_node.setdefault((tree_id, node_id), []).append(ancestor_id)
+        hierarchy_nodes = [
+            {
+                "tree_id": tree_id,
+                "node_id": node_id,
+                "ancestor_node_ids": ancestor_ids,
+            }
+            for (tree_id, node_id), ancestor_ids in ancestors_by_node.items()
+        ]
     except RuntimeError:
         pass
     except Exception:
@@ -974,6 +1008,7 @@ async def build_ringbuffer_metadata_snapshot(
             "tags": tags,
         },
         "bindings": bindings,
+        "hierarchy_nodes": hierarchy_nodes,
     }
 
 

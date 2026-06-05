@@ -12,9 +12,9 @@
  *   3. With no topbar sets active the table is unfiltered, as before.
  *
  * The matcher is the client-side equivalent of FilterCriteria
- * (datapoints / adapters / tags / q / value_filter). Hierarchy is resolved by
- * the backend, so the view refreshes from REST when hierarchy-only matching is
- * needed for a live push.
+ * (hierarchy_nodes / datapoints / adapters / tags / q / value_filter).
+ * Hierarchy live matching uses entry.metadata.hierarchy_nodes from the WS
+ * payload instead of refreshing from REST for each push.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mountRingBufferView, makeRingbufferApiMock, flushPromises } from '../helpers/mountRingBufferView'
@@ -138,14 +138,18 @@ describe('RingBufferView — live-entry matching (#36 follow-up)', () => {
     wrapper.unmount()
   })
 
-  it('refreshes from REST for hierarchy-filtered live entries', async () => {
-    const liveEntry = makeLiveEntry({ datapoint_id: 'dp-hier' })
+  it('matches hierarchy-filtered live entries from WS metadata without a REST refresh', async () => {
+    const liveEntry = makeLiveEntry({
+      datapoint_id: 'dp-hier',
+      metadata: {
+        hierarchy_nodes: [
+          { tree_id: 'tree-1', node_id: 'leaf-node', ancestor_node_ids: ['leaf-node', 'node-1'] },
+        ],
+      },
+    })
     const ringbufferApi = makeRingbufferApiMock({
       listFiltersets: vi.fn().mockResolvedValue({ data: [ACTIVE_SET_HIERARCHY] }),
-      queryMultiFiltersets: vi
-        .fn()
-        .mockResolvedValueOnce({ data: [] })
-        .mockResolvedValueOnce({ data: [{ ...liveEntry, matched_set_ids: ['set-hierarchy'] }] }),
+      queryMultiFiltersets: vi.fn().mockResolvedValue({ data: [] }),
     })
     const { wrapper, emitLive } = await mountRingBufferView({ ringbufferApi })
     await flushPromises()
@@ -155,9 +159,38 @@ describe('RingBufferView — live-entry matching (#36 follow-up)', () => {
     await new Promise((r) => setTimeout(r, 180))
     await flushPromises()
 
-    expect(ringbufferApi.queryMultiFiltersets).toHaveBeenCalledTimes(2)
+    expect(ringbufferApi.queryMultiFiltersets).toHaveBeenCalledTimes(1)
     const rows = wrapper.findAll('[data-testid="ringbuffer-entry"]')
     expect(rows.length).toBe(1)
+    expect(rows[0].attributes('title')).toContain('Etage')
+    wrapper.unmount()
+  })
+
+  it('annotates live entries with hierarchy and adapter matches from the same payload', async () => {
+    const ringbufferApi = makeRingbufferApiMock({
+      listFiltersets: vi.fn().mockResolvedValue({ data: [ACTIVE_SET_HIERARCHY, ACTIVE_SET_KNX] }),
+      queryMultiFiltersets: vi.fn().mockResolvedValue({ data: [] }),
+    })
+    const { wrapper, emitLive } = await mountRingBufferView({ ringbufferApi })
+    await flushPromises()
+
+    emitLive(makeLiveEntry({
+      source_adapter: 'knx',
+      metadata: {
+        hierarchy_nodes: [
+          { tree_id: 'tree-1', node_id: 'leaf-node', ancestor_node_ids: ['leaf-node', 'node-1'] },
+        ],
+      },
+    }))
+    await flushPromises()
+    await new Promise((r) => setTimeout(r, 120))
+    await flushPromises()
+
+    expect(ringbufferApi.queryMultiFiltersets).toHaveBeenCalledTimes(1)
+    const rows = wrapper.findAll('[data-testid="ringbuffer-entry"]')
+    expect(rows.length).toBe(1)
+    expect(rows[0].attributes('title')).toContain('Etage')
+    expect(rows[0].attributes('title')).toContain('KNX')
     wrapper.unmount()
   })
 

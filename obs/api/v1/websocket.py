@@ -151,13 +151,6 @@ class WebSocketManager:
         dp = reg.get(event.datapoint_id)
         state = reg.get_value(event.datapoint_id)
         ts_str = event.ts.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-        from obs.ringbuffer.ringbuffer import build_ringbuffer_metadata_snapshot
-
-        metadata = await build_ringbuffer_metadata_snapshot(
-            dp_id=dp_id_str,
-            source_adapter=str(event.source_adapter),
-            datapoint=dp,
-        )
 
         # ── 1. Per-subscription DP value events ──────────────────────────
         dp_msg = {
@@ -178,25 +171,37 @@ class WebSocketManager:
             await self.disconnect(conn_id)
 
         # ── 2. RingBuffer live-push — broadcast to ALL clients ────────────
-        rb_msg = {
-            "action": "ringbuffer_entry",
-            "entry": {
-                "ts": ts_str,
-                "datapoint_id": dp_id_str,
-                "name": dp.name if dp else None,
-                "new_value": jsonable(event.value),
-                "old_value": jsonable(state.old_value) if state else None,
-                "quality": event.quality,
-                "source_adapter": event.source_adapter,
-                "unit": dp.unit if dp else None,
-                "metadata_version": 1,
-                "metadata": metadata,
-            },
+        base_rb_entry = {
+            "ts": ts_str,
+            "datapoint_id": dp_id_str,
+            "name": dp.name if dp else None,
+            "new_value": jsonable(event.value),
+            "old_value": jsonable(state.old_value) if state else None,
+            "quality": event.quality,
+            "source_adapter": event.source_adapter,
+            "unit": dp.unit if dp else None,
         }
+        metadata: dict[str, Any] | None = None
+        if any(allowed_ids is None for _, _, _, allowed_ids in self._connections.values()):
+            from obs.ringbuffer.ringbuffer import build_ringbuffer_metadata_snapshot
+
+            metadata = await build_ringbuffer_metadata_snapshot(
+                dp_id=dp_id_str,
+                source_adapter=str(event.source_adapter),
+                datapoint=dp,
+            )
         dead = []
         for conn_id, (_, _subs, _lock, allowed_ids) in list(self._connections.items()):
             if allowed_ids is not None and dp_id_str not in allowed_ids:
                 continue
+            rb_entry = base_rb_entry
+            if allowed_ids is None and metadata is not None:
+                rb_entry = {
+                    **base_rb_entry,
+                    "metadata_version": 1,
+                    "metadata": metadata,
+                }
+            rb_msg = {"action": "ringbuffer_entry", "entry": rb_entry}
             if not await self._send(conn_id, rb_msg):
                 dead.append(conn_id)
         for conn_id in dead:

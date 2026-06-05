@@ -57,15 +57,22 @@ async def test_ringbuffer_entry_payload_contains_documented_fields(monkeypatch):
     monkeypatch.setattr("obs.core.registry.get_registry", lambda: _RegistryStub())
 
     class _DbStub:
-        async def fetchall(self, _query, _params):
-            return [
-                {
-                    "adapter_type": "KNX",
-                    "adapter_instance_id": "inst-1",
-                    "direction": "both",
-                    "config": '{"group_address":"1/2/30"}',
-                }
-            ]
+        async def fetchall(self, query, _params):
+            if "FROM adapter_bindings" in query:
+                return [
+                    {
+                        "adapter_type": "KNX",
+                        "adapter_instance_id": "inst-1",
+                        "direction": "both",
+                        "config": '{"group_address":"1/2/30"}',
+                    }
+                ]
+            if "hierarchy_datapoint_links" in query:
+                return [
+                    {"tree_id": "tree-1", "node_id": "leaf-node", "ancestor_id": "leaf-node"},
+                    {"tree_id": "tree-1", "node_id": "leaf-node", "ancestor_id": "root-node"},
+                ]
+            return []
 
     monkeypatch.setattr("obs.db.database.get_db", lambda: _DbStub())
 
@@ -108,6 +115,13 @@ async def test_ringbuffer_entry_payload_contains_documented_fields(monkeypatch):
     assert entry["metadata"]["datapoint"]["tags"] == ["heizung"]
     assert entry["metadata"]["bindings"][0]["adapter_type"] == "KNX"
     assert entry["metadata"]["bindings"][0]["normalized"]["group_address"] == "1/2/30"
+    assert entry["metadata"]["hierarchy_nodes"] == [
+        {
+            "tree_id": "tree-1",
+            "node_id": "leaf-node",
+            "ancestor_node_ids": ["leaf-node", "root-node"],
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -194,6 +208,7 @@ async def test_ringbuffer_push_is_scoped_for_anonymous_page_connections(monkeypa
     unrestricted_ringbuffer = [m for m in unrestricted_ws.messages if m.get("action") == "ringbuffer_entry"]
 
     assert [m["entry"]["datapoint_id"] for m in scoped_ringbuffer] == [allowed_id]
+    assert all("metadata" not in m["entry"] for m in scoped_ringbuffer)
     assert [m["entry"]["datapoint_id"] for m in unrestricted_ringbuffer] == [allowed_id, blocked_id]
 
 
