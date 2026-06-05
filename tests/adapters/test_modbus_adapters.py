@@ -1651,9 +1651,7 @@ class TestReloadPublishesStatus:
 
         status_events = [c.args[0] for c in bus.publish.call_args_list if hasattr(c.args[0], "connected")]
         disconnected_events = [e for e in status_events if not e.connected]
-        assert disconnected_events, (
-            "No connected=False status published when connect() returned but client stayed disconnected"
-        )
+        assert disconnected_events, "No connected=False status published when connect() returned but client stayed disconnected"
 
 
 class TestReconnectBackoff:
@@ -1662,7 +1660,13 @@ class TestReconnectBackoff:
     """
 
     async def test_only_one_connect_attempt_per_backoff_window(self):
-        """After a failed reconnect, subsequent tasks skip connect() until backoff clears."""
+        """After a failed reconnect, subsequent tasks skip connect() until backoff clears.
+
+        Uses poll_interval=10s so the backoff window (now+10s) outlasts the 0.15s test
+        window, and apply_jitter=False so tasks reach the reconnect path immediately.
+        With poll_interval=0.05s the backoff expires every cycle, producing one connect()
+        call per cycle rather than one per backoff window.
+        """
         adapter, bus = _make_tcp()
         connect_calls = 0
 
@@ -1675,11 +1679,12 @@ class TestReconnectBackoff:
         client.connect = AsyncMock(side_effect=failing_connect)
         adapter._client = client
 
-        binding1 = make_binding(_HOLDING_CFG, direction="SOURCE")
-        binding2 = make_binding(_HOLDING_CFG, direction="SOURCE")
+        long_interval_cfg = {**_HOLDING_CFG, "poll_interval": 10.0}
+        binding1 = make_binding(long_interval_cfg, direction="SOURCE")
+        binding2 = make_binding(long_interval_cfg, direction="SOURCE")
 
-        t1 = asyncio.create_task(adapter._poll_loop(binding1))
-        t2 = asyncio.create_task(adapter._poll_loop(binding2))
+        t1 = asyncio.create_task(adapter._poll_loop(binding1, apply_jitter=False))
+        t2 = asyncio.create_task(adapter._poll_loop(binding2, apply_jitter=False))
         await asyncio.sleep(0.15)
         t1.cancel()
         t2.cancel()
