@@ -10,6 +10,7 @@ All pymodbus and network calls are mocked; no hardware required.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -109,6 +110,10 @@ def _make_client(connected=True, response=None):
     client.connect = AsyncMock()
     client.close = MagicMock()
     return client
+
+
+def _install_client_factory(adapter, *clients):
+    adapter._client_factory = MagicMock(side_effect=list(clients))
 
 
 # ---------------------------------------------------------------------------
@@ -1009,12 +1014,16 @@ class TestBindingsReloadedAwaitAndReconnect:
         """
         adapter, _ = _make_tcp()
         client = _make_client(connected=False)
+        new_client = _make_client(connected=True)
         adapter._client = client
+        _install_client_factory(adapter, new_client)
         adapter._bindings = []
 
         await adapter._on_bindings_reloaded()
 
-        client.connect.assert_awaited_once()
+        client.close.assert_called_once()
+        new_client.connect.assert_awaited_once()
+        assert adapter._client is new_client
 
     async def test_always_reconnects_after_reload_for_clean_tcp_state(self):
         """After reload the client is always closed and reconnected regardless of
@@ -1023,20 +1032,26 @@ class TestBindingsReloadedAwaitAndReconnect:
         """
         adapter, _ = _make_tcp()
         client = _make_client(connected=True)
+        new_client = _make_client(connected=True)
         adapter._client = client
+        _install_client_factory(adapter, new_client)
         adapter._bindings = []
 
         await adapter._on_bindings_reloaded()
 
         client.close.assert_called_once()
-        client.connect.assert_awaited_once()
+        client.connect.assert_not_awaited()
+        new_client.connect.assert_awaited_once()
+        assert adapter._client is new_client
 
     async def test_reconnect_failure_is_swallowed_new_tasks_still_start(self):
         """A reconnect failure must not propagate — new tasks still start."""
         adapter, _ = _make_tcp()
         client = _make_client(connected=False)
-        client.connect = AsyncMock(side_effect=OSError("connection refused"))
+        new_client = _make_client(connected=False)
+        new_client.connect = AsyncMock(side_effect=OSError("connection refused"))
         adapter._client = client
+        _install_client_factory(adapter, new_client)
 
         binding = make_binding(_HOLDING_CFG, direction="SOURCE")
         adapter._bindings = [binding]
@@ -1169,7 +1184,9 @@ class TestBindingDeleteRecreateCycleRegression:
         """
         adapter, bus = _make_tcp()
         client = _make_client(response=_ok_response([42]))
+        reload_clients = [_make_client(response=_ok_response([42])) for _ in range(3)]
         adapter._client = client
+        _install_client_factory(adapter, *reload_clients)
 
         b_original = make_binding(_HOLDING_CFG, direction="SOURCE")
         b_new = make_binding(_HOLDING_CFG, direction="SOURCE")
@@ -1210,7 +1227,9 @@ class TestBindingDeleteRecreateCycleRegression:
         """
         adapter, bus = _make_tcp()
         client = _make_client(response=_ok_response([99]))
+        reload_clients = [_make_client(response=_ok_response([99])) for _ in range(5)]
         adapter._client = client
+        _install_client_factory(adapter, *reload_clients)
 
         bindings = [make_binding(_HOLDING_CFG, direction="SOURCE") for _ in range(5)]
 
@@ -1573,23 +1592,32 @@ class TestReloadLock:
         """Two concurrent reload calls must not interleave."""
         adapter, _ = _make_tcp()
         adapter._client = _make_client()
+        _install_client_factory(adapter, _make_client(), _make_client())
         adapter._bindings = []
 
         reload_order = []
+        active_lifecycle_sections = 0
 
-        async def slow_reload(n):
-            reload_order.append(f"start_{n}")
-            await adapter._on_bindings_reloaded()
-            reload_order.append(f"end_{n}")
+        @contextlib.asynccontextmanager
+        async def recording_lifecycle():
+            nonlocal active_lifecycle_sections
+            reload_order.append("enter")
+            assert active_lifecycle_sections == 0
+            active_lifecycle_sections += 1
+            await asyncio.sleep(0.05)
+            try:
+                yield
+            finally:
+                active_lifecycle_sections -= 1
+                reload_order.append("exit")
 
-        t1 = asyncio.create_task(slow_reload(1))
-        t2 = asyncio.create_task(slow_reload(2))
+        adapter._client_lifecycle = recording_lifecycle
+
+        t1 = asyncio.create_task(adapter._on_bindings_reloaded())
+        t2 = asyncio.create_task(adapter._on_bindings_reloaded())
         await asyncio.gather(t1, t2)
 
-        # end_1 must appear before start_2 OR end_2 before start_1 (never interleaved)
-        s1, e1 = reload_order.index("start_1"), reload_order.index("end_1")
-        s2, e2 = reload_order.index("start_2"), reload_order.index("end_2")
-        assert e1 < s2 or e2 < s1, f"Reloads interleaved: {reload_order}"
+        assert reload_order == ["enter", "exit", "enter", "exit"]
 
 
 class TestReloadIoSemaphoreForCloseConnect:
@@ -1754,7 +1782,9 @@ class TestReloadPublishesStatus:
     async def test_reload_publishes_connected_on_success(self):
         adapter, bus = _make_tcp()
         client = _make_client(connected=True)
+        new_client = _make_client(connected=True)
         adapter._client = client
+        _install_client_factory(adapter, new_client)
         adapter._bindings = []
 
         await adapter._on_bindings_reloaded()
@@ -1766,7 +1796,9 @@ class TestReloadPublishesStatus:
     async def test_reload_success_clears_stale_reconnect_backoff(self):
         adapter, _ = _make_tcp()
         client = _make_client(connected=True)
+        new_client = _make_client(connected=True)
         adapter._client = client
+        _install_client_factory(adapter, new_client)
         adapter._bindings = []
         adapter._reconnect_ok_after = 999999.0
 
@@ -1777,8 +1809,10 @@ class TestReloadPublishesStatus:
     async def test_reload_publishes_disconnected_on_failure(self):
         adapter, bus = _make_tcp()
         client = _make_client(connected=False)
-        client.connect = AsyncMock(side_effect=OSError("refused"))
+        new_client = _make_client(connected=False)
+        new_client.connect = AsyncMock(side_effect=OSError("refused"))
         adapter._client = client
+        _install_client_factory(adapter, new_client)
         adapter._bindings = []
 
         await adapter._on_bindings_reloaded()
@@ -1795,8 +1829,10 @@ class TestReloadPublishesStatus:
         """
         adapter, bus = _make_tcp()
         client = _make_client(connected=False)
-        client.connect = AsyncMock()  # no exception — silent failure
+        new_client = _make_client(connected=False)
+        new_client.connect = AsyncMock()  # no exception — silent failure
         adapter._client = client
+        _install_client_factory(adapter, new_client)
         adapter._bindings = []
 
         await adapter._on_bindings_reloaded()

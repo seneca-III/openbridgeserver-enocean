@@ -81,6 +81,7 @@ class ModbusTcpAdapter(AdapterBase):
     def __init__(self, event_bus: Any, config: dict | None = None, **kwargs) -> None:
         super().__init__(event_bus, config, **kwargs)
         self._client: Any = None
+        self._client_factory: Any = None
         self._poll_tasks: list[asyncio.Task] = []
         # I/O semaphore — serializes reads AND writes on the shared TCP socket.
         # None when serialize_reads=False (no-op via nullcontext).
@@ -120,6 +121,7 @@ class ModbusTcpAdapter(AdapterBase):
             logger.error("pymodbus not installed — Modbus TCP disabled. Run: pip install pymodbus")
             await self._publish_status(False, "pymodbus not installed")
             return
+        self._client_factory = AsyncModbusTcpClient
 
         cfg = ModbusTcpAdapterConfig(**self._config)
         self._adp_cfg = cfg
@@ -133,11 +135,7 @@ class ModbusTcpAdapter(AdapterBase):
             cfg.startup_jitter_s,
         )
 
-        self._client = AsyncModbusTcpClient(
-            host=cfg.host,
-            port=cfg.port,
-            timeout=cfg.timeout,
-        )
+        self._client = self._new_client()
         try:
             await self._client.connect()
             if self._client.connected:
@@ -194,6 +192,7 @@ class ModbusTcpAdapter(AdapterBase):
                     except Exception:
                         pass
                     try:
+                        self._client = self._new_client()
                         await self._client.connect()
                         if self._client.connected:
                             self._reconnect_ok_after = 0.0
@@ -383,6 +382,17 @@ class ModbusTcpAdapter(AdapterBase):
     # ------------------------------------------------------------------
     # Low-level Modbus operations
     # ------------------------------------------------------------------
+
+    def _new_client(self) -> Any:
+        if self._client_factory is None:
+            from pymodbus.client import AsyncModbusTcpClient
+
+            self._client_factory = AsyncModbusTcpClient
+        return self._client_factory(
+            host=self._adp_cfg.host,
+            port=self._adp_cfg.port,
+            timeout=self._adp_cfg.timeout,
+        )
 
     @contextlib.asynccontextmanager
     async def _client_lifecycle(self):
