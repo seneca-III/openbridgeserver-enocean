@@ -184,6 +184,19 @@ describe('SettingsView support tab', () => {
     await flushPromises()
     expect(wrapper.text()).toContain('Die Datei ist kein gültiges Support-Paket')
 
+    const malformedArrays = new File(
+      [JSON.stringify({ generated_at: '2026-06-06T08:00:00Z', categories: ['logs'], adapters: { broken: true } })],
+      'malformed.json',
+      { type: 'application/json' },
+    )
+    Object.defineProperty(input.element, 'files', {
+      value: [malformedArrays],
+      configurable: true,
+    })
+    await input.trigger('change')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Die Datei ist kein gültiges Support-Paket')
+
     wrapper.unmount()
     objectUrl.mockRestore()
     revokeUrl.mockRestore()

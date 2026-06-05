@@ -87,7 +87,7 @@ async def test_support_package_sanitizes_adapter_config_and_counts(client, auth_
         "/api/v1/adapters/instances",
         json={
             "adapter_type": "MQTT",
-            "name": "Support Sanitizer MQTT",
+            "name": "mqtt.internal.local",
             "enabled": False,
             "config": {
                 "host": "192.168.10.25",
@@ -125,6 +125,7 @@ async def test_support_package_sanitizes_adapter_config_and_counts(client, auth_
     assert resp.status_code == 200
     package = resp.json()
     adapter = next(entry for entry in package["adapters"] if entry["id"] == instance_id)
+    assert adapter["name"] == "[REDACTED_ENDPOINT]"
     assert adapter["config"]["host"] == "[REDACTED_ENDPOINT]"
     assert adapter["config"]["username"] == "[REDACTED]"
     assert adapter["config"]["password"] == "[REDACTED]"
@@ -247,7 +248,8 @@ async def test_support_package_sanitizes_error_history(client, auth_headers):
         "connection failed url=http://admin:secret@192.168.1.20/api?token=abc password=hidden "
         "Authorization: Bearer bearer-token X-API-Key: header-secret password: colon-secret "
         "Authorization: Basic basic-secret "
-        '{"token":"json-token"}'
+        "access_token=access-secret refresh_token=refresh-secret client_secret: prefixed-colon "
+        '{"token":"json-token","client_secret":"json-client-secret"}'
     )
 
     resp = await client.post("/api/v1/support/package", headers=auth_headers)
@@ -264,7 +266,11 @@ async def test_support_package_sanitizes_error_history(client, auth_headers):
     assert "header-secret" not in message
     assert "colon-secret" not in message
     assert "basic-secret" not in message
+    assert "access-secret" not in message
+    assert "refresh-secret" not in message
+    assert "prefixed-colon" not in message
     assert "json-token" not in message
+    assert "json-client-secret" not in message
     assert "[REDACTED" in message
 
 

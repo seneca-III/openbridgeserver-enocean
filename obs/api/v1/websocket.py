@@ -450,7 +450,7 @@ async def _ws_has_log_access(user: str | None, api_key: str | None) -> bool:
         row = await db.fetchone(
             """SELECT u.is_admin
                FROM api_keys k
-               JOIN users u ON u.username = k.owner
+               JOIN users u ON u.username = COALESCE(NULLIF(k.owner, ''), k.name)
                WHERE k.key_hash=?""",
             (key_hash,),
         )

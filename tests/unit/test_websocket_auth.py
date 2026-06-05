@@ -53,6 +53,16 @@ class _DbStub:
         self.updated = True
 
 
+class _LogAccessDbStub:
+    def __init__(self, row: dict | None) -> None:
+        self.row = row
+        self.queries: list[str] = []
+
+    async def fetchone(self, query: str, _params: tuple):
+        self.queries.append(query)
+        return self.row
+
+
 @pytest.mark.asyncio
 async def test_authenticate_ws_rejects_missing_credentials():
     ws = _FakeWebSocket()
@@ -118,6 +128,16 @@ async def test_websocket_endpoint_accepts_api_key(monkeypatch):
 
     assert ws.accepted is True
     assert db.updated is True
+
+
+@pytest.mark.asyncio
+async def test_ws_log_access_uses_legacy_api_key_name_fallback(monkeypatch):
+    monkeypatch.setattr(auth_api, "hash_api_key", lambda key: f"hash:{key}")
+    db = _LogAccessDbStub({"is_admin": 1})
+    monkeypatch.setattr(ws_api, "get_db", lambda: db)
+
+    assert await ws_api._ws_has_log_access("__api_key__", "obs_valid") is True  # noqa: SLF001
+    assert "COALESCE(NULLIF(k.owner, ''), k.name)" in db.queries[0]
 
 
 @pytest.mark.asyncio

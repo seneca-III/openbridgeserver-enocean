@@ -1623,13 +1623,28 @@ async function onSupportViewerFile(e) {
     if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.categories) || !parsed.generated_at) {
       throw new Error('invalid')
     }
-    supportViewedPackage.value = parsed
+    supportViewedPackage.value = normalizeSupportPackage(parsed)
     supportViewerMsg.value = { ok: true, text: t('settings.support.viewerLoaded') }
   } catch {
     supportViewedPackage.value = null
     supportViewerMsg.value = { ok: false, text: t('settings.support.viewerInvalid') }
   } finally {
     e.target.value = ''
+  }
+}
+
+function normalizeSupportPackage(parsed) {
+  for (const key of ['adapters', 'warning_history', 'error_history', 'debug_log']) {
+    if (parsed[key] !== undefined && !Array.isArray(parsed[key])) {
+      throw new Error('invalid')
+    }
+  }
+  return {
+    ...parsed,
+    adapters: parsed.adapters ?? [],
+    warning_history: parsed.warning_history ?? [],
+    error_history: parsed.error_history ?? [],
+    debug_log: parsed.debug_log ?? [],
   }
 }
 

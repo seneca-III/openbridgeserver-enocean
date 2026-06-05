@@ -58,17 +58,19 @@ _ENDPOINT_KEY_PARTS = (
 )
 _IPV4_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
 _IPV6_CANDIDATE_RE = re.compile(r"\b[0-9a-fA-F:]*:[0-9a-fA-F:]+\b")
-_LONG_TOKEN_RE = re.compile(r"(?i)\b(?:token|secret|password|passwd|api[_-]?key)=([^&\s]+)")
+_SECRET_KEY_PATTERN = r"[a-z0-9_-]*(?:token|secret|password|passwd|api[_-]?key|private[_-]?key)"
+_LONG_TOKEN_RE = re.compile(rf"(?i)(?<![a-z0-9_-])({_SECRET_KEY_PATTERN})=([^&\s]+)")
 _AUTH_HEADER_RE = re.compile(r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+[^\s,;]+")
 _HEADER_SECRET_RE = re.compile(r"(?i)\b(x-api-key|api-key)\s*:\s*([^\s,;]+)")
 _COLON_SECRET_RE = re.compile(
-    r"(?i)\b(token|secret|password|passwd|api[_-]?key)\s*:\s*"
+    rf"(?i)(?<![a-z0-9_-])({_SECRET_KEY_PATTERN})\s*:\s*"
     r"([^\s,;}]+)"
 )
 _JSON_SECRET_RE = re.compile(
-    r"(?i)([\"'](?:token|secret|password|passwd|api[_-]?key)[\"']\s*:\s*)"
+    rf"(?i)([\"']{_SECRET_KEY_PATTERN}[\"']\s*:\s*)"
     r"([\"'])(.*?)(\2)"
 )
+_HOSTLIKE_NAME_RE = re.compile(r"(?i)\b(?:[a-z0-9-]+\.)+[a-z0-9-]+\b")
 
 _debug_restore_task: asyncio.Task[None] | None = None
 _debug_restore_level: str | None = None
@@ -298,7 +300,7 @@ async def _build_adapter_info(db: Database) -> list[dict[str, Any]]:
             {
                 "id": row["id"],
                 "adapter_type": adapter_type,
-                "name": row["name"],
+                "name": _sanitize_adapter_name(row["name"]),
                 "enabled": bool(row["enabled"]),
                 "registered": cls is not None,
                 "running": instance is not None,
@@ -475,7 +477,7 @@ def _sanitize_log_entry(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 def _sanitize_string(value: str) -> str:
-    sanitized = _LONG_TOKEN_RE.sub(lambda match: match.group(0).split("=", 1)[0] + "=[REDACTED]", value)
+    sanitized = _LONG_TOKEN_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", value)
     sanitized = _JSON_SECRET_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]{match.group(4)}", sanitized)
     sanitized = _COLON_SECRET_RE.sub(lambda match: f"{match.group(1)}: [REDACTED]", sanitized)
     sanitized = _AUTH_HEADER_RE.sub("Authorization: [REDACTED]", sanitized)
@@ -483,6 +485,13 @@ def _sanitize_string(value: str) -> str:
     sanitized = _sanitize_urls(sanitized)
     sanitized = _IPV4_RE.sub("[REDACTED_IP]", sanitized)
     sanitized = _IPV6_CANDIDATE_RE.sub(_sanitize_ipv6_candidate, sanitized)
+    return sanitized
+
+
+def _sanitize_adapter_name(value: str) -> str:
+    sanitized = sanitize_support_data(value)
+    if _HOSTLIKE_NAME_RE.search(sanitized):
+        return _HOSTLIKE_NAME_RE.sub("[REDACTED_ENDPOINT]", sanitized)
     return sanitized
 
 
