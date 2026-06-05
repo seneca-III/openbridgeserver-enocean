@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from obs.adapters.modbus_base import ModbusBindingConfig
+from obs.adapters.modbus_base import ModbusBindingConfig, decode_registers, encode_value
 from obs.adapters.modbus_rtu.adapter import ModbusRtuAdapter, ModbusRtuAdapterConfig
 from obs.adapters.modbus_tcp.adapter import ModbusTcpAdapter, ModbusTcpAdapterConfig
 from tests.adapters.conftest import make_binding
@@ -324,6 +324,24 @@ class TestReadRegisterTcp:
         result = await self._read(adapter, _INPUT_CFG, client)
         assert result == 5678
 
+    async def test_input_register_uint32_big_byte_little_word(self):
+        adapter, _ = _make_tcp()
+        client = _make_client(response=_ok_response([0x5678, 0x1234]))
+        cfg = {
+            **_INPUT_CFG,
+            "data_format": "uint32",
+            "count": 2,
+            "byte_order": "big",
+            "word_order": "little",
+        }
+        result = await self._read(adapter, cfg, client)
+
+        assert result == 0x12345678
+        client.read_input_registers.assert_awaited_once()
+        args = client.read_input_registers.await_args.args
+        assert args[:2] == (0, 2)
+        assert client.read_input_registers.await_args.kwargs.get("device_id") == 1
+
     async def test_coil_returns_bool(self):
         adapter, _ = _make_tcp()
         client = _make_client(response=_ok_response(bits=[True]))
@@ -374,6 +392,19 @@ class TestReadRegisterTcp:
         adapter._client = client
         result = await adapter._read_register(bc)
         assert abs(result - 3.14) < 1e-5
+
+    @pytest.mark.parametrize(
+        ("byte_order", "word_order", "registers"),
+        [
+            ("big", "big", [0x1234, 0x5678]),
+            ("big", "little", [0x5678, 0x1234]),
+            ("little", "big", [0x3412, 0x7856]),
+            ("little", "little", [0x7856, 0x3412]),
+        ],
+    )
+    def test_uint32_endian_decode_and_encode_are_symmetric(self, byte_order, word_order, registers):
+        assert decode_registers(registers, "uint32", byte_order, word_order) == 0x12345678
+        assert encode_value(0x12345678, "uint32", byte_order, word_order) == registers
 
 
 # ---------------------------------------------------------------------------
