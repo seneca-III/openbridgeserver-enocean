@@ -60,7 +60,11 @@ EOF
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 detect_version() {
-    git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null || echo "0.0.0-local"
+    local v
+    v=$(git -C "$PROJECT_ROOT" describe --tags --always --dirty 2>/dev/null || echo "0.0.0-local")
+    # git describe prefixes the commit hash with 'g' (e.g. 2026.6.0-RC4-22-ge633092-dirty).
+    # Strip the 'g' so the hash segment matches `git rev-parse --short HEAD` exactly.
+    echo "${v//-g/-}"
 }
 
 detect_repo() {
@@ -140,19 +144,21 @@ build_docker() {
         --build-arg OBS_VERSION="$obs_version" obs
 
     # Retag the compose-built image with versioned names and remove the compose tag
-    local githash src_image
+    local githash dirty githash_tag src_image
     githash=$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "local")
+    dirty=$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null)
+    githash_tag="${githash}$([[ -n "$dirty" ]] && echo "-dirty" || true)"
     src_image=$(compose_image_tag)
 
     docker tag "$src_image" "${IMAGE_NAME}:${version}"
-    docker tag "$src_image" "${IMAGE_NAME}:${githash}"
+    docker tag "$src_image" "${IMAGE_NAME}:${githash_tag}"
     # Remove the intermediate compose-named tag (keep only our versioned tags)
     docker image rm "$src_image" 2>/dev/null || true
-    echo "==> Tagged: ${IMAGE_NAME}:${version}, ${IMAGE_NAME}:${githash}"
+    echo "==> Tagged: ${IMAGE_NAME}:${version}, ${IMAGE_NAME}:${githash_tag}"
 
     if [[ "$PUSH" == "true" ]]; then
         docker push "${IMAGE_NAME}:${version}"
-        docker push "${IMAGE_NAME}:${githash}"
+        docker push "${IMAGE_NAME}:${githash_tag}"
     fi
 
     echo "==> Docker image built successfully."
