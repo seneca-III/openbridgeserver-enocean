@@ -87,7 +87,8 @@ async def test_support_package_contains_phase1_privacy_contract(client, auth_hea
     assert body["runtime"]["resources"]["system"]["cpu_count"] is not None
     assert "memory" in body["runtime"]["resources"]["system"]
     assert "disk" in body["runtime"]["resources"]
-    assert "top_processes" in body["runtime"]["resources"]
+    assert "top_cpu_processes" in body["runtime"]["resources"]
+    assert "top_memory_processes" in body["runtime"]["resources"]
     assert "/" not in body["installation"]["database"]["path"]
     assert body["installation"]["config_source"]
     assert "/" not in body["installation"]["config_source"]

@@ -456,8 +456,10 @@
                   <dd class="text-slate-800 dark:text-slate-100">{{ supportFormatMemory(supportViewedPackage.runtime?.resources) }}</dd>
                   <dt class="text-slate-500">{{ $t('settings.support.viewerDisk') }}</dt>
                   <dd class="text-slate-800 dark:text-slate-100">{{ supportFormatDisk(supportViewedPackage.runtime?.resources) }}</dd>
-                  <dt class="text-slate-500">{{ $t('settings.support.viewerTop') }}</dt>
-                  <dd class="text-slate-800 dark:text-slate-100">{{ supportFormatTop(supportViewedPackage.runtime?.resources) }}</dd>
+                  <dt class="text-slate-500">{{ $t('settings.support.viewerTopCpu') }}</dt>
+                  <dd class="text-slate-800 dark:text-slate-100">{{ supportFormatTopCpu(supportViewedPackage.runtime?.resources) }}</dd>
+                  <dt class="text-slate-500">{{ $t('settings.support.viewerTopMemory') }}</dt>
+                  <dd class="text-slate-800 dark:text-slate-100">{{ supportFormatTopMemory(supportViewedPackage.runtime?.resources) }}</dd>
                 </dl>
               </div>
             </div>
@@ -1731,13 +1733,27 @@ function supportFormatDisk(resources) {
   return `${supportFormatBytes(disk.free_bytes)} ${t('settings.support.viewerFree')} / ${supportFormatBytes(disk.total_bytes)}`
 }
 
-function supportFormatTop(resources) {
-  const top = resources?.top_processes
+function supportFormatTopCpu(resources) {
+  const top = resources?.top_cpu_processes
+  if (!top?.available || !Array.isArray(top.items) || top.items.length === 0) return '—'
+  return top.items
+    .slice(0, 3)
+    .map(item => `${item.name || item.pid}: ${supportFormatPercent(item.cpu_percent)}`)
+    .join(' / ')
+}
+
+function supportFormatTopMemory(resources) {
+  const top = resources?.top_memory_processes
   if (!top?.available || !Array.isArray(top.items) || top.items.length === 0) return '—'
   return top.items
     .slice(0, 3)
     .map(item => `${item.name || item.pid}: ${supportFormatBytes(item.rss_bytes)}`)
     .join(' / ')
+}
+
+function supportFormatPercent(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  return `${value.toFixed(1)}%`
 }
 
 function supportDuration(seconds) {

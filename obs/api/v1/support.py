@@ -14,6 +14,7 @@ import os
 import platform
 import re
 import shutil
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -648,7 +649,8 @@ def _build_resource_snapshot() -> dict[str, Any]:
             "system": _system_resource_snapshot(),
             "process": _process_resource_snapshot(),
             "disk": _disk_resource_snapshot(),
-            "top_processes": _top_process_snapshot(),
+            "top_cpu_processes": _top_cpu_process_snapshot(),
+            "top_memory_processes": _top_memory_process_snapshot(),
         }
     )
 
@@ -704,29 +706,46 @@ def _disk_resource_snapshot() -> dict[str, Any]:
     }
 
 
-def _top_process_snapshot(limit: int = 5) -> dict[str, Any]:
+def _top_cpu_process_snapshot(limit: int = 5) -> dict[str, Any]:
     try:
         import psutil
     except ImportError:
-        return _top_process_snapshot_procfs(limit=limit)
+        return _top_cpu_process_snapshot_procfs(limit=limit)
 
+    procs = list(psutil.process_iter(["pid", "name", "username", "memory_info"]))
+    for proc in procs:
+        try:
+            proc.cpu_percent(interval=None)
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            pass
+    time.sleep(0.1)
     items: list[dict[str, Any]] = []
-    for proc in psutil.process_iter(["pid", "name", "username", "cpu_percent", "memory_info"]):
+    for proc in procs:
         try:
             info = proc.info
             memory_info = info.get("memory_info")
-            items.append(
-                {
-                    "pid": info.get("pid"),
-                    "name": info.get("name"),
-                    "username": "[REDACTED]",
-                    "cpu_percent": info.get("cpu_percent"),
-                    "rss_bytes": getattr(memory_info, "rss", None),
-                }
-            )
+            items.append(_process_item(info.get("pid"), info.get("name"), proc.cpu_percent(interval=None), getattr(memory_info, "rss", None)))
         except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
             continue
     items.sort(key=lambda item: (item.get("cpu_percent") or 0, item.get("rss_bytes") or 0), reverse=True)
+    return {"available": True, "source": "psutil", "items": items[:limit]}
+
+
+def _top_memory_process_snapshot(limit: int = 5) -> dict[str, Any]:
+    try:
+        import psutil
+    except ImportError:
+        return _top_memory_process_snapshot_procfs(limit=limit)
+
+    items: list[dict[str, Any]] = []
+    for proc in psutil.process_iter(["pid", "name", "username", "memory_info"]):
+        try:
+            info = proc.info
+            memory_info = info.get("memory_info")
+            items.append(_process_item(info.get("pid"), info.get("name"), None, getattr(memory_info, "rss", None)))
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    items.sort(key=lambda item: item.get("rss_bytes") or 0, reverse=True)
     return {"available": True, "source": "psutil", "items": items[:limit]}
 
 
@@ -752,36 +771,78 @@ def _memory_snapshot_procfs() -> dict[str, Any] | None:
     }
 
 
-def _top_process_snapshot_procfs(limit: int = 5) -> dict[str, Any]:
+def _top_cpu_process_snapshot_procfs(limit: int = 5) -> dict[str, Any]:
     proc_root = "/proc"
     if not os.path.isdir(proc_root):
         return {"available": False, "reason": "psutil_not_installed", "items": []}
 
-    page_size = os.sysconf("SC_PAGE_SIZE")
+    first = _read_procfs_processes()
+    time.sleep(0.1)
+    second = _read_procfs_processes()
+    elapsed = 0.1
+    cpu_count = os.cpu_count() or 1
     items: list[dict[str, Any]] = []
+    for pid, current in second.items():
+        prior = first.get(pid)
+        if not prior:
+            continue
+        delta_seconds = max(0.0, current["cpu_seconds"] - prior["cpu_seconds"])
+        cpu_percent = (delta_seconds / elapsed) * 100 / cpu_count
+        items.append(_process_item(pid, current["name"], cpu_percent, current["rss_bytes"]))
+    items.sort(key=lambda item: (item.get("cpu_percent") or 0, item.get("rss_bytes") or 0), reverse=True)
+    return {"available": True, "source": "procfs", "items": items[:limit]}
+
+
+def _top_memory_process_snapshot_procfs(limit: int = 5) -> dict[str, Any]:
+    proc_root = "/proc"
+    if not os.path.isdir(proc_root):
+        return {"available": False, "reason": "psutil_not_installed", "items": []}
+
+    items = [_process_item(pid, item["name"], None, item["rss_bytes"]) for pid, item in _read_procfs_processes().items()]
+    items.sort(key=lambda item: item.get("rss_bytes") or 0, reverse=True)
+    return {"available": True, "source": "procfs", "items": items[:limit]}
+
+
+def _read_procfs_processes() -> dict[int, dict[str, Any]]:
+    proc_root = "/proc"
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    clock_ticks = os.sysconf("SC_CLK_TCK")
+    items: dict[int, dict[str, Any]] = {}
     for pid_name in os.listdir(proc_root):
         if not pid_name.isdigit():
             continue
+        pid = int(pid_name)
         proc_dir = os.path.join(proc_root, pid_name)
         try:
             with open(os.path.join(proc_dir, "comm"), encoding="utf-8") as fh:
                 name = fh.read().strip()
+            with open(os.path.join(proc_dir, "stat"), encoding="utf-8") as fh:
+                stat = fh.read().split()
             with open(os.path.join(proc_dir, "statm"), encoding="utf-8") as fh:
                 statm = fh.read().split()
         except OSError:
             continue
+        if len(stat) <= 15:
+            continue
+        utime = int(stat[13])
+        stime = int(stat[14])
         rss_pages = int(statm[1]) if len(statm) > 1 and statm[1].isdigit() else 0
-        items.append(
-            {
-                "pid": int(pid_name),
-                "name": name,
-                "username": "[REDACTED]",
-                "cpu_percent": None,
-                "rss_bytes": rss_pages * page_size,
-            }
-        )
-    items.sort(key=lambda item: item.get("rss_bytes") or 0, reverse=True)
-    return {"available": True, "source": "procfs", "items": items[:limit]}
+        items[pid] = {
+            "name": name,
+            "cpu_seconds": (utime + stime) / clock_ticks,
+            "rss_bytes": rss_pages * page_size,
+        }
+    return items
+
+
+def _process_item(pid: Any, name: Any, cpu_percent: Any, rss_bytes: Any) -> dict[str, Any]:
+    return {
+        "pid": pid,
+        "name": name,
+        "username": "[REDACTED]",
+        "cpu_percent": cpu_percent,
+        "rss_bytes": rss_bytes,
+    }
 
 
 def _adapter_version(cls: type | None) -> str | None:

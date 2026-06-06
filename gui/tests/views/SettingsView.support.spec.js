@@ -226,7 +226,8 @@ function supportPackage() {
         },
         process: { max_rss_bytes: 2048 },
         disk: { available: true, free_bytes: 8192, total_bytes: 16384 },
-        top_processes: { available: true, source: 'procfs', items: [{ pid: 1, name: 'python', rss_bytes: 2048 }] },
+        top_cpu_processes: { available: true, source: 'procfs', items: [{ pid: 1, name: 'python', cpu_percent: 12.3, rss_bytes: 2048 }] },
+        top_memory_processes: { available: true, source: 'procfs', items: [{ pid: 1, name: 'python', rss_bytes: 2048 }] },
       },
     },
     adapters: [
