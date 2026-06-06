@@ -4,7 +4,9 @@ on:
   push:
     tags:
       - '*'
-      - '!nightly-*'  # nightly-lxc.yml creates these; must not trigger a real release/build
+    tags-ignore:
+      - 'nightly-*'  # nightly-lxc.yml creates these; must not trigger a real release/build
+
   workflow_dispatch:
 
 env:
