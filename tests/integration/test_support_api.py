@@ -8,7 +8,12 @@ from unittest.mock import patch
 import pytest
 
 from obs.api.auth import create_access_token
-from obs.api.v1.support import _build_monitor_info, _parse_procfs_stat_cpu_seconds, _ringbuffer_tps, sanitize_support_data
+from obs.api.v1.support import (
+    _build_monitor_info,
+    _parse_procfs_stat_cpu_seconds,
+    _ringbuffer_tps,
+    sanitize_support_data,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -391,10 +396,12 @@ async def test_support_package_sanitizes_error_history(client, auth_headers):
         "failed to open /home/alice/obs/config.yaml "
         "ipv6 ::1 ::dead:beef 2001:db8:: "
         r"windows path C:\Users\Alice\obs\customer.com.yaml unc \\fileserver\share\obs\config.yaml "
-        "logger sniffer.process still visible "
+        "logger sniffer.process still visible and sniffer.process: label visible "
+        "but sniffer.process.com and sniffer.process:123 are private "
         "contact admin@example.com connecting to mqtt.customer-site.com failed "
         '{"token":"json-token","client_secret":"json-client-secret"}'
     )
+    logging.getLogger("mqtt.customer.local.192.168.1.5").error("endpoint logger leak sentinel")
 
     resp = await client.post("/api/v1/support/package", headers=auth_headers)
     assert resp.status_code == 200
@@ -437,13 +444,21 @@ async def test_support_package_sanitizes_error_history(client, auth_headers):
     assert "customer.com" not in message
     assert "[REDACTED_PATH]/[REDACTED_DOMAIN].yaml" in message
     assert "sniffer.process" in message
+    assert "sniffer.process: label" in message
+    assert "sniffer.process.com" not in message
+    assert "sniffer.process:123" not in message
     assert "admin@example.com" not in message
     assert "mqtt.customer-site.com" not in message
     assert "json-token" not in message
     assert "json-client-secret" not in message
     assert "[REDACTED" in message
     assert matching[-1]
-    assert [entry for entry in resp.json()["error_history"] if entry["message"] == message][-1]["logger"] == "tests.support"
+    assert [entry for entry in resp.json()["error_history"] if entry["message"] == message][-1]["logger"] == "[REDACTED_DOMAIN]"
+    logger_entry = next(entry for entry in resp.json()["error_history"] if entry["message"] == "endpoint logger leak sentinel")
+    assert "mqtt.customer.local" not in logger_entry["logger"]
+    assert "192.168.1.5" not in logger_entry["logger"]
+    assert "[REDACTED_DOMAIN]" in logger_entry["logger"]
+    assert "[REDACTED_IP]" in logger_entry["logger"]
 
 
 async def test_support_package_tolerates_corrupt_adapter_config_rows(client, auth_headers):
@@ -480,6 +495,7 @@ def test_sanitize_support_data_redacts_dictionary_keys_and_preserves_path_basena
                 "broker.internal.local": {"status": "ok"},
                 "access_token": "secret-token",
                 "https://api.telegram.org/bot123456:dict-key-token/sendMessage": {"status": "ok"},
+                "sniffer.process.com": {"status": "ok"},
             },
             "path": "obs.db",
             "config_source": r"C:\Users\Alice\obs\customer.com.key",
@@ -490,6 +506,7 @@ def test_sanitize_support_data_redacts_dictionary_keys_and_preserves_path_basena
     assert "broker.internal.local" not in sanitized["devices"]
     sanitized_device_keys = " ".join(sanitized["devices"])
     assert "dict-key-token" not in sanitized_device_keys
+    assert "sniffer.process.com" not in sanitized_device_keys
     assert not any("/sendMessage" in key for key in sanitized["devices"])
     assert "[REDACTED_IP]" in sanitized["devices"]
     assert "[REDACTED_DOMAIN]" in sanitized["devices"]

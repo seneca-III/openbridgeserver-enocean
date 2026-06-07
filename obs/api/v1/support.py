@@ -115,6 +115,7 @@ _FILENAME_DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?
 _ABS_PATH_RE = re.compile(r"(?<![:/])/(?:[^\s\"'<>:]+/)+[^\s\"'<>:]+")
 _WINDOWS_PATH_RE = re.compile(r"(?i)\b[a-z]:\\(?:[^\s\"'<>:]+\\)+[^\s\"'<>:]+")
 _UNC_PATH_RE = re.compile(r"\\\\[^\s\"'<>:\\]+\\[^\s\"'<>:\\]+(?:\\[^\s\"'<>:\\]+)+")
+_PASSTHROUGH_BOUNDARY_CHARS = r"a-zA-Z0-9_./\\-"
 
 _debug_restore_task: asyncio.Task[None] | None = None
 _debug_restore_level: str | None = None
@@ -559,7 +560,7 @@ def _sanitize_log_entry(entry: dict[str, Any]) -> dict[str, Any]:
     return {
         "ts": sanitize_support_data(entry.get("ts", ""), "ts"),
         "level": sanitize_support_data(entry.get("level", ""), "level"),
-        "logger": sanitize_support_data(entry.get("logger", ""), "logger"),
+        "logger": _sanitize_string(str(entry.get("logger", ""))),
         "message": sanitize_support_data(entry.get("message", ""), "message"),
     }
 
@@ -570,8 +571,9 @@ def _sanitize_string(value: str) -> str:
     sanitized = value
     for index, literal in enumerate(sorted(_PASSTHROUGH_VALUES, key=len, reverse=True)):
         token = f"__OBS_SUPPORT_PASSTHROUGH_{index}__"
-        if literal in sanitized:
-            sanitized = sanitized.replace(literal, token)
+        pattern = re.compile(rf"(?<![{_PASSTHROUGH_BOUNDARY_CHARS}]){re.escape(literal)}(?![{_PASSTHROUGH_BOUNDARY_CHARS}]|:\d)")
+        sanitized, count = pattern.subn(token, sanitized)
+        if count:
             passthrough_tokens[token] = literal
     sanitized = _QUOTED_SECRET_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", sanitized)
     sanitized = _LONG_TOKEN_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", sanitized)

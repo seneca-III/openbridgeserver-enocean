@@ -48,8 +48,8 @@ class WebSocketManager:
         # conn_id → (websocket, subscribed_dp_ids, send_lock, allowed_dp_ids, log_access, log_access_check)
         # allowed_dp_ids: None = unrestricted (authenticated user),
         # otherwise page-scoped allowlist for anonymous viewer sessions.
-        # log_access: only admin-authenticated connections receive log_entry pushes.
-        # log_access_check: revalidates admin status before every log_entry push.
+        # log_access: authenticated non-page connections receive log_entry pushes.
+        # log_access_check: revalidates API-key existence before every log_entry push.
         # send_lock serialises concurrent sends on the same WebSocket;
         # concurrent asyncio.gather calls in EventBus would otherwise race.
         self._connections: dict[str, tuple[WebSocket, set[str], asyncio.Lock, set[str] | None, bool, LogAccessCheck | None]] = {}
@@ -452,33 +452,22 @@ async def _authenticate_ws_request(ws: WebSocket) -> tuple[bool, str]:
 
 async def _ws_has_log_access(user: str | None, api_key: str | None) -> bool:
     """Return whether the authenticated websocket may receive log_entry pushes."""
-    try:
-        db = get_db()
-    except RuntimeError:
-        return False
     if user and user != "__api_key__":
-        row = await db.fetchone("SELECT is_admin FROM users WHERE username=?", (user,))
-        return _row_bool(row, "is_admin")
+        return True
     if api_key:
+        try:
+            db = get_db()
+        except RuntimeError:
+            return False
         from obs.api.auth import hash_api_key
 
         key_hash = hash_api_key(api_key)
         row = await db.fetchone(
-            """SELECT u.is_admin
-               FROM api_keys k
-               JOIN users u ON u.username = COALESCE(NULLIF(k.owner, ''), k.name)
-               WHERE k.key_hash=?""",
+            "SELECT COALESCE(NULLIF(owner, ''), name) AS subject FROM api_keys WHERE key_hash=?",
             (key_hash,),
         )
-        return _row_bool(row, "is_admin")
+        return row is not None
     return False
-
-
-def _row_bool(row: object, key: str) -> bool:
-    try:
-        return bool(row[key])  # type: ignore[index]
-    except (KeyError, IndexError, TypeError):
-        return False
 
 
 # ---------------------------------------------------------------------------
