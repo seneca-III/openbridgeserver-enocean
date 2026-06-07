@@ -94,7 +94,7 @@ _SECRET_KEY_PATTERN = (
     r"keyring|ca[_-]?cert|client[_-]?cert|cert|community|knxkeys[_-]?file[_-]?path"
     r")"
 )
-_LONG_TOKEN_RE = re.compile(rf"(?i)(?<![a-z0-9_-])({_SECRET_KEY_PATTERN})=([^&\s]+)")
+_LONG_TOKEN_RE = re.compile(rf"(?i)(?<![a-z0-9_-])({_SECRET_KEY_PATTERN})\s*=\s*([^&\s]+)")
 _AUTH_HEADER_RE = re.compile(r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+[^\s,;]+")
 _HEADER_SECRET_RE = re.compile(r"(?i)\b(x-api-key|api-key)\s*:\s*([^\s,;]+)")
 _COLON_SECRET_RE = re.compile(
@@ -108,8 +108,10 @@ _JSON_SECRET_RE = re.compile(
 _HOSTLIKE_NAME_RE = re.compile(r"(?i)\b(?:[a-z0-9-]+\.)+[a-z0-9-]+\b")
 _EMAIL_RE = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 _DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}\b")
-_FILENAME_DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){2,}[a-z]{2,63}(?=\.[a-z0-9]{1,8}\b)")
+_FILENAME_DOMAIN_RE = re.compile(r"(?i)\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}(?=\.[a-z0-9]{1,8}\b)")
 _ABS_PATH_RE = re.compile(r"(?<![:/])/(?:[^\s\"'<>:]+/)+[^\s\"'<>:]+")
+_WINDOWS_PATH_RE = re.compile(r"(?i)\b[a-z]:\\(?:[^\s\"'<>:]+\\)+[^\s\"'<>:]+")
+_UNC_PATH_RE = re.compile(r"\\\\[^\s\"'<>:\\]+\\[^\s\"'<>:\\]+(?:\\[^\s\"'<>:\\]+)+")
 
 _debug_restore_task: asyncio.Task[None] | None = None
 _debug_restore_level: str | None = None
@@ -593,7 +595,8 @@ def _sanitize_adapter_name(value: str) -> str:
 
 
 def _basename_only(value: str) -> str:
-    return os.path.basename(str(value)) or "[REDACTED_PATH]"
+    normalized = str(value).replace("\\", "/")
+    return os.path.basename(normalized) or "[REDACTED_PATH]"
 
 
 def _sanitize_basename(value: str) -> str:
@@ -616,7 +619,8 @@ def _sanitize_dict_key(key: Any) -> str:
 
 def _sanitize_paths(value: str, tokens: dict[str, str] | None = None) -> str:
     def repl(match: re.Match[str]) -> str:
-        basename = os.path.basename(match.group(0).rstrip("/")) or "[REDACTED_PATH]"
+        raw = match.group(0).rstrip("/\\")
+        basename = raw.replace("\\", "/").rsplit("/", 1)[-1] or "[REDACTED_PATH]"
         replacement = f"[REDACTED_PATH]/{_sanitize_basename(basename)}"
         if tokens is None:
             return replacement
@@ -624,7 +628,9 @@ def _sanitize_paths(value: str, tokens: dict[str, str] | None = None) -> str:
         tokens[token] = replacement
         return token
 
-    return _ABS_PATH_RE.sub(repl, value)
+    sanitized = _WINDOWS_PATH_RE.sub(repl, value)
+    sanitized = _UNC_PATH_RE.sub(repl, sanitized)
+    return _ABS_PATH_RE.sub(repl, sanitized)
 
 
 def _sanitize_urls(value: str) -> str:

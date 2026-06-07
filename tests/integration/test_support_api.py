@@ -120,6 +120,14 @@ async def test_support_package_config_source_keeps_basename_but_sanitizes_endpoi
     assert "site.internal.local" not in host_config_source
     assert host_config_source == "[REDACTED_DOMAIN].yaml"
 
+    with patch.dict("os.environ", {"OBS_CONFIG": "/etc/obs/customer.com.yaml"}):
+        two_label_resp = await client.post("/api/v1/support/package", headers=auth_headers)
+
+    assert two_label_resp.status_code == 200
+    two_label_config_source = two_label_resp.json()["installation"]["config_source"]
+    assert "customer.com" not in two_label_config_source
+    assert two_label_config_source == "[REDACTED_DOMAIN].yaml"
+
 
 async def test_support_package_sanitizes_adapter_config_and_counts(client, auth_headers):
     instance_resp = await client.post(
@@ -324,9 +332,11 @@ async def test_support_package_sanitizes_error_history(client, auth_headers):
         "postgres://pg-user:pg-pass@db.internal.local/app "
         "Authorization: Bearer bearer-token X-API-Key: header-secret password: colon-secret "
         "Authorization: Basic basic-secret "
+        "api_key = spaced-api-key password = spaced-password "
         "access_token=access-secret refresh_token=refresh-secret client_secret: prefixed-colon "
         "community=public-community knxkeys_file_path=/home/support/secret.knxkeys "
         "failed to open /home/alice/obs/config.yaml "
+        r"windows path C:\Users\Alice\obs\customer.com.yaml unc \\fileserver\share\obs\config.yaml "
         "logger sniffer.process still visible "
         "contact admin@example.com connecting to mqtt.customer-site.com failed "
         '{"token":"json-token","client_secret":"json-client-secret"}'
@@ -350,6 +360,8 @@ async def test_support_package_sanitizes_error_history(client, auth_headers):
     assert "header-secret" not in message
     assert "colon-secret" not in message
     assert "basic-secret" not in message
+    assert "spaced-api-key" not in message
+    assert "spaced-password" not in message
     assert "access-secret" not in message
     assert "refresh-secret" not in message
     assert "prefixed-colon" not in message
@@ -357,6 +369,10 @@ async def test_support_package_sanitizes_error_history(client, auth_headers):
     assert "secret.knxkeys" not in message
     assert "/home/alice/obs" not in message
     assert "[REDACTED_PATH]/config.yaml" in message
+    assert "C:\\Users\\Alice\\obs" not in message
+    assert "\\\\fileserver\\share\\obs" not in message
+    assert "customer.com" not in message
+    assert "[REDACTED_PATH]/[REDACTED_DOMAIN].yaml" in message
     assert "sniffer.process" in message
     assert "admin@example.com" not in message
     assert "mqtt.customer-site.com" not in message
@@ -376,6 +392,7 @@ def test_sanitize_support_data_redacts_dictionary_keys_and_preserves_path_basena
                 "access_token": "secret-token",
             },
             "path": "obs.db",
+            "config_source": r"C:\Users\Alice\obs\customer.com.key",
         }
     )
 
@@ -385,6 +402,7 @@ def test_sanitize_support_data_redacts_dictionary_keys_and_preserves_path_basena
     assert "[REDACTED_DOMAIN]" in sanitized["devices"]
     assert sanitized["devices"]["access_token"] == "[REDACTED]"
     assert sanitized["path"] == "obs.db"
+    assert sanitized["config_source"] == "[REDACTED_DOMAIN].key"
 
 
 async def test_support_package_includes_warning_history(client, auth_headers):
