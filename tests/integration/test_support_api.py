@@ -389,8 +389,12 @@ async def test_support_package_sanitizes_error_history(client, auth_headers):
         "webhook=https://hooks.example.com/services/T000/B000/webhook-secret "
         "Authorization: Bearer bearer-token X-API-Key: header-secret password: colon-secret "
         "Authorization: Basic basic-secret "
+        "Authorization=Bearer equals-bearer-token Authorization=Basic equals-basic-token "
+        "Cookie: sessionid=cookie-secret; csrftoken=csrf-secret "
+        "Set-Cookie: refresh_token=set-cookie-secret; Path=/; HttpOnly "
         "api_key = spaced-api-key password = spaced-password "
         "password=\"quoted password\" api_key='quoted api key' "
+        "password: \"quoted colon password\" api_key: 'quoted colon api key' "
         "access_token=access-secret refresh_token=refresh-secret client_secret: prefixed-colon "
         "community=public-community knxkeys_file_path=/home/support/secret.knxkeys "
         "failed to open /home/alice/obs/config.yaml "
@@ -425,10 +429,17 @@ async def test_support_package_sanitizes_error_history(client, auth_headers):
     assert "header-secret" not in message
     assert "colon-secret" not in message
     assert "basic-secret" not in message
+    assert "equals-bearer-token" not in message
+    assert "equals-basic-token" not in message
+    assert "cookie-secret" not in message
+    assert "csrf-secret" not in message
+    assert "set-cookie-secret" not in message
     assert "spaced-api-key" not in message
     assert "spaced-password" not in message
     assert "quoted password" not in message
     assert "quoted api key" not in message
+    assert "quoted colon password" not in message
+    assert "quoted colon api key" not in message
     assert "access-secret" not in message
     assert "refresh-secret" not in message
     assert "prefixed-colon" not in message

@@ -96,9 +96,14 @@ _SECRET_KEY_PATTERN = (
     r"keyring|ca[_-]?cert|client[_-]?cert|cert|community|knxkeys[_-]?file[_-]?path"
     r")"
 )
-_LONG_TOKEN_RE = re.compile(rf"(?i)(?<![a-z0-9_-])({_SECRET_KEY_PATTERN})\s*=\s*([^&\s]+)")
 _QUOTED_SECRET_RE = re.compile(rf"(?i)(?<![a-z0-9_-])({_SECRET_KEY_PATTERN})\s*=\s*([\"'])(.*?)(\3)")
-_AUTH_HEADER_RE = re.compile(r"(?i)\bauthorization\s*:\s*(?:bearer|basic)\s+[^\s,;]+")
+_LONG_TOKEN_RE = re.compile(rf"(?i)(?<![a-z0-9_-])({_SECRET_KEY_PATTERN})\s*=\s*([^&\s]+)")
+_QUOTED_COLON_SECRET_RE = re.compile(rf"(?i)(?<![a-z0-9_-])({_SECRET_KEY_PATTERN})\s*:\s*([\"'])(.*?)(\3)")
+_AUTH_HEADER_RE = re.compile(r"(?i)\bauthorization\s*[:=]\s*(?:bearer|basic)\s+[^\s,;]+")
+_COOKIE_HEADER_RE = re.compile(
+    r"(?i)\b(cookie|set-cookie)\s*[:=]\s*.*?"
+    rf"(?=(?:\s+\b(?:authorization|x-api-key|api-key|cookie|set-cookie|{_SECRET_KEY_PATTERN})\s*[:=])|$|[,\n\r])"
+)
 _HEADER_SECRET_RE = re.compile(r"(?i)\b(x-api-key|api-key)\s*:\s*([^\s,;]+)")
 _COLON_SECRET_RE = re.compile(
     rf"(?i)(?<![a-z0-9_-])({_SECRET_KEY_PATTERN})\s*:\s*"
@@ -576,10 +581,12 @@ def _sanitize_string(value: str) -> str:
         if count:
             passthrough_tokens[token] = literal
     sanitized = _QUOTED_SECRET_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", sanitized)
+    sanitized = _AUTH_HEADER_RE.sub("Authorization: [REDACTED]", sanitized)
+    sanitized = _COOKIE_HEADER_RE.sub(lambda match: f"{match.group(1)}: [REDACTED]", sanitized)
     sanitized = _LONG_TOKEN_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", sanitized)
     sanitized = _JSON_SECRET_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]{match.group(4)}", sanitized)
+    sanitized = _QUOTED_COLON_SECRET_RE.sub(lambda match: f"{match.group(1)}: [REDACTED]", sanitized)
     sanitized = _COLON_SECRET_RE.sub(lambda match: f"{match.group(1)}: [REDACTED]", sanitized)
-    sanitized = _AUTH_HEADER_RE.sub("Authorization: [REDACTED]", sanitized)
     sanitized = _HEADER_SECRET_RE.sub(lambda match: f"{match.group(1)}: [REDACTED]", sanitized)
     sanitized = _sanitize_urls(sanitized)
     sanitized = _sanitize_paths(sanitized, path_tokens)
@@ -609,10 +616,12 @@ def _basename_only(value: str) -> str:
 def _sanitize_basename(value: str) -> str:
     basename = _basename_only(value)
     sanitized = _QUOTED_SECRET_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", basename)
+    sanitized = _AUTH_HEADER_RE.sub("Authorization: [REDACTED]", sanitized)
+    sanitized = _COOKIE_HEADER_RE.sub(lambda match: f"{match.group(1)}: [REDACTED]", sanitized)
     sanitized = _LONG_TOKEN_RE.sub(lambda match: f"{match.group(1)}=[REDACTED]", sanitized)
     sanitized = _JSON_SECRET_RE.sub(lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]{match.group(4)}", sanitized)
+    sanitized = _QUOTED_COLON_SECRET_RE.sub(lambda match: f"{match.group(1)}: [REDACTED]", sanitized)
     sanitized = _COLON_SECRET_RE.sub(lambda match: f"{match.group(1)}: [REDACTED]", sanitized)
-    sanitized = _AUTH_HEADER_RE.sub("Authorization: [REDACTED]", sanitized)
     sanitized = _HEADER_SECRET_RE.sub(lambda match: f"{match.group(1)}: [REDACTED]", sanitized)
     sanitized = _sanitize_urls(sanitized)
     sanitized = _IPV4_RE.sub("[REDACTED_IP]", sanitized)
