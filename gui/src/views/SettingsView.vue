@@ -192,6 +192,76 @@
       </div>
     </div>
 
+    <!-- ── Sicherheit ── -->
+    <div v-if="activeTab === 'security' && (auth.isAdmin || isDemo)" class="flex flex-col gap-4 max-w-3xl" :class="{ 'pointer-events-none select-none opacity-60': isDemo }">
+      <div class="card">
+        <div class="card-header"><h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.security.title') }}</h3></div>
+        <div class="card-body flex flex-col gap-4">
+          <p class="text-sm text-slate-500">{{ $t('settings.security.description') }}</p>
+          <div class="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-sm text-amber-700 dark:text-amber-300">{{ $t('settings.security.warning') }}</div>
+          <div class="text-xs text-slate-500">
+            {{ $t('settings.security.filePath') }} <code class="font-mono text-slate-700 dark:text-slate-300 break-all">{{ urlTargetPath || '—' }}</code>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header"><h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.security.checkTitle') }}</h3></div>
+        <div class="card-body flex flex-col gap-3">
+          <div class="grid gap-3 md:grid-cols-[1fr_auto]">
+            <input v-model="urlTargetCheckInput" class="input text-sm font-mono" placeholder="http://10.38.113.23/api/v1/status" @keydown.enter.prevent="checkUrlTarget" data-testid="security-url-target-check-input" />
+            <button class="btn-secondary" :disabled="urlTargetChecking || !urlTargetCheckInput.trim()" @click="checkUrlTarget" data-testid="security-url-target-check">
+              <Spinner v-if="urlTargetChecking" size="sm" />
+              {{ $t('settings.security.checkButton') }}
+            </button>
+          </div>
+          <div v-if="urlTargetDecision" :class="['p-3 rounded-lg border text-sm', urlTargetDecision.allowed ? 'bg-green-500/10 border-green-500/30 text-green-700 dark:text-green-300' : 'bg-red-500/10 border-red-500/30 text-red-700 dark:text-red-300']">
+            <div class="font-medium">{{ urlTargetDecision.allowed ? $t('settings.security.allowed') : $t('settings.security.blocked') }}</div>
+            <div class="mt-1">{{ urlTargetDecision.reason }}</div>
+            <div v-if="urlTargetDecision.resolved_ips?.length" class="mt-2 text-xs font-mono break-all">
+              {{ $t('settings.security.resolvedIps') }} {{ urlTargetDecision.resolved_ips.join(', ') }}
+            </div>
+            <button v-if="!urlTargetDecision.allowed && urlTargetDecision.suggested_target" class="btn-primary btn-sm mt-3" :disabled="urlTargetSaving" @click="allowSuggestedUrlTarget" data-testid="security-url-target-allow-suggested">
+              <Spinner v-if="urlTargetSaving" size="sm" color="white" />
+              {{ $t('settings.security.allowSuggested', { target: urlTargetDecision.suggested_target }) }}
+            </button>
+          </div>
+          <div v-if="urlTargetMsg" :class="['p-3 rounded-lg text-sm', urlTargetMsg.ok ? 'bg-green-500/10 text-green-500' : 'bg-red-500/10 text-red-500']">{{ urlTargetMsg.text }}</div>
+        </div>
+      </div>
+
+      <div class="card overflow-hidden">
+        <div class="card-header flex items-center justify-between">
+          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.security.allowlistTitle') }}</h3>
+          <button class="btn-secondary btn-sm" @click="loadUrlTargets">{{ $t('settings.security.reload') }}</button>
+        </div>
+        <div class="card-body flex flex-col gap-4">
+          <form class="grid gap-3 md:grid-cols-[1fr_1fr_auto]" @submit.prevent="addManualUrlTarget">
+            <input v-model="urlTargetForm.target" class="input text-sm font-mono" placeholder="10.38.113.23/32" data-testid="security-url-target-input" />
+            <input v-model="urlTargetForm.reason" class="input text-sm" :placeholder="$t('settings.security.reasonPlaceholder')" data-testid="security-url-target-reason" />
+            <button class="btn-primary" :disabled="urlTargetSaving || !urlTargetForm.target.trim()" data-testid="security-url-target-create">
+              <Spinner v-if="urlTargetSaving" size="sm" color="white" />
+              {{ $t('common.create') }}
+            </button>
+          </form>
+
+          <div v-if="urlTargetsLoading" class="flex justify-center py-6"><Spinner /></div>
+          <table v-else-if="urlTargets.length" class="table">
+            <thead><tr><th>{{ $t('settings.security.target') }}</th><th>{{ $t('settings.security.reason') }}</th><th>{{ $t('settings.security.created') }}</th><th class="w-20"></th></tr></thead>
+            <tbody>
+              <tr v-for="entry in urlTargets" :key="entry.id">
+                <td class="font-mono text-xs">{{ entry.target }}</td>
+                <td class="text-sm text-slate-500">{{ entry.reason || '—' }}</td>
+                <td class="text-xs text-slate-500">{{ entry.created_at || '—' }}</td>
+                <td><button class="btn-icon text-red-400" :title="$t('common.delete')" @click="deleteUrlTarget(entry.target)">×</button></td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="text-sm text-slate-500 text-center py-6">{{ $t('settings.security.empty') }}</div>
+        </div>
+      </div>
+    </div>
+
     <!-- ── Datenmanagement ── -->
     <div v-if="activeTab === 'importexport'" class="flex flex-col gap-4 max-w-lg" :class="{ 'pointer-events-none select-none opacity-60': isDemo }">
 
@@ -206,7 +276,11 @@
       <div class="card p-5 flex flex-col gap-3">
         <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.importexport.importTitle') }}</h3>
         <p class="text-sm text-slate-400">{{ $t('settings.importexport.importDesc') }}</p>
-        <input type="file" accept=".json" @change="onImportFile" class="text-sm text-slate-400 file:btn-secondary file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:text-xs file:border-0 file:cursor-pointer" />
+        <div class="flex items-center gap-3">
+          <button type="button" class="btn-secondary btn-sm" @click="importFileInput.click()">{{ $t('common.chooseFile') }}</button>
+          <span class="text-sm text-slate-400">{{ importFileName || $t('common.noFileSelected') }}</span>
+          <input ref="importFileInput" type="file" accept=".json" @change="onImportFile" class="hidden" />
+        </div>
         <div v-if="importResult" :class="['p-3 rounded-lg text-sm', importResult.ok ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400']">{{ importResult.text }}</div>
       </div>
 
@@ -230,7 +304,11 @@
             <li>{{ $t('settings.importexport.dbImportWarning4') }}</li>
           </ul>
         </div>
-        <input type="file" accept=".sqlite,.db" @change="onImportDbFile" class="text-sm text-slate-400 file:btn-secondary file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:text-xs file:border-0 file:cursor-pointer" />
+        <div class="flex items-center gap-3">
+          <button type="button" class="btn-secondary btn-sm" @click="importDbFileInput.click()">{{ $t('common.chooseFile') }}</button>
+          <span class="text-sm text-slate-400">{{ importDbFileName || $t('common.noFileSelected') }}</span>
+          <input ref="importDbFileInput" type="file" accept=".sqlite,.db" @change="onImportDbFile" class="hidden" />
+        </div>
         <div v-if="importDbResult" :class="['p-3 rounded-lg text-sm', importDbResult.ok ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400']">{{ importDbResult.text }}</div>
       </div>
 
@@ -308,8 +386,11 @@
         </div>
         <p class="text-sm text-slate-400">{{ $t('settings.importexport.knxDesc') }}</p>
         <div class="flex flex-col gap-2">
-          <input type="file" accept=".knxproj" @change="onKnxprojFile"
-            class="text-sm text-slate-400 file:btn-secondary file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:text-xs file:border-0 file:cursor-pointer" />
+          <div class="flex items-center gap-3">
+            <button type="button" class="btn-secondary btn-sm" @click="$refs.knxFileInput.click()">{{ $t('common.chooseFile') }}</button>
+            <span class="text-sm text-slate-400">{{ knxFile?.name || $t('common.noFileSelected') }}</span>
+            <input ref="knxFileInput" type="file" accept=".knxproj" @change="onKnxprojFile" class="hidden" />
+          </div>
           <div class="form-group">
             <label class="label">{{ $t('settings.importexport.knxPassword') }} <span class="text-slate-600 font-normal">{{ $t('common.optional') }}</span></label>
             <input v-model="knxPassword" type="password" class="input text-sm" :placeholder="$t('settings.importexport.knxPasswordPlaceholder')" autocomplete="off" />
@@ -651,6 +732,23 @@
         </div>
       </div>
 
+      <!-- KNX UF Iconset Import -->
+      <div class="card">
+        <div class="card-header">
+          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.icons.knxufTitle') }}</h3>
+        </div>
+        <div class="card-body flex flex-col gap-4">
+          <p class="text-sm text-slate-400">{{ $t('settings.icons.knxufDesc') }}</p>
+          <div v-if="knxufMsg" :class="['p-3 rounded-lg text-sm border', knxufMsg.ok ? 'bg-green-500/10 text-green-400 border-green-500/30' : 'bg-red-500/10 text-red-400 border-red-500/30']">
+            {{ knxufMsg.text }}
+          </div>
+          <button @click="doKnxufImport" class="btn-primary btn-sm w-fit" :disabled="knxufImporting" data-testid="btn-knxuf-import">
+            <Spinner v-if="knxufImporting" size="sm" color="white" />
+            {{ knxufImporting ? $t('settings.icons.knxufImporting') : $t('settings.icons.knxufButton') }}
+          </button>
+        </div>
+      </div>
+
       <!-- FontAwesome Import -->
       <div class="card">
         <div class="card-header">
@@ -947,7 +1045,7 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { authApi, adapterApi, configApi, autobackupApi, knxprojApi, historySettingsApi, iconsApi, dpApi } from '@/api/client'
+import { authApi, adapterApi, configApi, autobackupApi, knxprojApi, historySettingsApi, iconsApi, dpApi, securityApi } from '@/api/client'
 import { useI18n } from 'vue-i18n'
 import { useNavLinksStore } from '@/stores/navLinks'
 import { useAuthStore } from '@/stores/auth'
@@ -962,7 +1060,7 @@ import IconPicker     from '@/components/ui/IconPicker.vue'
 import VisuIcon       from '@/components/ui/VisuIcon.vue'
 import LocaleSwitcher from '@/components/ui/LocaleSwitcher.vue'
 
-const { t }    = useI18n()
+const { t, te } = useI18n()
 const auth     = useAuthStore()
 const settings = useSettingsStore()
 const navStore = useNavLinksStore()
@@ -1050,6 +1148,7 @@ watch(activeTab, (tab) => {
   }
   if (tab === 'icons') { loadIcons(); loadFaSettings() }
   if (tab === 'links') { navStore.load() }
+  if (tab === 'security') { loadUrlTargets() }
 })
 
 onUnmounted(() => {
@@ -1073,6 +1172,7 @@ const tabs = computed(() => [
   { id: 'password',     label: t('settings.tabs.password') },
   ...(auth.isAdmin || isDemo.value ? [{ id: 'users', label: t('settings.tabs.users') }] : []),
   { id: 'apikeys',      label: t('settings.tabs.apikeys') },
+  ...(auth.isAdmin || isDemo.value ? [{ id: 'security', label: t('settings.tabs.security') }] : []),
   { id: 'links',        label: t('settings.tabs.links') },
   { id: 'hierarchy',    label: t('settings.tabs.hierarchy') },
   { id: 'importexport', label: t('settings.tabs.importexport') },
@@ -1080,6 +1180,90 @@ const tabs = computed(() => [
   { id: 'history',      label: t('settings.tabs.history') },
   { id: 'dangerzone',   label: t('settings.tabs.dangerzone') },
 ])
+
+// ── URL Target Allowlist ──────────────────────────────────────────────────
+const urlTargetsLoading = ref(false)
+const urlTargetSaving = ref(false)
+const urlTargetChecking = ref(false)
+const urlTargets = ref([])
+const urlTargetPath = ref('')
+const urlTargetDecision = ref(null)
+const urlTargetMsg = ref(null)
+const urlTargetCheckInput = ref('')
+const urlTargetForm = reactive({ target: '', reason: '' })
+
+function normaliseUrlTargetInput(value) {
+  const trimmed = (value || '').trim()
+  if (!trimmed || /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) return trimmed
+  return `http://${trimmed}`
+}
+
+async function loadUrlTargets() {
+  if (!auth.isAdmin && !isDemo.value) return
+  urlTargetsLoading.value = true
+  try {
+    const { data } = await securityApi.listUrlTargets()
+    urlTargetPath.value = data.path
+    urlTargets.value = data.entries || []
+  } catch (e) {
+    urlTargetMsg.value = { ok: false, text: e.response?.data?.detail ?? t('common.error') }
+  } finally {
+    urlTargetsLoading.value = false
+  }
+}
+
+async function checkUrlTarget() {
+  urlTargetChecking.value = true
+  urlTargetDecision.value = null
+  urlTargetMsg.value = null
+  try {
+    const { data } = await securityApi.checkUrlTarget({ url: normaliseUrlTargetInput(urlTargetCheckInput.value) })
+    urlTargetDecision.value = data
+    if (data.suggested_target) urlTargetForm.target = data.suggested_target
+  } catch (e) {
+    urlTargetMsg.value = { ok: false, text: e.response?.data?.detail ?? t('common.error') }
+  } finally {
+    urlTargetChecking.value = false
+  }
+}
+
+async function addUrlTarget(target, reason) {
+  urlTargetSaving.value = true
+  urlTargetMsg.value = null
+  try {
+    await securityApi.addUrlTarget({ target, reason })
+    urlTargetMsg.value = { ok: true, text: t('settings.security.saved') }
+    await loadUrlTargets()
+  } catch (e) {
+    urlTargetMsg.value = { ok: false, text: e.response?.data?.detail ?? t('common.saveError') }
+  } finally {
+    urlTargetSaving.value = false
+  }
+}
+
+async function allowSuggestedUrlTarget() {
+  if (!urlTargetDecision.value?.suggested_target) return
+  await addUrlTarget(urlTargetDecision.value.suggested_target, urlTargetForm.reason || t('settings.security.defaultReason'))
+  await checkUrlTarget()
+}
+
+async function addManualUrlTarget() {
+  if (!urlTargetForm.target.trim()) return
+  await addUrlTarget(urlTargetForm.target, urlTargetForm.reason)
+  urlTargetForm.target = ''
+  urlTargetForm.reason = ''
+}
+
+async function deleteUrlTarget(target) {
+  urlTargetMsg.value = null
+  try {
+    await securityApi.deleteUrlTarget(target)
+    urlTargetMsg.value = { ok: true, text: t('settings.security.deleted') }
+    await loadUrlTargets()
+  } catch (e) {
+    urlTargetMsg.value = { ok: false, text: e.response?.data?.detail ?? t('common.deleteError') }
+  }
+}
 
 // ── History Backend ────────────────────────────────────────────────────────
 const histForm = reactive({
@@ -1366,8 +1550,12 @@ async function doCreateKey() {
 async function deleteApiKey(id) { await authApi.deleteApiKey(id); await loadKeys() }
 
 // ── Sicherung / Wiederherstellung ──────────────────────────────────────────
-const importResult   = ref(null)
-const importDbResult = ref(null)
+const importResult    = ref(null)
+const importDbResult  = ref(null)
+const importFileName  = ref('')
+const importDbFileName = ref('')
+const importFileInput  = ref(null)
+const importDbFileInput = ref(null)
 
 function _ts() {
   const now = new Date()
@@ -1392,6 +1580,7 @@ async function doExportDb() {
 
 async function onImportFile(e) {
   const file = e.target.files[0]; if (!file) return
+  importFileName.value = file.name
   const text = await file.text()
   try {
     const payload = JSON.parse(text)
@@ -1411,6 +1600,7 @@ async function onImportFile(e) {
 
 async function onImportDbFile(e) {
   const file = e.target.files[0]; if (!file) return
+  importDbFileName.value = file.name
   importDbResult.value = null
   try {
     const { data } = await configApi.importDb(file)
@@ -1526,10 +1716,20 @@ async function doKnxImport() {
       params.direction    = knxDirection.value
     }
     const { data } = await knxprojApi.import(fd, params)
-    knxResult.value = { ok: true, text: data.message }
+    let msg = t('settings.importexport.knxImportResultOk', { n: data.imported })
+    if (data.created  > 0) msg += t('settings.importexport.knxImportResultCreated',   { n: data.created })
+    if (data.updated  > 0) msg += t('settings.importexport.knxImportResultUpdated',   { n: data.updated })
+    if (data.locations > 0) msg += t('settings.importexport.knxImportResultLocations', { n: data.locations })
+    if (data.trades   > 0) msg += t('settings.importexport.knxImportResultTrades',    { n: data.trades })
+    knxResult.value = { ok: true, text: msg }
     await loadKnxGaCount()
   } catch (err) {
-    knxResult.value = { ok: false, text: err.response?.data?.detail ?? 'Import fehlgeschlagen' }
+    const resp = err.response?.data
+    const code = resp?.error_code
+    const text = code && te(`settings.importexport.error_${code}`)
+      ? t(`settings.importexport.error_${code}`)
+      : (typeof resp?.detail === 'string' ? resp.detail : null) ?? t('settings.importexport.importFailed')
+    knxResult.value = { ok: false, text }
   } finally {
     knxImporting.value = false
   }
@@ -1627,6 +1827,23 @@ const iconsSelected = ref(new Set())
 const iconsSearch   = ref('')
 const iconsMsg      = ref(null)
 const iconsDragOver = ref(false)
+
+// KNX UF Iconset
+const knxufImporting = ref(false)
+const knxufMsg       = ref(null)
+
+async function doKnxufImport() {
+  knxufImporting.value = true; knxufMsg.value = null
+  try {
+    const { data } = await iconsApi.importKnxuf()
+    knxufMsg.value = { ok: data.imported > 0, text: data.message }
+    if (data.imported > 0) await loadIcons()
+  } catch (e) {
+    knxufMsg.value = { ok: false, text: e.response?.data?.detail ?? t('settings.icons.knxufFailed') }
+  } finally {
+    knxufImporting.value = false
+  }
+}
 
 // FontAwesome form
 const faIconNames = ref('')

@@ -25,6 +25,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from obs.api.v1 import sessions as sessions_api
+from obs.core.json import jsonable
 from obs.db.database import Database, get_db
 from obs.models.visu import PageConfig
 
@@ -154,11 +155,11 @@ class WebSocketManager:
         # ── 1. Per-subscription DP value events ──────────────────────────
         dp_msg = {
             "id": dp_id_str,
-            "v": event.value,
+            "v": jsonable(event.value),
             "u": dp.unit if dp else None,
             "t": ts_str,
             "q": event.quality,
-            "old_v": state.old_value if state else None,
+            "old_v": jsonable(state.old_value) if state else None,
         }
         dead: list[str] = []
         for conn_id, (_, subs, _lock, _allowed_ids) in list(self._connections.items()):
@@ -170,23 +171,37 @@ class WebSocketManager:
             await self.disconnect(conn_id)
 
         # ── 2. RingBuffer live-push — broadcast to ALL clients ────────────
-        rb_msg = {
-            "action": "ringbuffer_entry",
-            "entry": {
-                "ts": ts_str,
-                "datapoint_id": dp_id_str,
-                "name": dp.name if dp else None,
-                "new_value": event.value,
-                "old_value": state.old_value if state else None,
-                "quality": event.quality,
-                "source_adapter": event.source_adapter,
-                "unit": dp.unit if dp else None,
-            },
+        base_rb_entry = {
+            "ts": ts_str,
+            "datapoint_id": dp_id_str,
+            "name": dp.name if dp else None,
+            "new_value": jsonable(event.value),
+            "old_value": jsonable(state.old_value) if state else None,
+            "quality": event.quality,
+            "source_adapter": event.source_adapter,
+            "unit": dp.unit if dp else None,
         }
+        metadata: dict[str, Any] | None = None
+        if any(allowed_ids is None for _, _, _, allowed_ids in self._connections.values()):
+            from obs.ringbuffer.ringbuffer import build_ringbuffer_metadata_snapshot
+
+            metadata = await build_ringbuffer_metadata_snapshot(
+                dp_id=dp_id_str,
+                source_adapter=str(event.source_adapter),
+                datapoint=dp,
+            )
         dead = []
         for conn_id, (_, _subs, _lock, allowed_ids) in list(self._connections.items()):
             if allowed_ids is not None and dp_id_str not in allowed_ids:
                 continue
+            rb_entry = base_rb_entry
+            if allowed_ids is None and metadata is not None:
+                rb_entry = {
+                    **base_rb_entry,
+                    "metadata_version": 1,
+                    "metadata": metadata,
+                }
+            rb_msg = {"action": "ringbuffer_entry", "entry": rb_entry}
             if not await self._send(conn_id, rb_msg):
                 dead.append(conn_id)
         for conn_id in dead:

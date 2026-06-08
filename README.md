@@ -6,7 +6,7 @@
 [![Tests][tests-badge]][tests]
 [![Coverage][coverage-badge]][coverage]
 
-Gehe zur [deutschen Version](/README.de.md) der Dokumentation.
+> 🇩🇪 [Deutsche Version](/README.de.md)
 
 **Open building automation platform — connects KNX, Modbus, MQTT, Home Assistant, and more**
 
@@ -81,7 +81,7 @@ The LXC template contains a complete Ubuntu 26.04 system with **open bridge serv
 **Step 2 — Create the container**
 
 1. In the Proxmox menu, select **Create CT**.
-2. Choose the just-downloaded `ubuntu-plucky-openbridgeserver_…` as the template.
+2. Choose the just-downloaded `openbridgeserver-lxc_…` as the template.
 3. Configure hostname, password, CPU, RAM, and network as needed — recommended: at least 512 MB RAM.
 4. Start the container.
 
@@ -141,9 +141,21 @@ ringbuffer:
 security:
   jwt_secret: changeme        # Session key — must be changed!
   jwt_expire_minutes: 1440    # Session duration (default: 24 hours)
+  # Optional override for the private/internal URL target allowlist.
+  # Default: OBS_SECRET_FILE_DIR/url-target-allowlist.yaml when OBS_SECRET_FILE_DIR is set,
+  # otherwise secrets/url-target-allowlist.yaml next to the configured database.
+  # url_target_allowlist_path: /data/secrets/url-target-allowlist.yaml
 ```
 
 > **Note:** The `mqtt` section refers to the **internal** Mosquitto broker. External MQTT brokers are set up as separate adapter instances (see [MQTT adapter](#mqtt-adapter-external-broker)).
+
+### URL target allowlist for internal services
+
+Backend fetches from logic API-client nodes, iCalendar nodes, Pushover `image_url` attachments, the camera proxy, and the weather API block private/local network targets by default. Admins can allow deliberate internal targets under **Settings → Security → URL Target Allowlist** or by editing the YAML file configured through `security.url_target_allowlist_path`.
+
+By default, the YAML file is written to `OBS_SECRET_FILE_DIR/url-target-allowlist.yaml` when `OBS_SECRET_FILE_DIR` is set. Otherwise OBS writes it to `secrets/url-target-allowlist.yaml` next to the configured database file. For private targets, use an IP address or CIDR entry, for example `192.168.1.23/32` for a single LAN camera or `10.38.113.0/24` for an internal subnet.
+
+If a hostname such as `internal.example` resolves to a private IP address, allowlist the resolved IP or CIDR. A hostname-only entry does not override private-IP blocking and does not bypass DNS validation.
 
 ---
 
@@ -1622,6 +1634,10 @@ pytest tests/
 ./tools/lint.sh --fix
 ```
 
+#### Local builds (Docker image, LXC template, app bundle)
+
+See **[tools/README.md](tools/README.md)** for full documentation of `build-local.sh` — commands, options, and the local Docker image naming schema.
+
 ### Local Git Hooks (Pre-Push Gate)
 
 Versioned hooks live in `.githooks/`. To activate them in a clone, set `core.hooksPath` once:
@@ -1713,7 +1729,7 @@ The database is updated automatically — each new version adds missing tables a
 ---
 
 ## Translations
-We'd like to use [Weblate](https://hosted.weblate.org/projects/open-bridge-server) to support language translations. As soon as this is set up, ontributions would be very much welcome.
+We'd like to use [Weblate](https://hosted.weblate.org/projects/open-bridge-server) to support language translations. As soon as this is set up, contributions would be very much welcome.
 
 ## License
 
