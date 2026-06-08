@@ -1160,8 +1160,7 @@ class TestImportKnxprojFile:
 
         assert result.trades == 1
         assert any(
-            call.args[0] == "UPDATE knx_functions SET trade_id = ? WHERE id = ?"
-            and call.args[1] == [("trade-1", "fn-1")]
+            call.args[0] == "UPDATE knx_functions SET trade_id = ? WHERE id = ?" and call.args[1] == [("trade-1", "fn-1")]
             for call in db.executemany.await_args_list
         )
 
