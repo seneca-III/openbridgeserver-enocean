@@ -897,12 +897,14 @@ class TestKnxprojModels:
                     tree_name="ETS Gruppenadressen",
                     nodes_created=3,
                     links_created=1,
+                    trees_replaced=1,
                     message="created",
                 )
             ],
         )
         assert r.hierarchies[0].mode == "groups"
         assert r.hierarchies[0].nodes_created == 3
+        assert r.hierarchies[0].trees_replaced == 1
 
     def test_group_address_out(self):
         ga = GroupAddressOut(
@@ -1008,7 +1010,7 @@ class TestImportKnxprojFile:
 
         db = _make_db()
         with patch("obs.api.v1.knxproj.create_ets_hierarchy", side_effect=fake_create):
-            results = await _create_requested_hierarchies(db, ["groups", "mid"], auto_link=False)
+            results = await _create_requested_hierarchies(db, ["groups", "mid"], auto_link=False, replace_existing=True)
 
         assert [result.status for result in results] == ["failed", "failed"]
         assert results[0].message == "Keine Gruppenadressen"
@@ -1183,6 +1185,7 @@ class TestImportKnxprojFile:
                 tree_name=request.tree_name,
                 nodes_created=2,
                 links_created=0,
+                trees_replaced=0,
                 message="created",
             )
 
@@ -1228,6 +1231,7 @@ class TestImportKnxprojFile:
                 tree_name=request.tree_name,
                 nodes_created=3,
                 links_created=0,
+                trees_replaced=1,
                 message="created",
             )
 
@@ -1253,6 +1257,8 @@ class TestImportKnxprojFile:
         assert result.hierarchies[0].nodes_created == 3
         assert captured_requests[0].mode == "groups"
         assert captured_requests[0].auto_link is False
+        assert captured_requests[0].replace_existing is True
+        assert captured_requests[0].group_addresses == ["1/1/1"]
 
     @pytest.mark.asyncio
     async def test_adapter_import_passes_auto_link_to_hierarchy_import(self):
@@ -1271,6 +1277,7 @@ class TestImportKnxprojFile:
                 tree_name=request.tree_name,
                 nodes_created=2,
                 links_created=1,
+                trees_replaced=0,
                 message="created",
             )
 
@@ -1295,6 +1302,117 @@ class TestImportKnxprojFile:
         assert result.created == 1
         assert result.hierarchies[0].links_created == 1
         assert captured_requests[0].auto_link is True
+
+    @pytest.mark.asyncio
+    async def test_import_clears_stale_functions_even_without_new_functions(self):
+        upload = AsyncMock()
+        upload.filename = "project.knxproj"
+        upload.read = AsyncMock(return_value=b"data")
+        record = SimpleNamespace(address="1/1/1", name="Light", description="", dpt="1.001", main_group_name="G1", mid_group_name="M1")
+        location = SimpleNamespace(identifier="loc-1", parent_id=None, name="Room", space_type="Room", sort_order=1)
+        db = _make_db()
+
+        async def fake_create_hierarchy(db_arg, request):
+            return SimpleNamespace(
+                tree_id="tree-1",
+                tree_name=request.tree_name,
+                nodes_created=1,
+                links_created=0,
+                trees_replaced=0,
+                message="created",
+            )
+
+        with (
+            patch("obs.api.v1.knxproj.parse_knxproj", return_value=[record]),
+            patch("obs.api.v1.knxproj.parse_knxproj_locations", return_value=([location], [])),
+            patch("obs.api.v1.knxproj.parse_knxproj_trades", return_value=[]),
+            patch("obs.api.v1.knxproj.create_ets_hierarchy", side_effect=fake_create_hierarchy),
+        ):
+            result = await import_knxproj_file(
+                file=upload,
+                password=None,
+                adapter_name=None,
+                direction="SOURCE",
+                hierarchy_modes=["buildings"],
+                hierarchy_auto_link=True,
+                _user="admin",
+                db=db,
+            )
+
+        assert result.hierarchies[0].status == "created"
+        db.execute_and_commit.assert_any_call("DELETE FROM knx_function_ga_links")
+        db.execute_and_commit.assert_any_call("DELETE FROM knx_functions")
+
+    @pytest.mark.asyncio
+    async def test_import_preserves_functions_when_optional_location_parse_fails(self):
+        upload = AsyncMock()
+        upload.filename = "project.knxproj"
+        upload.read = AsyncMock(return_value=b"data")
+        record = SimpleNamespace(address="1/1/1", name="Light", description="", dpt="1.001", main_group_name="G1", mid_group_name="M1")
+        db = _make_db()
+
+        with (
+            patch("obs.api.v1.knxproj.parse_knxproj", return_value=[record]),
+            patch("obs.api.v1.knxproj.parse_knxproj_locations", side_effect=RuntimeError("optional parser failed")),
+            patch("obs.api.v1.knxproj.parse_knxproj_trades", return_value=[]),
+        ):
+            result = await import_knxproj_file(
+                file=upload,
+                password=None,
+                adapter_name=None,
+                direction="SOURCE",
+                hierarchy_modes=["buildings"],
+                hierarchy_auto_link=True,
+                _user="admin",
+                db=db,
+            )
+
+        assert result.imported == 1
+        assert result.hierarchies[0].status == "failed"
+        assert "Keine Gebäude-Daten" in result.hierarchies[0].message
+        assert all(call.args[0] != "DELETE FROM knx_function_ga_links" for call in db.execute_and_commit.await_args_list)
+        assert all(call.args[0] != "DELETE FROM knx_functions" for call in db.execute_and_commit.await_args_list)
+
+    @pytest.mark.asyncio
+    async def test_import_can_keep_existing_hierarchy_trees(self):
+        upload = AsyncMock()
+        upload.filename = "project.knxproj"
+        upload.read = AsyncMock(return_value=b"data")
+        record = SimpleNamespace(address="1/1/1", name="Light", description="", dpt="1.001", main_group_name="G1", mid_group_name="M1")
+        db = _make_db()
+        captured_requests = []
+
+        async def fake_create_hierarchy(db_arg, request):
+            captured_requests.append(request)
+            return SimpleNamespace(
+                tree_id="tree-1",
+                tree_name=request.tree_name,
+                nodes_created=3,
+                links_created=0,
+                trees_replaced=0,
+                message="created",
+            )
+
+        with (
+            patch("obs.api.v1.knxproj.parse_knxproj", return_value=[record]),
+            patch("obs.api.v1.knxproj.parse_knxproj_locations", return_value=([], [])),
+            patch("obs.api.v1.knxproj.parse_knxproj_trades", return_value=[]),
+            patch("obs.api.v1.knxproj.create_ets_hierarchy", side_effect=fake_create_hierarchy),
+        ):
+            result = await import_knxproj_file(
+                file=upload,
+                password=None,
+                adapter_name=None,
+                direction="SOURCE",
+                hierarchy_modes=["groups"],
+                hierarchy_auto_link=True,
+                hierarchy_replace_existing=False,
+                _user="admin",
+                db=db,
+            )
+
+        assert result.hierarchies[0].status == "created"
+        assert captured_requests[0].replace_existing is False
 
     @pytest.mark.asyncio
     async def test_unavailable_hierarchy_mode_is_reported_without_aborting_import(self):
@@ -1325,6 +1443,7 @@ class TestImportKnxprojFile:
         assert result.imported == 1
         assert result.hierarchies[0].mode == "buildings"
         assert result.hierarchies[0].status == "failed"
+        assert result.hierarchies[0].trees_replaced == 0
         assert "Keine Gebäude-Daten" in result.hierarchies[0].message
         create_hierarchy.assert_not_called()
 
