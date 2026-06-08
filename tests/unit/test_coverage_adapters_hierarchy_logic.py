@@ -2199,6 +2199,24 @@ class TestLogicManagerBasics:
         assert mgr._cron_tasks == {}
 
     @pytest.mark.asyncio
+    async def test_stop_tolerates_cron_task_mutating_task_cache(self):
+        mgr, _, _, _ = _make_logic_manager()
+        task1 = MagicMock()
+        task2 = MagicMock()
+
+        def _cancel_and_mutate():
+            mgr._cron_tasks.pop(("g2", "n2"), None)
+
+        task1.cancel.side_effect = _cancel_and_mutate
+        mgr._cron_tasks[("g1", "n1")] = task1
+        mgr._cron_tasks[("g2", "n2")] = task2
+
+        await mgr.stop()
+
+        task1.cancel.assert_called_once()
+        assert mgr._cron_tasks == {}
+
+    @pytest.mark.asyncio
     async def test_reload(self):
         mgr, db, _, _ = _make_logic_manager()
         db.fetchall = AsyncMock(return_value=[])
@@ -2400,6 +2418,45 @@ class TestLogicManagerValueEvent:
 
         await mgr._on_value_event(event)
         assert len(executed) == 0
+
+    @pytest.mark.asyncio
+    async def test_on_value_event_tolerates_graph_cache_mutation_during_iteration(self):
+        dp_id = uuid.uuid4()
+        flow1 = _make_flow(
+            nodes=[
+                {
+                    "id": "n1",
+                    "type": "datapoint_read",
+                    "position": {"x": 0, "y": 0},
+                    "data": {"datapoint_id": str(dp_id)},
+                }
+            ]
+        )
+        flow2 = _make_flow(
+            nodes=[
+                {
+                    "id": "n2",
+                    "type": "datapoint_read",
+                    "position": {"x": 0, "y": 0},
+                    "data": {"datapoint_id": str(dp_id)},
+                }
+            ]
+        )
+        mgr, _, _, _ = _make_logic_manager(graphs={"g1": ("G1", True, flow1), "g2": ("G2", True, flow2)})
+        executed = []
+
+        async def _execute_and_mutate(graph_id, *_args, **_kwargs):
+            executed.append(graph_id)
+            mgr._graphs.pop("g2", None)
+
+        mgr._execute_graph = _execute_and_mutate
+        event = MagicMock()
+        event.datapoint_id = dp_id
+        event.value = 1.0
+
+        await mgr._on_value_event(event)
+
+        assert executed == ["g1"]
 
 
 class TestLogicManagerHelpers:
