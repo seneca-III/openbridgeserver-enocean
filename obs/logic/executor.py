@@ -240,11 +240,15 @@ class GraphExecutor:
                 num_a, num_b = self._try_num(a), self._try_num(b)
                 if num_a is not None and num_b is not None:
                     return {"out": op(num_a, num_b)}
+                equality_ops = {"=", "==", "eq"}
+                inequality_ops = {"!=", "ne"}
                 if (num_a is None) != (num_b is None):
-                    if operator_key in {"eq", "=="}:
+                    if operator_key in equality_ops:
                         return {"out": False}
-                    if operator_key in {"ne", "!="}:
+                    if operator_key in inequality_ops:
                         return {"out": True}
+                    return {"out": False}
+                if operator_key not in equality_ops | inequality_ops:
                     return {"out": False}
                 return {"out": op(str(a), str(b))}
 

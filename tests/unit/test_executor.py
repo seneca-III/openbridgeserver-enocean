@@ -294,6 +294,11 @@ class TestCompareNode:
         out = run_single("compare", {"operator": op}, {"in1": a, "in2": b})
         assert out["out"] is expected
 
+    @pytest.mark.parametrize("op", [">", "gt", "<", "lt", ">=", "gte", "<=", "lte"])
+    def test_ordering_comparison_returns_false_for_nonnumeric_strings(self, op):
+        out = run_single("compare", {"operator": op}, {"in1": "open", "in2": "closed"})
+        assert out["out"] is False
+
     def test_compare_treats_bool_as_numeric(self):
         out = run_single("compare", {"operator": "eq"}, {"in1": True, "in2": 1})
         assert out["out"] is True
