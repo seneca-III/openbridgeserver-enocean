@@ -21,11 +21,18 @@ logger = logging.getLogger(__name__)
 
 _COMPARE_OPS = {
     ">": operator.gt,
+    "gt": operator.gt,
     "<": operator.lt,
+    "lt": operator.lt,
     "=": operator.eq,
+    "==": operator.eq,
+    "eq": operator.eq,
     ">=": operator.ge,
+    "gte": operator.ge,
     "<=": operator.le,
+    "lte": operator.le,
     "!=": operator.ne,
+    "ne": operator.ne,
 }
 
 
@@ -76,7 +83,7 @@ class GraphExecutor:
             inputs: dict[str, Any] = {}
             for handle, (src_id, src_handle) in edge_map.get(node.id, {}).items():
                 src_out = outputs.get(src_id, {})
-                inputs[handle] = src_out.get(src_handle)
+                inputs[handle] = self._get_output_value(src_out, src_handle)
 
             # Apply overrides (for datapoint_read triggers)
             if node.id in input_overrides:
@@ -119,6 +126,17 @@ class GraphExecutor:
         return order
 
     # ── Type coercion helpers ─────────────────────────────────────────────
+
+    @staticmethod
+    def _get_output_value(outputs: dict[str, Any], handle: str) -> Any:
+        """Read an output handle with compatibility for older result/out flows."""
+        if handle in outputs:
+            return outputs.get(handle)
+        if handle == "result" and "out" in outputs:
+            return outputs.get("out")
+        if handle == "out" and "result" in outputs:
+            return outputs.get("result")
+        return None
 
     @staticmethod
     def _to_num(v: Any, default: float = 0.0) -> float:
@@ -199,8 +217,11 @@ class GraphExecutor:
                 return {"out": out_val}
 
             case "compare":
-                op = _COMPARE_OPS.get(d.get("operator", ">"), operator.gt)
+                operator_key = str(d.get("operator", ">")).strip().lower()
+                op = _COMPARE_OPS.get(operator_key, operator.gt)
                 a, b = inputs.get("in1"), inputs.get("in2")
+                if b is None:
+                    b = d.get("operand")
                 if a is None or b is None:
                     return {"out": False}
                 # Auto-coerce to number when both values look numeric

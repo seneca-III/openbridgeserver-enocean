@@ -254,6 +254,25 @@ class TestCompareNode:
         out = run_single("compare", {"operator": op}, {"in1": a, "in2": b})
         assert out["out"] is expected
 
+    @pytest.mark.parametrize(
+        "op, a, b, expected",
+        [
+            ("gt", 5, 3, True),
+            ("lt", 3, 5, True),
+            ("eq", 5, 5, True),
+            ("gte", 5, 5, True),
+            ("lte", 4, 5, True),
+            ("ne", 4, 5, True),
+        ],
+    )
+    def test_operator_aliases(self, op, a, b, expected):
+        out = run_single("compare", {"operator": op}, {"in1": a, "in2": b})
+        assert out["out"] is expected
+
+    def test_static_operand_is_used_when_in2_is_unwired(self):
+        out = run_single("compare", {"operator": "lt", "operand": 50}, {"in1": 10})
+        assert out["out"] is True
+
     def test_none_input_returns_false(self):
         out = run_single("compare", {"operator": ">"}, {"in1": None, "in2": 5})
         assert out["out"] is False
@@ -261,6 +280,23 @@ class TestCompareNode:
     def test_default_operator_is_greater_than(self):
         out = run_single("compare", {}, {"in1": 10, "in2": 5})
         assert out["out"] is True
+
+    def test_result_source_handle_from_compare_flows_to_downstream_node(self):
+        nodes = [
+            node("value", "const_value", {"value": "10", "data_type": "number"}),
+            node("cmp", "compare", {"operator": "lt", "operand": 50}),
+            node("invert", "not", {}),
+        ]
+        edges = [
+            edge("value", "cmp", "value", "in1"),
+            edge("cmp", "invert", "result", "in1"),
+        ]
+        exc = make_executor(nodes, edges)
+
+        out = exc.execute()
+
+        assert out["cmp"]["out"] is True
+        assert out["invert"]["out"] is False
 
 
 # ===========================================================================
