@@ -553,7 +553,7 @@ async def _migration_v33(conn: aiosqlite.Connection) -> None:
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_rb_fs_user_state_is_active ON ringbuffer_filterset_user_state(username, is_active)")
 
 
-_MIGRATION_V34 = """
+_MIGRATION_V35 = """
 CREATE TABLE IF NOT EXISTS audit_log_entries (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
@@ -608,7 +608,7 @@ MIGRATIONS: list[tuple[int, str | Callable]] = [
     # see V32 as the next applicable migration.
     (32, _migration_v32),
     (33, _migration_v33),
-    (34, _MIGRATION_V34),
+    (35, _MIGRATION_V35),
 ]
 
 
