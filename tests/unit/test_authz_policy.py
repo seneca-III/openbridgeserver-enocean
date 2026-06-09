@@ -197,3 +197,22 @@ def test_api_key_principal_matches_raw_key_id_grant():
     decision = authorize(principal=principal, action=AuthzAction.READ, targets=[_target("room")], grants=[grant])
 
     assert decision.allowed is True
+
+
+def test_user_principal_ignores_api_key_grant():
+    grant = _grant("room", role=Role.GUEST, principal_type="api_key", principal_id="alice")
+
+    decision = authorize(principal=_user(), action=AuthzAction.READ, targets=[_target("room")], grants=[grant])
+
+    assert decision.allowed is False
+    assert decision.reason == "missing_allow"
+
+
+def test_api_key_principal_without_prefix_does_not_match_unrelated_grant():
+    principal = Principal(subject="legacy-key-subject", type="api_key", is_admin=False)
+    grant = _grant("room", role=Role.GUEST, principal_type="api_key", principal_id="different-key")
+
+    decision = authorize(principal=principal, action=AuthzAction.READ, targets=[_target("room")], grants=[grant])
+
+    assert decision.allowed is False
+    assert decision.reason == "missing_allow"
