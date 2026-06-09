@@ -107,7 +107,7 @@ async def test_v36_hierarchy_source_migration_is_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_v36_backfills_legacy_ets_hierarchy_sources():
+async def test_v36_does_not_promote_editable_descriptions_to_sources():
     db = Database(":memory:")
     await db.connect()
     try:
@@ -123,10 +123,10 @@ async def test_v36_backfills_legacy_ets_hierarchy_sources():
 
         await _migration_v36(db.conn)
 
-        legacy = await db.fetchone("SELECT source FROM hierarchy_trees WHERE id=?", ("legacy-ets-tree",))
+        legacy_like_manual = await db.fetchone("SELECT source FROM hierarchy_trees WHERE id=?", ("legacy-ets-tree",))
         manual = await db.fetchone("SELECT source FROM hierarchy_trees WHERE id=?", ("manual-tree",))
 
-        assert legacy["source"] == "ets_import:buildings"
+        assert legacy_like_manual["source"] == ""
         assert manual["source"] == ""
     finally:
         await db.disconnect()
