@@ -48,9 +48,10 @@ def _chunks(values: list[str], size: int) -> list[list[str]]:
 
 async def _replace_existing_ets_trees(db: Database, mode: str) -> int:
     """Delete auto-created ETS hierarchy trees for one mode, leaving manual trees untouched."""
+    source = _ets_import_description(mode)
     rows = await db.fetchall(
-        "SELECT id FROM hierarchy_trees WHERE source=?",
-        (_ets_import_description(mode),),
+        "SELECT id FROM hierarchy_trees WHERE source=? OR (source='' AND description=?)",
+        (source, source),
     )
     tree_ids = [row["id"] for row in rows]
     if not tree_ids:

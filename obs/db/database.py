@@ -474,6 +474,7 @@ async def _migration_v36(conn: aiosqlite.Connection) -> None:
     except aiosqlite.OperationalError as exc:
         if "duplicate column name" not in str(exc).lower():
             raise
+    await conn.execute("UPDATE hierarchy_trees SET source = description WHERE source = '' AND description LIKE 'ets_import:%'")
     await conn.execute("CREATE INDEX IF NOT EXISTS idx_hierarchy_trees_source ON hierarchy_trees(source)")
 
 

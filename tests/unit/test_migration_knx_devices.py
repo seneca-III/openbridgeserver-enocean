@@ -107,6 +107,32 @@ async def test_v36_hierarchy_source_migration_is_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_v36_backfills_legacy_ets_hierarchy_sources():
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        now = "2024-01-01T00:00:00+00:00"
+        await db.execute_and_commit(
+            "INSERT INTO hierarchy_trees (id, name, description, source, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            ("legacy-ets-tree", "Legacy ETS", "ets_import:buildings", "", now, now),
+        )
+        await db.execute_and_commit(
+            "INSERT INTO hierarchy_trees (id, name, description, source, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            ("manual-tree", "Manual", "custom manual tree", "", now, now),
+        )
+
+        await _migration_v36(db.conn)
+
+        legacy = await db.fetchone("SELECT source FROM hierarchy_trees WHERE id=?", ("legacy-ets-tree",))
+        manual = await db.fetchone("SELECT source FROM hierarchy_trees WHERE id=?", ("manual-tree",))
+
+        assert legacy["source"] == "ets_import:buildings"
+        assert manual["source"] == ""
+    finally:
+        await db.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_v36_reraises_unexpected_operational_error():
     class FailingConnection:
         async def execute(self, _sql: str) -> None:
