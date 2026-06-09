@@ -993,6 +993,8 @@ async def factory_reset(
         result.errors.append(f"Adapter instances reset failed: {exc}")
 
     try:
+        for table in ("knx_space_device_links", "knx_co_ga_links", "knx_comm_objects", "knx_devices"):
+            await db.execute_and_commit(f"DELETE FROM {table}")
         row = await db.fetchone("SELECT COUNT(*) as n FROM knx_group_addresses")
         result.knx_group_addresses_deleted = row["n"] if row else 0
         await db.execute_and_commit("DELETE FROM knx_group_addresses")

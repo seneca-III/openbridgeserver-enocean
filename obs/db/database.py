@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS adapter_bindings (
     datapoint_id    TEXT NOT NULL REFERENCES datapoints(id) ON DELETE CASCADE,
     adapter_type    TEXT NOT NULL,
     direction       TEXT NOT NULL CHECK (direction IN ('SOURCE', 'DEST', 'BOTH')),
-    config          TEXT NOT NULL DEFAULT '{}',
+    config          TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(config)),
     enabled         INTEGER NOT NULL DEFAULT 1,
     created_at      TEXT NOT NULL,
     updated_at      TEXT NOT NULL
@@ -263,7 +263,7 @@ ALTER TABLE history_values ADD COLUMN source_adapter TEXT;
 """
 
 _MIGRATION_V20 = """
-ALTER TABLE adapter_bindings ADD COLUMN value_map TEXT;
+ALTER TABLE adapter_bindings ADD COLUMN value_map TEXT CHECK (value_map IS NULL OR json_valid(value_map));
 """
 
 _MIGRATION_V21 = """
@@ -423,6 +423,48 @@ CREATE INDEX IF NOT EXISTS idx_knx_trade_parent ON knx_trades(parent_id);
 
 _MIGRATION_V29 = """
 ALTER TABLE hierarchy_trees ADD COLUMN display_depth INTEGER NOT NULL DEFAULT 0;
+"""
+
+_MIGRATION_V34 = """
+CREATE TABLE IF NOT EXISTS knx_devices (
+    id                       TEXT PRIMARY KEY,
+    individual_address       TEXT NOT NULL UNIQUE,
+    name                     TEXT NOT NULL DEFAULT '',
+    description              TEXT NOT NULL DEFAULT '',
+    product_name             TEXT NOT NULL DEFAULT '',
+    product_refid            TEXT NOT NULL DEFAULT '',
+    hardware2program_refid   TEXT NOT NULL DEFAULT '',
+    imported_at              TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knx_devices_pa ON knx_devices(individual_address);
+CREATE INDEX IF NOT EXISTS idx_knx_devices_product_refid ON knx_devices(product_refid);
+
+CREATE TABLE IF NOT EXISTS knx_comm_objects (
+    id              TEXT PRIMARY KEY,
+    device_id       TEXT NOT NULL REFERENCES knx_devices(id) ON DELETE CASCADE,
+    number          TEXT NOT NULL DEFAULT '',
+    name            TEXT NOT NULL DEFAULT '',
+    text            TEXT NOT NULL DEFAULT '',
+    function_text   TEXT NOT NULL DEFAULT '',
+    datapoint_type  TEXT NOT NULL DEFAULT '',
+    imported_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knx_co_device ON knx_comm_objects(device_id);
+CREATE INDEX IF NOT EXISTS idx_knx_co_dpt ON knx_comm_objects(datapoint_type);
+
+CREATE TABLE IF NOT EXISTS knx_co_ga_links (
+    comm_object_id  TEXT NOT NULL REFERENCES knx_comm_objects(id) ON DELETE CASCADE,
+    ga_address      TEXT NOT NULL REFERENCES knx_group_addresses(address) ON DELETE CASCADE,
+    PRIMARY KEY (comm_object_id, ga_address)
+);
+CREATE INDEX IF NOT EXISTS idx_knx_coga_ga ON knx_co_ga_links(ga_address);
+
+CREATE TABLE IF NOT EXISTS knx_space_device_links (
+    space_id   TEXT NOT NULL REFERENCES knx_locations(id) ON DELETE CASCADE,
+    device_id  TEXT NOT NULL REFERENCES knx_devices(id) ON DELETE CASCADE,
+    PRIMARY KEY (space_id, device_id)
+);
+CREATE INDEX IF NOT EXISTS idx_knx_space_device_device ON knx_space_device_links(device_id);
 """
 
 
@@ -608,7 +650,8 @@ MIGRATIONS: list[tuple[int, str | Callable]] = [
     # see V32 as the next applicable migration.
     (32, _migration_v32),
     (33, _migration_v33),
-    (35, _MIGRATION_V35),
+    (34, _MIGRATION_V34),
+    (35, _MIGRATION_V35)
 ]
 
 
@@ -692,6 +735,9 @@ class Database:
 
     async def commit(self) -> None:
         await self.conn.commit()
+
+    async def rollback(self) -> None:
+        await self.conn.rollback()
 
     async def fetchall(self, sql: str, params: Any = ()) -> list[aiosqlite.Row]:
         async with self.conn.execute(sql, params) as cur:

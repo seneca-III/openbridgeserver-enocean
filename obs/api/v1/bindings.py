@@ -76,17 +76,9 @@ async def _get_bindings_for_dp(db: Database, dp_id: uuid.UUID) -> list[BindingOu
 
 async def _reload_adapter_instance(instance_id: str, db: Database) -> None:
     """Laufende Adapter-Instanz über ihre Bindings aus DB informieren."""
-    from obs.adapters.registry import _row_to_binding, get_instance_by_id
+    from obs.adapters import registry as adapter_registry
 
-    instance = get_instance_by_id(instance_id)
-    if instance is None:
-        return
-    rows = await db.fetchall(
-        "SELECT * FROM adapter_bindings WHERE adapter_instance_id=? AND enabled=1",
-        (instance_id,),
-    )
-    bindings = [_row_to_binding(r) for r in rows]
-    await instance.reload_bindings(bindings)
+    await adapter_registry.reload_instance_bindings(instance_id, db)
 
 
 def _row_out(row: Any, name_map: dict[str, str] | None = None) -> BindingOut:

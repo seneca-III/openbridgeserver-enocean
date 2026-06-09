@@ -54,6 +54,16 @@ class HierarchyNodeRef(BaseModel):
     display_depth: int = 0
 
 
+class DataPointDiagnostic(BaseModel):
+    type: str
+    expected: str | None = None
+    got: str | None = None
+    source_adapter: str | None = None
+    count: int = 1
+    last_value: Any = None
+    updated_at: str | None = None
+
+
 class DataPointOut(BaseModel):
     id: uuid.UUID
     name: str
@@ -69,6 +79,7 @@ class DataPointOut(BaseModel):
     # Runtime
     value: Any = None
     quality: str | None = None
+    diagnostics: list[DataPointDiagnostic] = []
     # Hierarchy (populated by search endpoint, empty elsewhere)
     hierarchy_nodes: list[HierarchyNodeRef] = []
 
@@ -166,6 +177,7 @@ def _enrich(dp: Any) -> DataPointOut:
         updated_at=dp.updated_at.isoformat(),
         value=state.value if state else None,
         quality=state.quality if state else None,
+        diagnostics=list(state.diagnostics.values()) if state else [],
     )
 
 
