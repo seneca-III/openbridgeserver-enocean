@@ -85,11 +85,11 @@ afterEach(() => {
   vi.doUnmock('@/api/client')
 })
 
-async function mountSettingsView() {
+async function mountSettingsView({ isAdmin = true } = {}) {
   const pinia = createPinia()
   setActivePinia(pinia)
   const { useAuthStore } = await import('@/stores/auth')
-  useAuthStore().user = { id: 'u1', username: 'admin', is_admin: true }
+  useAuthStore().user = { id: 'u1', username: isAdmin ? 'admin' : 'viewer', is_admin: isAdmin }
 
   const mod = await import('@/views/SettingsView.vue')
   const wrapper = mount(mod.default, {
@@ -113,6 +113,12 @@ async function mountSettingsView() {
 }
 
 describe('SettingsView security tab', () => {
+  it('hides the import/export tab for non-admin users', async () => {
+    const wrapper = await mountSettingsView({ isAdmin: false })
+
+    expect(wrapper.text()).not.toContain('Datenmanagement')
+  })
+
   it('checks a private URL target and allows the suggested CIDR entry', async () => {
     checkUrlTarget
       .mockResolvedValueOnce({

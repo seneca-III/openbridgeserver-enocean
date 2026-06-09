@@ -1844,6 +1844,37 @@ class TestSystemHistorySettings:
         assert "SQLite" in result.message
 
     @pytest.mark.asyncio
+    async def test_test_history_connection_preserves_redacted_influx_secrets(self, monkeypatch):
+        import obs.api.v1.system as sys_api
+
+        seen = {}
+
+        class _InfluxPlugin:
+            def __init__(self, **kwargs):
+                seen.update(kwargs)
+
+            async def ping(self):
+                return True
+
+        monkeypatch.setattr("obs.history.influxdb_plugin.InfluxDBHistoryPlugin", _InfluxPlugin)
+        rows = [
+            _row(key="history.influx_token", value="stored-token"),
+            _row(key="history.influx_password", value="stored-password"),
+        ]
+        db = _DbStub(rows=rows)
+        body = sys_api.HistorySettingsIn(
+            plugin="influxdb",
+            influx_token=sys_api.REDACTED,
+            influx_password=sys_api.REDACTED,
+        )
+
+        result = await sys_api.test_history_connection(body=body, db=db, _admin="admin")
+
+        assert result.ok is True
+        assert seen["token"] == "stored-token"
+        assert seen["password"] == "stored-password"
+
+    @pytest.mark.asyncio
     async def test_test_history_connection_unknown_plugin(self):
         import obs.api.v1.system as sys_api
 

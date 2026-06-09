@@ -21,7 +21,7 @@ afterEach(() => {
   vi.doUnmock('vue-router')
 })
 
-async function mountDataPointsView({ items = [], nodeResults = [] } = {}) {
+async function mountDataPointsView({ items = [], nodeResults = [], isAdmin = true } = {}) {
   const searchApi = {
     search: vi.fn().mockResolvedValue({
       data: {
@@ -50,6 +50,8 @@ async function mountDataPointsView({ items = [], nodeResults = [] } = {}) {
 
   const pinia = createPinia()
   setActivePinia(pinia)
+  const { useAuthStore } = await import('@/stores/auth')
+  useAuthStore().user = { id: 'u1', username: 'tester', is_admin: isAdmin }
   const mod = await import('@/views/DataPointsView.vue')
   const wrapper = mount(mod.default, {
     global: {
@@ -72,6 +74,27 @@ async function mountDataPointsView({ items = [], nodeResults = [] } = {}) {
 }
 
 describe('DataPointsView hierarchy rendering', () => {
+  it('hides datapoint CRUD controls for non-admin users', async () => {
+    const { wrapper } = await mountDataPointsView({
+      isAdmin: false,
+      items: [
+        {
+          id: 'dp-readonly',
+          name: 'Readonly DP',
+          data_type: 'FLOAT',
+          tags: [],
+          value: 1,
+          quality: 'good',
+          hierarchy_nodes: [],
+        },
+      ],
+    })
+
+    expect(wrapper.find('[data-testid="btn-new-datapoint"]').exists()).toBe(false)
+    expect(wrapper.find('[title="Bearbeiten"]').exists()).toBe(false)
+    expect(wrapper.find('[title="Löschen"]').exists()).toBe(false)
+  })
+
   it('keeps the full hierarchy path as title on datapoint row chips', async () => {
     const { wrapper } = await mountDataPointsView({
       items: [

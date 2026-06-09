@@ -29,7 +29,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from obs.api.auth import get_current_user
+from obs.api.auth import get_admin_user, get_current_user
 from obs.api.v1.services.hierarchy_import import EtsImportRequest, create_ets_hierarchy
 from obs.db.database import Database, get_db
 from obs.knxproj.csv_parser import parse_ga_csv
@@ -525,7 +525,7 @@ async def import_knxproj_file(
         True,
         description="DataPoints automatisch mit ETS-Gebäude-/Gewerke-Hierarchien verknüpfen, wenn adapter_name DataPoints/Bindings erzeugt",
     ),
-    _user: str = Depends(get_current_user),
+    _user: str = Depends(get_admin_user),
     db: Database = Depends(get_db),
 ) -> ImportResult:
     """.knxproj Datei hochladen und Gruppenadressen in die DB importieren.
@@ -688,6 +688,19 @@ async def import_knxproj_file(
     except Exception as e:
         logger.warning("Trades-Import fehlgeschlagen (wird ignoriert): %s", e)
 
+    devices_count = 0
+    comm_objects_count = 0
+    try:
+        devices_count, comm_objects_count = await _import_knx_devices_and_comm_objects(
+            file_bytes=content,
+            password=pwd,
+            db=db,
+            now=now,
+        )
+    except Exception as e:
+        await db.rollback()
+        logger.warning("KNX-Geraeteimport fehlgeschlagen (wird ignoriert): %s", e)
+
     created = 0
     updated = 0
     if adapter_name:
@@ -718,6 +731,10 @@ async def import_knxproj_file(
         extra.append(f"{locations_count} Räume/Gebäude")
     if trades_count:
         extra.append(f"{trades_count} Gewerke")
+    if devices_count:
+        extra.append(f"{devices_count} Geraete")
+    if comm_objects_count:
+        extra.append(f"{comm_objects_count} Kommunikationsobjekte")
     if adapter_name:
         extra.append(f"{created} DataPoints neu erstellt")
         extra.append(f"{updated} aktualisiert")

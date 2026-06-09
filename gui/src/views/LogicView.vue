@@ -10,7 +10,7 @@
         <option value="">{{ $t('logic.selectGraph') }}</option>
         <option v-for="g in store.graphs" :key="g.id" :value="g.id">{{ g.name }}{{ g.enabled ? '' : $t('logic.graphDisabledSuffix') }}</option>
       </select>
-      <button @click="newGraph" class="btn-primary btn-sm">{{ $t('logic.newGraphBtn') }}</button>
+      <button v-if="auth.isAdmin" @click="newGraph" class="btn-primary btn-sm">{{ $t('logic.newGraphBtn') }}</button>
       <button v-if="activeGraphId" @click="saveGraph" class="btn-secondary btn-sm" :disabled="saving">
         <Spinner v-if="saving" size="sm" color="white" />
         {{ $t('common.save') }}
@@ -162,6 +162,7 @@ import '@vue-flow/minimap/dist/style.css'
 
 import { useLogicStore }    from '@/stores/logic'
 import { useSettingsStore } from '@/stores/settings'
+import { useAuthStore }     from '@/stores/auth'
 import { logicApi }        from '@/api/client'
 import NodePalette         from '@/components/logic/NodePalette.vue'
 import NodeConfigPanel     from '@/components/logic/NodeConfigPanel.vue'
@@ -180,6 +181,7 @@ const { t }    = useI18n()
 const route    = useRoute()
 const store    = useLogicStore()
 const settings = useSettingsStore()
+const auth     = useAuthStore()
 // Reactive background pattern colour — recomputes when theme changes
 const bgPatternColor = computed(() => {
   void settings.theme   // track reactively
@@ -391,8 +393,14 @@ const showNewGraph  = ref(false)
 const newGraphName  = ref('')
 const newGraphDesc  = ref('')
 
-function newGraph() { newGraphName.value = ''; newGraphDesc.value = ''; showNewGraph.value = true }
+function newGraph() {
+  if (!auth.isAdmin) return
+  newGraphName.value = ''
+  newGraphDesc.value = ''
+  showNewGraph.value = true
+}
 async function doCreateGraph() {
+  if (!auth.isAdmin) return
   const g = await store.createGraph(newGraphName.value, newGraphDesc.value)
   showNewGraph.value = false
   activeGraphId.value = g.id
