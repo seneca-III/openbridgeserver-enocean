@@ -688,6 +688,15 @@ async def import_knxproj_file(
     except Exception as e:
         logger.warning("Trades-Import fehlgeschlagen (wird ignoriert): %s", e)
 
+    # Import Device Model (V34/V35) — optional and backward compatible.
+    # On failure roll back the partial device snapshot so the GA/location/trade
+    # import path stays intact and the subsequent adapter import can still commit.
+    try:
+        await _import_knx_devices_and_comm_objects(file_bytes=content, password=pwd, db=db, now=now)
+    except Exception as e:
+        await db.rollback()
+        logger.warning("KNX-Geräteimport fehlgeschlagen (wird ignoriert): %s", e)
+
     created = 0
     updated = 0
     if adapter_name:
