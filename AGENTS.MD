@@ -128,7 +128,7 @@ Gilt für Haupt-Sessions **und** für Subagents — bitte explizit in den Subage
 ## Local Development Setup
 
 ### Prerequisites
-- Python 3.13+, Docker Desktop, Node.js 20.19+ or 22+ (use nvm; `.nvmrc` pins v22)
+- Python 3.13+, Docker Desktop, Node.js 24 (use nvm; `.nvmrc` pins v24)
 
 ### One-time setup
 
