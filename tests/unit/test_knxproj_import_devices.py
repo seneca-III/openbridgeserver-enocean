@@ -50,6 +50,42 @@ def _co_link(comm_object_id: str, ga: str) -> SimpleNamespace:
 
 
 @pytest.mark.asyncio
+async def test_device_parser_runs_in_threadpool(monkeypatch: pytest.MonkeyPatch):
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        calls = []
+
+        async def _run_in_threadpool(func, *args, **kwargs):
+            calls.append((func, args, kwargs))
+            return func(*args, **kwargs)
+
+        monkeypatch.setattr(knxproj_api, "run_in_threadpool", _run_in_threadpool)
+        monkeypatch.setattr(
+            knxproj_api,
+            "parse_knxproj_devices",
+            lambda *_args, **_kwargs: (
+                [_device("dev-1", "1.1.10", "Kitchen Actuator")],
+                [_co("co-1", "1.1.10", 1, "Switch", ["DPT1.001"])],
+                [_co_link("co-1", "1/2/3")],
+            ),
+        )
+
+        imported_devices, imported_comm_objects = await knxproj_api._import_knx_devices_and_comm_objects(
+            file_bytes=b"dummy",
+            password="secret",
+            db=db,
+            now="2026-06-09T10:00:00+00:00",
+        )
+
+        assert imported_devices == 1
+        assert imported_comm_objects == 1
+        assert calls == [(knxproj_api.parse_knxproj_devices, (b"dummy", "secret"), {})]
+    finally:
+        await db.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_import_knxproj_persists_devices_comm_objects_and_links(monkeypatch: pytest.MonkeyPatch):
     db = Database(":memory:")
     await db.connect()

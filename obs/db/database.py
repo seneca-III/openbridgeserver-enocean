@@ -468,6 +468,15 @@ CREATE INDEX IF NOT EXISTS idx_knx_space_device_device ON knx_space_device_links
 """
 
 
+async def _migration_v36(conn: aiosqlite.Connection) -> None:
+    try:
+        await conn.execute("ALTER TABLE hierarchy_trees ADD COLUMN source TEXT NOT NULL DEFAULT ''")
+    except aiosqlite.OperationalError as exc:
+        if "duplicate column name" not in str(exc).lower():
+            raise
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_hierarchy_trees_source ON hierarchy_trees(source)")
+
+
 async def _migration_v32(conn: aiosqlite.Connection) -> None:
     """Consolidated flat-filterset schema (was epic V29+V30+V31) plus a
     display_depth fixup for epic dev DBs.
@@ -652,6 +661,7 @@ MIGRATIONS: list[tuple[int, str | Callable]] = [
     (33, _migration_v33),
     (34, _MIGRATION_V34),
     (35, _MIGRATION_V35),
+    (36, _migration_v36),
 ]
 
 
