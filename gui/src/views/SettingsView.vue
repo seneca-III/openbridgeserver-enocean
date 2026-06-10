@@ -685,6 +685,15 @@
             <p class="text-xs text-slate-500 mt-1">{{ $t('settings.importexport.knxHierarchyHint') }}</p>
           </div>
 
+          <label class="flex items-center gap-2 cursor-pointer select-none mt-1">
+            <input
+              type="checkbox"
+              v-model="knxHierarchyReplaceExisting"
+              class="w-4 h-4 rounded accent-blue-500" />
+            <span class="text-sm text-slate-600 dark:text-slate-300">{{ $t('settings.importexport.knxHierarchyReplaceExisting') }}</span>
+          </label>
+          <p class="text-xs text-slate-500 -mt-1">{{ $t('settings.importexport.knxHierarchyReplaceExistingHint') }}</p>
+
           <label
             class="flex items-center gap-2 select-none mt-1"
             :class="knxCreateDps ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'">
@@ -2278,6 +2287,7 @@ const knxHierarchyModes = reactive({
   trades: true,
 })
 const knxHierarchyAutoLink = ref(true)
+const knxHierarchyReplaceExisting = ref(true)
 
 async function loadKnxGaCount() {
   try {
@@ -2320,10 +2330,16 @@ function knxHierarchyStatusLabel(result) {
 
 function knxHierarchyResultDetails(result) {
   if (result?.status === 'created') {
-    return t('settings.importexport.knxHierarchyResultCounts', {
+    let text = t('settings.importexport.knxHierarchyResultCounts', {
       nodes: result.nodes_created ?? 0,
       links: result.links_created ?? 0,
     })
+    if ((result.trees_replaced ?? 0) > 0) {
+      text += t('settings.importexport.knxHierarchyResultReplaced', {
+        n: result.trees_replaced,
+      })
+    }
+    return text
   }
   return result?.message || t('settings.importexport.knxHierarchyResultSkipped')
 }
@@ -2345,6 +2361,7 @@ async function doKnxImport() {
     if (hierarchyModes.length > 0) {
       params.hierarchy_modes = hierarchyModes.join(',')
       params.hierarchy_auto_link = knxCreateDps.value && knxHierarchyAutoLink.value
+      params.hierarchy_replace_existing = knxHierarchyReplaceExisting.value
     }
     const { data } = await knxprojApi.import(fd, params)
     let msg = t('settings.importexport.knxImportResultOk', { n: data.imported })

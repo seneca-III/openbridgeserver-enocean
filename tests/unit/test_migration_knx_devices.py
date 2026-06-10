@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import pytest
+import aiosqlite
 
-from obs.db.database import Database, _MIGRATION_V34
+from obs.db.database import Database, _MIGRATION_V34, _migration_v36
 
 
 async def _table_names(db: Database) -> set[str]:
@@ -85,3 +86,57 @@ async def test_v34_is_idempotent_and_preserves_existing_knx_tables():
         assert "knx_space_device_links" in tables
     finally:
         await db.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_v36_hierarchy_source_migration_is_idempotent():
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        await _migration_v36(db.conn)
+
+        columns = await db.fetchall("PRAGMA table_info(hierarchy_trees)")
+        column_names = {row["name"] for row in columns}
+        assert "source" in column_names
+
+        indexes = await db.fetchall("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='hierarchy_trees'")
+        index_names = {row["name"] for row in indexes}
+        assert "idx_hierarchy_trees_source" in index_names
+    finally:
+        await db.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_v36_does_not_promote_editable_descriptions_to_sources():
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        now = "2024-01-01T00:00:00+00:00"
+        await db.execute_and_commit(
+            "INSERT INTO hierarchy_trees (id, name, description, source, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            ("legacy-ets-tree", "Legacy ETS", "ets_import:buildings", "", now, now),
+        )
+        await db.execute_and_commit(
+            "INSERT INTO hierarchy_trees (id, name, description, source, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            ("manual-tree", "Manual", "custom manual tree", "", now, now),
+        )
+
+        await _migration_v36(db.conn)
+
+        legacy_like_manual = await db.fetchone("SELECT source FROM hierarchy_trees WHERE id=?", ("legacy-ets-tree",))
+        manual = await db.fetchone("SELECT source FROM hierarchy_trees WHERE id=?", ("manual-tree",))
+
+        assert legacy_like_manual["source"] == ""
+        assert manual["source"] == ""
+    finally:
+        await db.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_v36_reraises_unexpected_operational_error():
+    class FailingConnection:
+        async def execute(self, _sql: str) -> None:
+            raise aiosqlite.OperationalError("database is locked")
+
+    with pytest.raises(aiosqlite.OperationalError, match="database is locked"):
+        await _migration_v36(FailingConnection())

@@ -65,6 +65,7 @@ class HierarchyImportResult(BaseModel):
     tree_name: str | None = None
     nodes_created: int = 0
     links_created: int = 0
+    trees_replaced: int = 0
     message: str
 
 
@@ -327,6 +328,9 @@ async def _import_knx_devices_and_comm_objects(
     if not await _knx_device_schema_ready(db):
         return 0, 0
 
+    # Offload the blocking XKNXProj parse (writes a temp file + parses the ZIP)
+    # to a thread, like the GA/location/trade parsers, so large imports don't
+    # stall the event loop.
     devices, comm_objects, co_ga_links = await run_in_threadpool(parse_knxproj_devices, file_bytes, password)
 
     await db.execute("SAVEPOINT knx_device_snapshot")
@@ -453,6 +457,8 @@ async def _create_requested_hierarchies(
     modes: list[str],
     *,
     auto_link: bool,
+    replace_existing: bool,
+    group_addresses: list[str] | None = None,
     unavailable_messages: dict[str, str] | None = None,
 ) -> list[HierarchyImportResult]:
     results: list[HierarchyImportResult] = []
@@ -476,6 +482,8 @@ async def _create_requested_hierarchies(
                     tree_name=tree_name,
                     mode=mode,
                     auto_link=auto_link,
+                    replace_existing=replace_existing,
+                    group_addresses=group_addresses if mode in ("groups", "mid", "flat") else None,
                 ),
             )
         except HTTPException as exc:
@@ -509,6 +517,7 @@ async def _create_requested_hierarchies(
                 tree_name=created.tree_name,
                 nodes_created=created.nodes_created,
                 links_created=created.links_created,
+                trees_replaced=created.trees_replaced,
                 message=created.message,
             )
         )
@@ -532,6 +541,10 @@ async def import_knxproj_file(
         True,
         description="DataPoints automatisch mit ETS-Gebäude-/Gewerke-Hierarchien verknüpfen, wenn adapter_name DataPoints/Bindings erzeugt",
     ),
+    hierarchy_replace_existing: bool = Query(
+        True,
+        description="Bestehende automatisch erzeugte ETS-Hierarchien desselben Modus vor der Neuerzeugung ersetzen",
+    ),
     _user: str = Depends(get_admin_user),
     db: Database = Depends(get_db),
 ) -> ImportResult:
@@ -553,19 +566,21 @@ async def import_knxproj_file(
 
     requested_hierarchy_modes = _normalize_hierarchy_modes(hierarchy_modes)
     auto_link_requested = hierarchy_auto_link if isinstance(hierarchy_auto_link, bool) else True
+    replace_existing_requested = hierarchy_replace_existing if isinstance(hierarchy_replace_existing, bool) else True
     pwd = password or None
 
     # Parse GAs and locations in parallel — large files can take 10+ s each,
     # parallel execution halves the wall time and keeps the event loop free.
     async def _safe_parse_locations() -> tuple:
         try:
-            return await run_in_threadpool(parse_knxproj_locations, content, pwd)
+            loc_records, fn_records = await run_in_threadpool(parse_knxproj_locations, content, pwd)
+            return loc_records, fn_records, True
         except Exception as exc:
             logger.warning("Gebäude/Gewerke-Import fehlgeschlagen (wird ignoriert): %s", exc)
-            return [], []
+            return [], [], False
 
     try:
-        records, (loc_records, fn_records) = await asyncio.gather(
+        records, (loc_records, fn_records, locations_parse_ok) = await asyncio.gather(
             run_in_threadpool(parse_knxproj, content, pwd),
             _safe_parse_locations(),
         )
@@ -626,6 +641,9 @@ async def import_knxproj_file(
     locations_count = 0
     functions_count = 0
     try:
+        if locations_parse_ok:
+            await db.execute_and_commit("DELETE FROM knx_function_ga_links")
+            await db.execute_and_commit("DELETE FROM knx_functions")
         if loc_records:
             await db.execute_and_commit("DELETE FROM knx_locations")
             await db.executemany(
@@ -637,8 +655,6 @@ async def import_knxproj_file(
             locations_count = len(loc_records)
 
         if fn_records:
-            await db.execute_and_commit("DELETE FROM knx_functions")
-            await db.execute_and_commit("DELETE FROM knx_function_ga_links")
             await db.executemany(
                 """INSERT INTO knx_functions (id, space_id, name, usage_text, imported_at)
                    VALUES (?, ?, ?, ?, ?)""",
@@ -653,6 +669,8 @@ async def import_knxproj_file(
             await db.commit()
             functions_count = len(fn_records)
     except Exception as e:
+        # Discard any partial inserts so they can't be made durable by a later commit.
+        await db.rollback()
         logger.warning("Gebäude/Gewerke-Import fehlgeschlagen (wird ignoriert): %s", e)
 
     # Import Trades (Gewerke) — direct ZIP/XML parsing; password forwarded for protected files
@@ -698,7 +716,18 @@ async def import_knxproj_file(
                     )
                     await db.commit()
     except Exception as e:
+        # Discard any partial inserts so they can't be made durable by a later commit.
+        await db.rollback()
         logger.warning("Trades-Import fehlgeschlagen (wird ignoriert): %s", e)
+
+    # Import Device Model (V34/V35) — optional and backward compatible.
+    # On failure roll back the partial device snapshot so the GA/location/trade
+    # import path stays intact and the subsequent adapter import can still commit.
+    try:
+        await _import_knx_devices_and_comm_objects(file_bytes=content, password=pwd, db=db, now=now)
+    except Exception as e:
+        await db.rollback()
+        logger.warning("KNX-Geräteimport fehlgeschlagen (wird ignoriert): %s", e)
 
     created = 0
     updated = 0
@@ -710,6 +739,8 @@ async def import_knxproj_file(
         db,
         requested_hierarchy_modes,
         auto_link=auto_link_requested and bool(adapter_name),
+        replace_existing=replace_existing_requested,
+        group_addresses=[r.address for r in records],
         unavailable_messages={
             **(
                 {"buildings": ("Keine Gebäude-Daten aus dieser .knxproj importiert. Der buildings-Hierarchieimport wurde übersprungen.")}
