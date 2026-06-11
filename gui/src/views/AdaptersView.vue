@@ -122,7 +122,7 @@
 
         <!-- Status-Detail bei Warning/Error -->
         <div
-          v-if="a.severity && a.severity !== 'ok' && a.status_detail"
+          v-if="a.severity && a.severity !== 'ok' && (a.status_detail || a.status_detail_code)"
           :class="[
             'mx-5 mb-3 flex items-start gap-2 p-3 rounded-lg text-sm',
             a.severity === 'error'
