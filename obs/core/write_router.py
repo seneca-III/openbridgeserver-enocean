@@ -63,12 +63,13 @@ def _cached_value_equals(current_value: Any, cached_value: Any) -> bool:
 
 
 class WriteRouter:
-    def __init__(self, db: Any, registry: Any) -> None:
+    def __init__(self, db: Any, registry: Any, event_bus: Any | None = None) -> None:
         from obs.core.registry import DataPointRegistry
         from obs.db.database import Database
 
         self._db: Database = db
         self._registry: DataPointRegistry = registry
+        self._bus = event_bus
         # binding_id → timestamp of last successful send (monotonic seconds)
         self._last_sent: dict[uuid.UUID, float] = {}
         # binding_id → last successfully sent value (for on-change / delta checks)
@@ -98,7 +99,17 @@ class WriteRouter:
                 value = raw_payload
         logger.info("WriteRouter: dp=%s value=%r (type=%s)", dp.name, value, dp.data_type)
 
-        await self._write_to_dest_bindings(dp_id, value, skip_binding_id=None)
+        from obs.core.event_bus import DataValueEvent, get_event_bus
+
+        bus = getattr(self, "_bus", None) or get_event_bus()
+        await bus.publish(
+            DataValueEvent(
+                datapoint_id=dp_id,
+                value=value,
+                quality="good",
+                source_adapter="mqtt_set",
+            )
+        )
 
     # ------------------------------------------------------------------
     # Path 2 — internal DataValueEvent propagation
@@ -350,7 +361,7 @@ def reset_write_router() -> None:
     _write_router = None
 
 
-def init_write_router(db: Any, registry: Any) -> WriteRouter:
+def init_write_router(db: Any, registry: Any, event_bus: Any | None = None) -> WriteRouter:
     global _write_router
-    _write_router = WriteRouter(db, registry)
+    _write_router = WriteRouter(db, registry, event_bus=event_bus)
     return _write_router

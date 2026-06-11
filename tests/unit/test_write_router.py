@@ -74,6 +74,7 @@ def _make_router(db_rows: list[dict]) -> WriteRouter:
     router = WriteRouter.__new__(WriteRouter)
     router._db = _FakeDb(db_rows)
     router._registry = None
+    router._bus = None
     router._last_sent = {}
     router._last_value = {}
     return router
@@ -214,7 +215,8 @@ async def test_handle_uses_json_fallback_when_deserializer_fails(monkeypatch):
     dp_id = uuid.uuid4()
     router = _make_router([])
     router._registry = SimpleNamespace(get=lambda _dp_id: SimpleNamespace(name="dp", data_type="dummy"))
-    router._write_to_dest_bindings = AsyncMock()
+    bus = SimpleNamespace(publish=AsyncMock())
+    router._bus = bus
 
     def _failing_deserializer(_raw):
         raise ValueError("boom")
@@ -223,7 +225,13 @@ async def test_handle_uses_json_fallback_when_deserializer_fails(monkeypatch):
     monkeypatch.setattr("obs.models.types.DataTypeRegistry.get", lambda _dt: fake_dt)
 
     await router.handle(dp_id, '{"n": 7}')
-    router._write_to_dest_bindings.assert_awaited_once_with(dp_id, {"n": 7}, skip_binding_id=None)
+    bus.publish.assert_awaited_once()
+    event = bus.publish.await_args.args[0]
+    assert isinstance(event, DataValueEvent)
+    assert event.datapoint_id == dp_id
+    assert event.value == {"n": 7}
+    assert event.quality == "good"
+    assert event.source_adapter == "mqtt_set"
 
 
 @pytest.mark.asyncio
@@ -231,7 +239,8 @@ async def test_handle_uses_raw_payload_when_deserializer_and_json_fallback_fail(
     dp_id = uuid.uuid4()
     router = _make_router([])
     router._registry = SimpleNamespace(get=lambda _dp_id: SimpleNamespace(name="dp", data_type="dummy"))
-    router._write_to_dest_bindings = AsyncMock()
+    bus = SimpleNamespace(publish=AsyncMock())
+    router._bus = bus
 
     def _failing_deserializer(_raw):
         raise ValueError("boom")
@@ -240,7 +249,29 @@ async def test_handle_uses_raw_payload_when_deserializer_and_json_fallback_fail(
     monkeypatch.setattr("obs.models.types.DataTypeRegistry.get", lambda _dt: fake_dt)
 
     await router.handle(dp_id, "not json")
-    router._write_to_dest_bindings.assert_awaited_once_with(dp_id, "not json", skip_binding_id=None)
+    bus.publish.assert_awaited_once()
+    event = bus.publish.await_args.args[0]
+    assert event.datapoint_id == dp_id
+    assert event.value == "not json"
+    assert event.quality == "good"
+
+
+@pytest.mark.asyncio
+async def test_handle_publishes_value_event_for_bindingless_datapoint():
+    dp_id = uuid.uuid4()
+    bus = SimpleNamespace(publish=AsyncMock())
+    router = _make_router([])
+    router._bus = bus
+    router._registry = SimpleNamespace(get=lambda _dp_id: SimpleNamespace(name="Internal", data_type="FLOAT"))
+
+    await router.handle(dp_id, "21.5")
+
+    bus.publish.assert_awaited_once()
+    event = bus.publish.await_args.args[0]
+    assert event.datapoint_id == dp_id
+    assert event.value == pytest.approx(21.5)
+    assert event.quality == "good"
+    assert event.source_adapter == "mqtt_set"
 
 
 @pytest.mark.asyncio

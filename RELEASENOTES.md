@@ -5,6 +5,7 @@
 * none
 
 ### New features ✨
+* Backend/Admin GUI: OBS internal datapoints without adapter bindings can now be written through MQTT `dp/{uuid}/set` or the object detail view; the write is stored as the current value and propagated through the normal registry, retained MQTT value, history/ringbuffer, WebSocket, and logic event path. https://github.com/abeggled/openbridgeserver/issues/715
 * Backend: ETS hierarchy import logic is now available as a reusable backend service while keeping `POST /api/v1/hierarchy/import-from-ets` behavior unchanged. This prepares the KNX project import to create selected ETS hierarchies in the same import flow. https://github.com/abeggled/openbridgeserver/issues/727
 * Backend: `.knxproj` imports can now create selected ETS hierarchies in the same backend request, reporting per-hierarchy node/link counts and non-fatal failures for unavailable ETS data. https://github.com/abeggled/openbridgeserver/issues/728
 * Admin GUI: `.knxproj` imports now offer hierarchy creation for topology, buildings/rooms, and trades in the same import flow, including per-hierarchy result feedback and optional auto-linking to created objects. https://github.com/abeggled/openbridgeserver/issues/729
