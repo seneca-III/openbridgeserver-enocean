@@ -48,7 +48,7 @@ async def test_get_current_principal_user_without_row_is_not_admin(monkeypatch):
 @pytest.mark.asyncio
 async def test_get_current_principal_api_key_uses_non_username_subject(monkeypatch):
     monkeypatch.setattr("obs.api.auth.hash_api_key", lambda key: f"hash:{key}")
-    db = _DbStub(api_key_row={"id": "3ff3e934-8d4d-45f6-b4d0-5f6f2272681d", "name": "automation", "owner": "admin"})
+    db = _DbStub(api_key_row={"id": "3ff3e934-8d4d-45f6-b4d0-5f6f2272681d", "owner": "admin"})
 
     principal = await get_current_principal(credentials=None, api_key="obs_valid", db=db)
 
@@ -62,9 +62,9 @@ async def test_get_current_principal_api_key_uses_non_username_subject(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_get_current_principal_api_key_falls_back_to_legacy_name_as_owner(monkeypatch):
+async def test_get_current_principal_api_key_keeps_ownerless_legacy_key_owner_empty(monkeypatch):
     monkeypatch.setattr("obs.api.auth.hash_api_key", lambda key: f"hash:{key}")
-    db = _DbStub(api_key_row={"id": "3ff3e934-8d4d-45f6-b4d0-5f6f2272681d", "name": "legacy-automation", "owner": ""})
+    db = _DbStub(api_key_row={"id": "3ff3e934-8d4d-45f6-b4d0-5f6f2272681d", "owner": ""})
 
     principal = await get_current_principal(credentials=None, api_key="obs_valid", db=db)
 
@@ -72,7 +72,7 @@ async def test_get_current_principal_api_key_falls_back_to_legacy_name_as_owner(
         subject="api_key:3ff3e934-8d4d-45f6-b4d0-5f6f2272681d",
         type="api_key",
         is_admin=False,
-        owner="legacy-automation",
+        owner=None,
     )
     assert db.updated is True
 

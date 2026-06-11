@@ -490,6 +490,30 @@ class TestCreateApiKey:
         assert result.name == "replacement-key"
         assert db.executed[0][1][3] == "alice"
 
+    @pytest.mark.asyncio
+    async def test_ownerless_api_key_principal_cannot_create_replacement_key(self):
+        from obs.api.auth import ApiKeyCreate
+
+        db = _DbStub()
+        request = MagicMock()
+        body = ApiKeyCreate(name="replacement-key")
+
+        with pytest.raises(HTTPException) as exc_info:
+            await auth_module.create_api_key.__wrapped__(
+                request=request,
+                body=body,
+                principal=auth_module.Principal(
+                    subject="api_key:k1",
+                    type="api_key",
+                    is_admin=False,
+                    owner=None,
+                ),
+                db=db,
+            )
+
+        assert exc_info.value.status_code == 403
+        assert db.executed == []
+
 
 # ---------------------------------------------------------------------------
 # auth.py — delete_api_key endpoint

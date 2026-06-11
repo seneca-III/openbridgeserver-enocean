@@ -118,6 +118,56 @@ describe('LogicView auth gates', () => {
     expect(logicApi.createGraph).not.toHaveBeenCalled()
   })
 
+  it('keeps existing graphs read-only for non-admin users', async () => {
+    const graph = makeGraph('graph-1')
+    const { wrapper, logicApi } = await mountLogicView({
+      isAdmin: false,
+      graphs: [graph],
+      routeQuery: { graph: 'graph-1' },
+      graphDetails: { 'graph-1': graph },
+    })
+
+    expect(logicApi.getGraph).toHaveBeenCalledWith('graph-1')
+    expect(wrapper.find('[data-testid="btn-run"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="btn-toggle-enabled"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="btn-rename"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="btn-duplicate"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="btn-import"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="btn-delete"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="btn-export"]').exists()).toBe(true)
+
+    wrapper.vm.onConnect({ source: 'n1', target: 'n3', sourceHandle: 'out', targetHandle: 'in' })
+    expect(wrapper.vm.edges).toEqual(graph.flow_data.edges)
+
+    wrapper.vm.canvasWrapper = { getBoundingClientRect: () => ({ left: 10, top: 20 }) }
+    wrapper.vm.onDrop({
+      dataTransfer: { getData: () => 'const_value' },
+      clientX: 30,
+      clientY: 45,
+    })
+    expect(wrapper.vm.nodes).toHaveLength(1)
+
+    wrapper.vm.onNodeClick({ node: wrapper.vm.nodes[0] })
+    expect(wrapper.vm.selectedNode).toBe(null)
+
+    await wrapper.vm.saveGraph()
+    await wrapper.vm.runGraph()
+    await wrapper.vm.doToggleEnabled()
+    await wrapper.vm.doDuplicateGraph()
+    wrapper.vm.openRenameGraph()
+    await wrapper.vm.doRenameGraph()
+    wrapper.vm.confirmDeleteGraph()
+    await wrapper.vm.doDeleteGraph()
+    await wrapper.vm.onImportFile({ target: { files: [new File(['{}'], 'logic.json')], value: 'logic.json' } })
+
+    expect(logicApi.saveGraph).not.toHaveBeenCalled()
+    expect(logicApi.runGraph).not.toHaveBeenCalled()
+    expect(logicApi.patchGraph).not.toHaveBeenCalled()
+    expect(logicApi.duplicateGraph).not.toHaveBeenCalled()
+    expect(logicApi.importGraph).not.toHaveBeenCalled()
+    expect(logicApi.deleteGraph).not.toHaveBeenCalled()
+  })
+
   it('lets admins create a graph', async () => {
     const { wrapper, logicApi } = await mountLogicView({ isAdmin: true })
 

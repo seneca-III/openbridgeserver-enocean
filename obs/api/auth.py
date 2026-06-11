@@ -149,7 +149,7 @@ async def get_current_principal(
     if api_key:
         key_hash = hash_api_key(api_key)
         row = await db.fetchone(
-            "SELECT id, name, owner FROM api_keys WHERE key_hash=?",
+            "SELECT id, owner FROM api_keys WHERE key_hash=?",
             (key_hash,),
         )
         if not row:
@@ -165,11 +165,6 @@ async def get_current_principal(
             api_key_owner = row["owner"] or None
         except (IndexError, KeyError):
             api_key_owner = None
-        if api_key_owner is None:
-            try:
-                api_key_owner = row["name"] or None
-            except (IndexError, KeyError):
-                api_key_owner = None
         if api_key_id is not None:
             return Principal(subject=f"api_key:{api_key_id}", type="api_key", is_admin=False, owner=api_key_owner)
 
