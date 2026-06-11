@@ -167,6 +167,46 @@ async def test_import_knxproj_replaces_device_snapshot_on_reimport(monkeypatch: 
 
 
 @pytest.mark.asyncio
+async def test_device_import_skips_invalid_comm_objects(monkeypatch: pytest.MonkeyPatch):
+    db = Database(":memory:")
+    await db.connect()
+    try:
+        monkeypatch.setattr(
+            knxproj_api,
+            "parse_knxproj_devices",
+            lambda *_args, **_kwargs: (
+                [_device("dev-1", "1.1.10", "Kitchen Actuator")],
+                [
+                    _co("", "1.1.10", 1, "Missing ID", ["DPT1.001"]),
+                    _co("co-missing-device", "1.1.11", 2, "Missing Device", ["DPT1.001"]),
+                    _co("co-valid", "1.1.10", 3, "Valid", ["DPT1.001"]),
+                ],
+                [
+                    _co_link("", "1/2/3"),
+                    _co_link("co-missing-device", "1/2/4"),
+                    _co_link("co-valid", "1/2/5"),
+                ],
+            ),
+        )
+
+        imported_devices, imported_comm_objects = await knxproj_api._import_knx_devices_and_comm_objects(
+            file_bytes=b"dummy",
+            password=None,
+            db=db,
+            now="2024-01-01T00:00:00Z",
+        )
+
+        assert imported_devices == 1
+        assert imported_comm_objects == 1
+        comm_rows = await db.fetchall("SELECT id FROM knx_comm_objects ORDER BY id")
+        assert [row["id"] for row in comm_rows] == ["co-valid"]
+        link_rows = await db.fetchall("SELECT comm_object_id, ga_address FROM knx_co_ga_links ORDER BY ga_address")
+        assert [(row["comm_object_id"], row["ga_address"]) for row in link_rows] == [("co-valid", "1/2/5")]
+    finally:
+        await db.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_failed_device_snapshot_rolls_back_before_adapter_import_commit(monkeypatch: pytest.MonkeyPatch):
     db = Database(":memory:")
     await db.connect()
