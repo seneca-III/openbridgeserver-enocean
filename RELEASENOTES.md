@@ -12,8 +12,9 @@
 * Backend/Admin GUI: Repeated `.knxproj` imports now replace automatically generated ETS hierarchies per selected mode by default, while manual hierarchy trees remain untouched; the import dialog also offers an opt-out to keep a separate tree for each import run. https://github.com/abeggled/openbridgeserver/issues/730
 
 ### Fixes 🐞
-* Visu: Zeitschaltuhr widgets now only show and manage Schaltpunkte for the configured scheduler instance, preventing unrelated KNX or other adapter bindings on the same object from being listed or deleted. https://github.com/abeggled/openbridgeserver/issues/782
+* Backend: High-volume third-party DEBUG loggers (e.g. `aiosqlite`, which logs two lines per SQL operation) are now floored at INFO, so enabling DEBUG globally no longer floods the logs and saturates a CPU core. https://github.com/abeggled/openbridgeserver/issues/798
 * Visu: German string literals in backend adapter code reached the GUI untranslated, bypassing the i18n/Weblate pipeline. https://github.com/abeggled/openbridgeserver/issues/779
+* Visu: Zeitschaltuhr widgets now only show and manage Schaltpunkte for the configured scheduler instance, preventing unrelated KNX or other adapter bindings on the same object from being listed or deleted. https://github.com/abeggled/openbridgeserver/issues/782
 
 ### Known Issues 🔔
 * none
