@@ -127,10 +127,40 @@ jobs:
               print("No human contributors found — skipping contributors section.")
               sys.exit(0)
 
+          def gh_get(path: str) -> dict | list:
+              req = urllib.request.Request(
+                  f"https://api.github.com/{path}",
+                  headers={
+                      "Authorization": f"Bearer {token}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                  },
+              )
+              with urllib.request.urlopen(req) as r:
+                  return json.load(r)
+
+          def get_display(login: str) -> str:
+              try:
+                  name = gh_get(f"users/{login}").get("name") or ""
+              except urllib.error.URLError:
+                  name = ""
+              display = f"{name} (@{login})" if name else f"@{login}"
+              try:
+                  prior = gh_get(
+                      f"repos/{repo}/commits?author={login}&sha={prev_tag}&per_page=1"
+                  )
+                  if not prior:
+                      display += " 🎉 _(first contribution!)_"
+              except urllib.error.URLError:
+                  pass
+              return display
+
+          lines = [f"- {get_display(login)}" for login in logins]
+
           section = (
               "### Contributors 🤝\n\n"
               "Thank you to everyone who contributed to this release:\n\n"
-              + "\n".join(f"- @{login}" for login in logins)
+              + "\n".join(lines)
               + "\n"
           )
 
