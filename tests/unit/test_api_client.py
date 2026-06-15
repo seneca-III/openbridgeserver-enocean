@@ -11,15 +11,24 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+import pytest
 
 from obs.config import SecuritySettings, Settings, override_settings
 from obs.core.registry import ValueState
-from obs.logic.manager import LogicManager, _build_api_client_fetch_targets, _read_secret_file
+from obs.logic.manager import (
+    LogicManager,
+    _api_client_value_to_string,
+    _build_api_client_fetch_targets,
+    _normalise_api_client_variables,
+    _read_secret_file,
+    _replace_api_client_placeholders,
+)
 from obs.logic.models import FlowData
 from obs.security.url_targets import add_allowed_url_target, evaluate_url_target
 from tests.unit.conftest import edge, make_executor, node
@@ -858,6 +867,40 @@ class TestApiClientVariables:
         state.quality = "good"
         return state
 
+    def test_normalises_variable_config_from_json_and_skips_invalid_entries(self):
+        dp_id = uuid.uuid4()
+
+        variables = _normalise_api_client_variables(
+            json.dumps(
+                [
+                    {"datapoint_id": f" {dp_id} ", "datapoint_name": "Name"},
+                    "invalid",
+                    {"datapoint_id": ""},
+                ]
+            )
+        )
+
+        assert variables == {1: {"datapoint_id": str(dp_id), "datapoint_name": "Name"}}
+        assert _normalise_api_client_variables("not-json") == {}
+        assert _normalise_api_client_variables({"datapoint_id": str(dp_id)}) == {}
+
+    def test_variable_values_are_rendered_as_request_strings(self):
+        assert _api_client_value_to_string(True) == "true"
+        assert _api_client_value_to_string(False) == "false"
+        assert _api_client_value_to_string({"k": ["v"]}) == '{"k": ["v"]}'
+
+        with pytest.raises(Exception, match="API client variable value is empty"):
+            _api_client_value_to_string(None)
+
+    def test_placeholder_replacement_recurses_into_lists_and_dict_keys(self):
+        result = _replace_api_client_placeholders(
+            {"key-###OBS1###": ["###OBS2###", 3]},
+            lambda index: f"value/{index}",
+            transform=lambda value: f"<{value}>",
+        )
+
+        assert result == {"key-<value/1>": ["<value/2>", 3]}
+
     @patch("obs.logic.manager.httpx.AsyncClient")
     @patch(
         "obs.security.url_targets.socket.getaddrinfo",
@@ -975,6 +1018,71 @@ class TestApiClientVariables:
         assert outputs["ac"]["success"] is False
         assert outputs["ac"]["status"] is None
         assert outputs["ac"]["response"] == "API client variable OBS1 object MissingValue has no value"
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    @patch(
+        "obs.security.url_targets.socket.getaddrinfo",
+        return_value=[(None, None, None, None, ("93.184.216.34", 80))],
+    )
+    def test_unavailable_variable_in_headers_sets_error_output(self, _mock_resolve, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_client.request = AsyncMock()
+
+        dp_id = uuid.uuid4()
+        manager = _make_manager()
+        manager._registry.get_value.return_value = None
+        data = {
+            "url": "http://example.com/status",
+            "method": "GET",
+            "headers": '{"X-Object": "###OBS1###"}',
+            "variables": [{"datapoint_id": str(dp_id), "datapoint_name": "Offline"}],
+        }
+        n = node("ac", "api_client", data)
+        flow = _flow([n])
+        graph_id = "g-header-var-error"
+        manager._graphs[graph_id] = ("t", True, flow)
+
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            outputs = asyncio.run(manager._execute_graph(graph_id, "t", flow, {"ac": {"trigger": True}}))
+
+        mock_client.request.assert_not_called()
+        assert outputs["ac"]["response"] == "API client variable OBS1 object Offline is not available"
+        assert outputs["ac"]["status"] is None
+        assert outputs["ac"]["success"] is False
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    @patch(
+        "obs.security.url_targets.socket.getaddrinfo",
+        return_value=[(None, None, None, None, ("93.184.216.34", 80))],
+    )
+    def test_invalid_variable_in_auth_sets_error_output(self, _mock_resolve, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_client.request = AsyncMock()
+
+        manager = _make_manager()
+        data = {
+            "url": "http://example.com/status",
+            "method": "GET",
+            "auth_type": "bearer",
+            "auth_token": "###OBS1###",
+            "variables": [{"datapoint_id": "not-a-uuid", "datapoint_name": "Broken"}],
+        }
+        n = node("ac", "api_client", data)
+        flow = _flow([n])
+        graph_id = "g-auth-var-error"
+        manager._graphs[graph_id] = ("t", True, flow)
+
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            outputs = asyncio.run(manager._execute_graph(graph_id, "t", flow, {"ac": {"trigger": True}}))
+
+        mock_client.request.assert_not_called()
+        assert outputs["ac"]["response"] == "API client variable OBS1 references an invalid object"
+        assert outputs["ac"]["status"] is None
+        assert outputs["ac"]["success"] is False
 
 
 # ===========================================================================
