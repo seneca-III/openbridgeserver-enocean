@@ -1512,8 +1512,16 @@ function fieldLabel(nodeType, fieldKey, fallback) {
 }
 
 function normaliseApiVariables(raw) {
-  return Array.isArray(raw)
-    ? raw.map((v, i) => {
+  let variables = raw
+  if (typeof variables === 'string') {
+    try {
+      variables = JSON.parse(variables)
+    } catch {
+      variables = []
+    }
+  }
+  return Array.isArray(variables)
+    ? variables.map((v, i) => {
         const slot = Number.parseInt(v?.slot, 10)
         return {
           slot: Number.isInteger(slot) && slot > 0 ? slot : i + 1,

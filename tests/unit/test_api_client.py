@@ -1328,6 +1328,44 @@ class TestApiClientDownstreamPropagation:
         assert published.datapoint_id == target_dp_id
         assert published.value == 23.5
 
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    def test_api_failure_replay_does_not_advance_unrelated_stateful_nodes(self, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_client.request = AsyncMock(side_effect=httpx.ConnectError("connection failed"))
+
+        nodes = [
+            node("stats", "statistics", {}),
+            node("cv_trig", "const_value", {"value": "true", "data_type": "bool"}),
+            node("ac", "api_client", {"url": "http://93.184.216.34", "method": "GET"}),
+            node("concat", "string_concat", {"count": 2, "separator": "", "text_2": ""}),
+        ]
+        edges = [
+            edge("cv_trig", "ac", "value", "trigger"),
+            edge("ac", "concat", "response", "in_1"),
+        ]
+        flow = _flow(nodes, edges)
+
+        manager = _make_manager()
+        graph_id = "g-unrelated-state"
+        manager._graphs[graph_id] = ("test", True, flow)
+        manager._node_state[graph_id] = {}
+
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            outputs = asyncio.run(
+                manager._execute_graph(
+                    graph_id,
+                    "test",
+                    flow,
+                    {"stats": {"value": 10.0}},
+                )
+            )
+
+        assert outputs["concat"]["result"] == "connection failed"
+        assert outputs["stats"]["count"] == 1
+        assert manager._hysteresis[graph_id]["stats"]["s_count"] == 1
+
 
 # ===========================================================================
 # Manager: WS broadcast receives final (post-HTTP) outputs

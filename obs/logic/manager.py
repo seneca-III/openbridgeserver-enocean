@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import email.utils
 import http.cookies
 import ipaddress
@@ -1085,6 +1086,7 @@ class LogicManager:
 
         executor = GraphExecutor(flow, hyst, self._app_config)
         try:
+            pre_execute_hyst = copy.deepcopy(hyst)
             outputs = executor.execute(aug_overrides)
         except Exception as exc:
             logger.error("Graph %s (%s) execution error: %s", graph_id, name, exc)
@@ -1281,6 +1283,16 @@ class LogicManager:
         # executor for those downstream nodes using input overrides so their
         # outputs (and downstream datapoint writes, etc.) reflect the real values.
         if triggered_api_clients:
+            downstream_node_ids: set[str] = set()
+            pending_sources = list(triggered_api_clients)
+            while pending_sources:
+                source_id = pending_sources.pop()
+                for e in flow.edges:
+                    if e.source != source_id or e.target in downstream_node_ids:
+                        continue
+                    downstream_node_ids.add(e.target)
+                    pending_sources.append(e.target)
+
             downstream_overrides: dict[str, dict[str, Any]] = {}
             for e in flow.edges:
                 if e.source in triggered_api_clients:
@@ -1288,15 +1300,18 @@ class LogicManager:
                     tgt_handle = e.targetHandle or "in"
                     downstream_overrides.setdefault(e.target, {})[tgt_handle] = GraphExecutor._get_output_value(outputs[e.source], src_handle)
             if downstream_overrides:
-                second_executor = GraphExecutor(flow, hyst, self._app_config)
                 replay_overrides = {nid: dict(vals) for nid, vals in aug_overrides.items()}
                 for nid, vals in downstream_overrides.items():
                     replay_overrides.setdefault(nid, {}).update(vals)
+                replay_hyst = copy.deepcopy(pre_execute_hyst)
+                second_executor = GraphExecutor(flow, replay_hyst, self._app_config)
                 second_outputs = second_executor.execute(replay_overrides)
                 api_client_ids = {n.id for n in flow.nodes if n.type == "api_client"}
                 for nid, vals in second_outputs.items():
-                    if nid not in api_client_ids:
+                    if nid in downstream_node_ids and nid not in api_client_ids:
                         outputs[nid] = vals
+                        if nid in replay_hyst:
+                            hyst[nid] = replay_hyst[nid]
 
         # ── Handle notify_pushover ────────────────────────────────────────
         # Runs AFTER api_client second-pass so that graphs with api_client →
