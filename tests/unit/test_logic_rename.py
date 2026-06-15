@@ -196,3 +196,32 @@ async def test_rename_updates_api_client_variable_references():
     db.execute_and_commit.assert_awaited_once()
     saved_flow = json.loads(db.execute_and_commit.call_args[0][1][0])
     assert saved_flow["nodes"][0]["data"]["variables"][0]["datapoint_name"] == "Neu"
+
+
+@pytest.mark.asyncio
+async def test_rename_updates_api_client_variable_references_in_json_string():
+    dp_id = uuid.uuid4()
+    other_id = uuid.uuid4()
+    flow = _flow_with_nodes(
+        {
+            "variables": json.dumps(
+                [
+                    {"slot": 1, "datapoint_id": str(dp_id), "datapoint_name": "Alt"},
+                    {"slot": 2, "datapoint_id": str(other_id), "datapoint_name": "Other"},
+                    "invalid",
+                ],
+            ),
+        },
+    )
+    mgr, db = _make_manager({"g1": ("MyGraph", True, flow)})
+
+    event = DataPointRenamedEvent(dp_id=dp_id, old_name="Alt", new_name="Neu")
+    await mgr._on_datapoint_renamed(event)
+
+    variables = json.loads(flow.nodes[0].data["variables"])
+    assert variables[0]["datapoint_name"] == "Neu"
+    assert variables[1]["datapoint_name"] == "Other"
+    db.execute_and_commit.assert_awaited_once()
+    saved_flow = json.loads(db.execute_and_commit.call_args[0][1][0])
+    saved_variables = json.loads(saved_flow["nodes"][0]["data"]["variables"])
+    assert saved_variables[0]["datapoint_name"] == "Neu"

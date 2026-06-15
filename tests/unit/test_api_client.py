@@ -1064,6 +1064,49 @@ class TestApiClientVariables:
         assert captured["url"] == "http://93.184.216.34/api/still-obs2"
 
     @patch("obs.logic.manager.httpx.AsyncClient")
+    @patch(
+        "obs.security.url_targets.socket.getaddrinfo",
+        return_value=[(None, None, None, None, ("93.184.216.34", 80))],
+    )
+    def test_variable_uses_current_datapoint_override_before_registry(self, _mock_resolve, mock_client_cls):
+        captured: dict = {}
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        async def _capture(method, url, **kwargs):
+            captured["url"] = url
+            return _mock_response(200, {"ok": True})
+
+        mock_client.request = _capture
+
+        dp_id = uuid.uuid4()
+        manager = _make_manager()
+        manager._registry.get_value.return_value = self._state("stale")
+        nodes = [
+            node("read", "datapoint_read", {"datapoint_id": str(dp_id), "datapoint_name": "Trigger"}),
+            node(
+                "ac",
+                "api_client",
+                {
+                    "url": "http://example.com/api/###OBS1###",
+                    "method": "GET",
+                    "variables": [{"slot": 1, "datapoint_id": str(dp_id), "datapoint_name": "Trigger"}],
+                },
+            ),
+        ]
+        edges = [edge("read", "ac", "value", "trigger")]
+        flow = _flow(nodes, edges)
+        graph_id = "g-current-var"
+        manager._graphs[graph_id] = ("t", True, flow)
+
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            outputs = asyncio.run(manager._execute_graph(graph_id, "t", flow, {"read": {"value": "fresh", "changed": True}}))
+
+        assert outputs["ac"]["success"] is True
+        assert captured["url"] == "http://93.184.216.34/api/fresh"
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
     def test_missing_variable_configuration_sets_error_output(self, mock_client_cls):
         mock_client = AsyncMock()
         mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
@@ -1365,6 +1408,43 @@ class TestApiClientDownstreamPropagation:
         assert outputs["concat"]["result"] == "connection failed"
         assert outputs["stats"]["count"] == 1
         assert manager._hysteresis[graph_id]["stats"]["s_count"] == 1
+
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    def test_api_replay_reuses_first_pass_external_inputs(self, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_client.request = AsyncMock(return_value=_mock_response(200, {"ok": True}))
+
+        target_dp_id = uuid.uuid4()
+        nodes = [
+            node("cv_trig", "const_value", {"value": "true", "data_type": "bool"}),
+            node("rand", "random_value", {"data_type": "int", "min": 1, "max": 100}),
+            node("ac", "api_client", {"url": "http://93.184.216.34", "method": "GET"}),
+            node("write", "datapoint_write", {"datapoint_id": str(target_dp_id), "datapoint_name": "Target"}),
+        ]
+        edges = [
+            edge("cv_trig", "rand", "value", "trigger"),
+            edge("cv_trig", "ac", "value", "trigger"),
+            edge("rand", "write", "value", "value"),
+            edge("ac", "write", "success", "trigger"),
+        ]
+        flow = _flow(nodes, edges)
+
+        manager = _make_manager()
+        graph_id = "g-replay-freeze"
+        manager._graphs[graph_id] = ("test", True, flow)
+        manager._node_state[graph_id] = {}
+
+        with patch("random.randint", side_effect=[11, 99]):
+            with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+                outputs = asyncio.run(manager._execute_graph(graph_id, "test", flow, {}))
+
+        assert outputs["rand"]["value"] == 11
+        assert outputs["write"]["_write_value"] == 11
+        published = manager._event_bus.publish.await_args.args[0]
+        assert published.datapoint_id == target_dp_id
+        assert published.value == 11
 
 
 # ===========================================================================

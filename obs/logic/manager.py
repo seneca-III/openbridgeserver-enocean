@@ -138,6 +138,31 @@ def _normalise_api_client_variables(raw: Any) -> dict[int, dict[str, str]]:
     return variables
 
 
+def _rename_api_client_variable_datapoint_names(raw: Any, datapoint_id: str, new_name: str) -> tuple[Any, bool]:
+    was_string = isinstance(raw, str)
+    variables = raw
+    if was_string:
+        try:
+            variables = json.loads(raw)
+        except Exception:
+            return raw, False
+    if not isinstance(variables, list):
+        return raw, False
+
+    changed = False
+    for variable in variables:
+        if not isinstance(variable, dict):
+            continue
+        if variable.get("datapoint_id") == datapoint_id and variable.get("datapoint_name") != new_name:
+            variable["datapoint_name"] = new_name
+            changed = True
+    if not changed:
+        return raw, False
+    if was_string:
+        return json.dumps(variables, ensure_ascii=False), True
+    return variables, True
+
+
 def _api_client_value_to_string(value: Any) -> str:
     if value is None:
         raise _ApiClientVariableError("API client variable value is empty")
@@ -174,8 +199,13 @@ def _quote_api_client_url_value(value: str) -> str:
     return quote(value, safe="-._~")
 
 
-def _make_api_client_variable_resolver(registry: Any, raw_variables: Any) -> Any:
+def _make_api_client_variable_resolver(
+    registry: Any,
+    raw_variables: Any,
+    execution_values_by_datapoint_id: dict[str, Any] | None = None,
+) -> Any:
     variables = _normalise_api_client_variables(raw_variables)
+    execution_values_by_datapoint_id = execution_values_by_datapoint_id or {}
     cache: dict[int, str] = {}
 
     def _resolve(index: int) -> str:
@@ -185,6 +215,14 @@ def _make_api_client_variable_resolver(registry: Any, raw_variables: Any) -> Any
         if variable is None:
             raise _ApiClientVariableError(f"API client variable OBS{index} is not configured")
         datapoint_id = variable["datapoint_id"]
+        if datapoint_id in execution_values_by_datapoint_id:
+            value = execution_values_by_datapoint_id[datapoint_id]
+            if value is None:
+                raise _ApiClientVariableError(
+                    f"API client variable OBS{index} object {variable['datapoint_name']} has no value",
+                )
+            cache[index] = _api_client_value_to_string(value)
+            return cache[index]
         try:
             state = registry.get_value(uuid.UUID(datapoint_id))
         except Exception as exc:
@@ -803,14 +841,14 @@ class LogicManager:
                 if node.data.get("datapoint_id") == dp_id_str and node.data.get("datapoint_name") != event.new_name:
                     node.data["datapoint_name"] = event.new_name
                     changed = True
-                variables = node.data.get("variables")
-                if isinstance(variables, list):
-                    for variable in variables:
-                        if not isinstance(variable, dict):
-                            continue
-                        if variable.get("datapoint_id") == dp_id_str and variable.get("datapoint_name") != event.new_name:
-                            variable["datapoint_name"] = event.new_name
-                            changed = True
+                variables, variables_changed = _rename_api_client_variable_datapoint_names(
+                    node.data.get("variables"),
+                    dp_id_str,
+                    event.new_name,
+                )
+                if variables_changed:
+                    node.data["variables"] = variables
+                    changed = True
             if changed:
                 current = self._graphs.get(graph_id)
                 if current is None or current[2] is not flow:
@@ -1114,6 +1152,13 @@ class LogicManager:
         # Track api_client nodes with final manager-computed outputs so we can
         # re-propagate success responses and explicit error details downstream.
         triggered_api_clients: set[str] = set()
+        execution_values_by_datapoint_id: dict[str, Any] = {}
+        for node in flow.nodes:
+            if node.type != "datapoint_read":
+                continue
+            dp_id_str = str(node.data.get("datapoint_id") or "").strip()
+            if dp_id_str and node.id in aug_overrides and "value" in aug_overrides[node.id]:
+                execution_values_by_datapoint_id[dp_id_str] = aug_overrides[node.id]["value"]
         import json as _json  # noqa: PLC0415
 
         for node in flow.nodes:
@@ -1122,7 +1167,11 @@ class LogicManager:
             out = outputs.get(node.id, {})
             if not GraphExecutor._to_bool(out.get("_trigger")):
                 continue
-            variable_resolver = _make_api_client_variable_resolver(self._registry, node.data.get("variables"))
+            variable_resolver = _make_api_client_variable_resolver(
+                self._registry,
+                node.data.get("variables"),
+                execution_values_by_datapoint_id,
+            )
             try:
                 url = _replace_api_client_placeholders(
                     node.data.get("url") or "",
@@ -1303,6 +1352,12 @@ class LogicManager:
                 replay_overrides = {nid: dict(vals) for nid, vals in aug_overrides.items()}
                 for nid, vals in downstream_overrides.items():
                     replay_overrides.setdefault(nid, {}).update(vals)
+                for e in flow.edges:
+                    if e.target not in downstream_node_ids or e.source in downstream_node_ids or e.source in triggered_api_clients:
+                        continue
+                    src_handle = e.sourceHandle or "out"
+                    tgt_handle = e.targetHandle or "in"
+                    replay_overrides.setdefault(e.target, {})[tgt_handle] = GraphExecutor._get_output_value(outputs.get(e.source, {}), src_handle)
                 replay_hyst = copy.deepcopy(pre_execute_hyst)
                 second_executor = GraphExecutor(flow, replay_hyst, self._app_config)
                 second_outputs = second_executor.execute(replay_overrides)
