@@ -369,12 +369,21 @@ async def get_datapoint_logic_usages(
         raw = json.loads(row["flow_data"]) if row["flow_data"] else {}
         flow = FlowData.model_validate(raw)
         for node in flow.nodes:
-            if node.data.get("datapoint_id") != dp_id:
-                continue
             if node.type == "datapoint_read":
+                if node.data.get("datapoint_id") != dp_id:
+                    continue
                 direction = "SOURCE"
             elif node.type == "datapoint_write":
+                if node.data.get("datapoint_id") != dp_id:
+                    continue
                 direction = "DEST"
+            elif node.type == "api_client":
+                variables = node.data.get("variables")
+                if not isinstance(variables, list) or not any(
+                    isinstance(variable, dict) and variable.get("datapoint_id") == dp_id for variable in variables
+                ):
+                    continue
+                direction = "SOURCE"
             else:
                 continue
             usages.append(

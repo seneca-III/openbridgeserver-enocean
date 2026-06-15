@@ -1109,8 +1109,8 @@ class LogicManager:
                 ns["last_start"] = None
 
         # ── Handle api_client ─────────────────────────────────────────────
-        # Track which api_client nodes completed an HTTP call so we can
-        # re-propagate their real outputs to downstream nodes afterwards.
+        # Track api_client nodes with final manager-computed outputs so we can
+        # re-propagate success responses and explicit error details downstream.
         triggered_api_clients: set[str] = set()
         import json as _json  # noqa: PLC0415
 
@@ -1132,12 +1132,14 @@ class LogicManager:
             except _ApiClientVariableError as exc:
                 logger.warning("Graph %s: api_client variable error: %s", graph_id[:8], exc)
                 outputs[node.id].update({"response": str(exc), "status": None, "success": False})
+                triggered_api_clients.add(node.id)
                 continue
             try:
                 request_urls, pinned_headers, request_extensions = _build_api_client_fetch_targets(url)
             except ValueError as exc:
                 logger.warning("Graph %s: blocked api_client target %s: %s", graph_id[:8], url, exc)
                 outputs[node.id].update({"response": str(exc), "status": None, "success": False})
+                triggered_api_clients.add(node.id)
                 continue
             method = (node.data.get("method", "GET") or "GET").upper()
             content_type = node.data.get("content_type", "application/json")
@@ -1168,6 +1170,7 @@ class LogicManager:
             except _ApiClientVariableError as exc:
                 logger.warning("Graph %s: api_client variable error: %s", graph_id[:8], exc)
                 outputs[node.id].update({"response": str(exc), "status": None, "success": False})
+                triggered_api_clients.add(node.id)
                 continue
             # ── Authentication ──────────────────────────────────────────
             auth_type = (node.data.get("auth_type") or "none").lower()
@@ -1190,7 +1193,10 @@ class LogicManager:
                         variable_resolver,
                     ).strip()
                     if not token:
-                        token = _read_secret_file(node.data.get("auth_token_file") or "")
+                        token = _replace_api_client_placeholders(
+                            _read_secret_file(node.data.get("auth_token_file") or ""),
+                            variable_resolver,
+                        ).strip()
                     if token:
                         extra_headers = {
                             **extra_headers,
@@ -1199,6 +1205,7 @@ class LogicManager:
             except _ApiClientVariableError as exc:
                 logger.warning("Graph %s: api_client variable error: %s", graph_id[:8], exc)
                 outputs[node.id].update({"response": str(exc), "status": None, "success": False})
+                triggered_api_clients.add(node.id)
                 continue
             try:
                 req_kwargs: dict[str, Any] = {
@@ -1266,6 +1273,7 @@ class LogicManager:
             except Exception as exc:
                 logger.warning("Graph %s: api_client failed: %s", graph_id[:8], exc)
                 outputs[node.id].update({"response": str(exc), "status": None, "success": False})
+                triggered_api_clients.add(node.id)
 
         # ── Re-propagate api_client outputs to downstream nodes ───────────
         # The first executor pass computed downstream nodes with the placeholder

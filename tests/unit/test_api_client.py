@@ -654,10 +654,15 @@ class TestApiClientManagerHttp:
         headers_file = root / "api-headers.json"
         token_file = root / "api-token"
         headers_file.write_text('{"X-Secret": "from-file"}', encoding="utf-8")
-        token_file.write_text("file-token", encoding="utf-8")
+        token_file.write_text("file-token-###OBS1###", encoding="utf-8")
         monkeypatch.setenv("OBS_SECRET_FILE_DIR", str(root))
 
+        dp_id = uuid.uuid4()
+        state = ValueState()
+        state.value = "from-variable"
+        state.quality = "good"
         manager = _make_manager()
+        manager._registry.get_value.return_value = state
         _, flow = self._build_graph(
             extra_data={
                 "headers": '{"X-Base": "inline"}',
@@ -665,6 +670,7 @@ class TestApiClientManagerHttp:
                 "auth_token": "",
                 "auth_token_file": str(token_file),
                 "headers_secret_file": str(headers_file),
+                "variables": [{"datapoint_id": str(dp_id), "datapoint_name": "Token Suffix"}],
             },
         )
         with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
@@ -674,7 +680,7 @@ class TestApiClientManagerHttp:
         assert len(captured_headers) == 1
         assert captured_headers[0]["X-Base"] == "inline"
         assert captured_headers[0]["X-Secret"] == "from-file"
-        assert captured_headers[0]["Authorization"] == "Bearer file-token"
+        assert captured_headers[0]["Authorization"] == "Bearer file-token-from-variable"
 
     @patch("obs.logic.manager.httpx.AsyncClient")
     def test_localhost_target_is_blocked_without_allowlist(self, mock_client_cls, tmp_path):
@@ -1205,6 +1211,29 @@ class TestApiClientDownstreamPropagation:
 
         assert outputs["ac"]["success"] is False
         assert outputs["gate"]["out"] is False
+
+    def test_downstream_node_receives_variable_error_response(self):
+        nodes = [
+            node("cv_trig", "const_value", {"value": "true", "data_type": "bool"}),
+            node("ac", "api_client", {"url": "http://example.com/###OBS1###", "method": "GET", "variables": []}),
+            node("concat", "string_concat", {"count": 2, "separator": "", "text_2": ""}),
+        ]
+        edges = [
+            edge("cv_trig", "ac", "value", "trigger"),
+            edge("ac", "concat", "response", "in_1"),
+        ]
+        flow = _flow(nodes, edges)
+
+        manager = _make_manager()
+        graph_id = "g-var-error-downstream"
+        manager._graphs[graph_id] = ("t", True, flow)
+        manager._node_state[graph_id] = {}
+
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            outputs = asyncio.run(manager._execute_graph(graph_id, "t", flow, {}))
+
+        assert outputs["ac"]["response"] == "API client variable OBS1 is not configured"
+        assert outputs["concat"]["result"] == "API client variable OBS1 is not configured"
 
 
 # ===========================================================================
