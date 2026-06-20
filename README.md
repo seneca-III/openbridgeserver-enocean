@@ -17,20 +17,20 @@ open bridge connects different building technology protocols into a unified syst
 
 ## What can open bridge do?
 
-| Feature | Description                                                                                                                                                 |
-|---|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Feature | Description |
+|---|---|
 | **Protocols** | KNX/IP (Tunneling + Routing + KNX IP Secure), Modbus TCP, Modbus RTU, 1-Wire, external MQTT, Home Assistant, ioBroker, SNMP, presence simulation, scheduler |
-| **Multiple instances** | Any number of instances per protocol (e.g. 2× KNX, 3× Modbus TCP)                                                                                           |
-| **Protocol bridge** | A KNX value is automatically written to a Modbus register — and vice versa                                                                                  |
-| **Logic editor** | Visual automation logic without programming: 35+ block types, schedules, formulas, Python scripts, notifications, HTTP requests, sun position               |
-| **MQTT** | Stable UUID topic + readable alias topic; retain support                                                                                                    |
-| **Web interface** | Full operation via browser — no separate application required                                                                                               |
-| **Database** | SQLite — no external database required                                                                                                                      |
-| **History** | Value history with chart, time aggregation (hour / day / week …); configurable per data point                                                               |
-| **Change log** | Last N value changes viewable (RingBuffer) — updates live                                                                                                   |
-| **Instant changes** | Changes take effect without restart                                                                                                                         |
-| **Installation** | Docker Compose, directly as Python application, or as Proxmox LXC template                                                                                  |
-| **License** | MIT (free and open source)                                                                                                                                  |
+| **Multiple instances** | Any number of instances per protocol (e.g. 2× KNX, 3× Modbus TCP) |
+| **Protocol bridge** | A KNX value is automatically written to a Modbus register — and vice versa |
+| **Logic editor** | Visual automation logic without programming: 35+ block types, schedules, formulas, Python scripts, notifications, HTTP requests, sun position |
+| **MQTT** | Stable UUID topic + readable alias topic; retain support |
+| **Web interface** | Full operation via browser — no separate application required |
+| **Database** | SQLite — no external database required |
+| **History** | Value history with chart, time aggregation (hour / day / week …); configurable per data point |
+| **Change log** | Last N value changes viewable (RingBuffer) — updates live |
+| **Instant changes** | Changes take effect without restart |
+| **Installation** | Docker Compose, directly as Python application, or as Proxmox LXC template |
+| **License** | MIT (free and open source) |
 
 ---
 
@@ -79,7 +79,7 @@ The LXC template contains a complete Ubuntu 26.04 system with **open bridge serv
 5. If not already enabled, activate **Advanced** in the bottom right of the popup.
 6. Select **SHA256** as the hash algorithm.
 7. On the [releases page](../../releases/latest), copy the checksum of the desired template from the **Checksums** section using the copy button:
-
+  
    ![ProxmoxDownloadFromURL](docs/Release-Asset-Checksums.png)
 
    Note: If you copy the checksum directly from the column next to the asset, remove the `SHA256:` prefix, as Proxmox does not expect it!
