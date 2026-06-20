@@ -79,7 +79,7 @@ The LXC template contains a complete Ubuntu 26.04 system with **open bridge serv
 5. If not already enabled, activate **Advanced** in the bottom right of the popup.
 6. Select **SHA256** as the hash algorithm.
 7. On the [releases page](../../releases/latest), copy the checksum of the desired template from the **Checksums** section using the copy button:
-  
+
    ![ProxmoxDownloadFromURL](docs/Release-Asset-Checksums.png)
 
    Note: If you copy the checksum directly from the column next to the asset, remove the `SHA256:` prefix, as Proxmox does not expect it!

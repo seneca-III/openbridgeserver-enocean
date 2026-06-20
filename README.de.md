@@ -81,7 +81,7 @@ Das LXC-Template enthält ein vollständiges Ubuntu 26.04-System mit **open brid
 7. Auf der [Release-Seite](../../releases/latest) im Abschnitt **Checksums** via Copy-Button die Checksumme des gewünschten Templates kopieren:
 
    ![ProxmoxDownloadFromURL](docs/Release-Asset-Checksums.png)
-   
+
    Achtung: Wenn die Checksummen direkt aus der Spalte neben den Assets kopiert wurden, muss der Prefix `SHA256:` entfernt werden, da Proxmox diesen nicht erwartet!
 8. Zurück auf der Proxmox-Weboberfläche den kopierten Hash unter **Checksum** einfügen.
 9. Das sollte jetzt beispielsweise so aussehen:
