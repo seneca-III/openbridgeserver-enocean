@@ -6,9 +6,10 @@ const props = defineProps<{ modelValue: Record<string, unknown> }>()
 const emit  = defineEmits<{ (e: 'update:modelValue', val: Record<string, unknown>): void }>()
 
 const cfg = reactive({
-  label:            (props.modelValue.label            as string) ?? '',
-  mode:             (props.modelValue.mode             as string) ?? 'dimm',
-  dp_switch:        (props.modelValue.dp_switch        as string) ?? '',
+  label:            (props.modelValue.label            as string)  ?? '',
+  mode:             (props.modelValue.mode             as string)  ?? 'dimm',
+  show_state_text:  (props.modelValue.show_state_text  as boolean) ?? true,
+  dp_switch:        (props.modelValue.dp_switch        as string)  ?? '',
   dp_switch_status: (props.modelValue.dp_switch_status as string) ?? '',
   dp_dim:           (props.modelValue.dp_dim           as string) ?? '',
   dp_dim_status:    (props.modelValue.dp_dim_status    as string) ?? '',
@@ -62,6 +63,12 @@ watch(cfg, () => emit('update:modelValue', { ...cfg }), { deep: true })
         <option value="rgbw">{{ $t('widgets.licht.typeRgbw') }}</option>
       </select>
     </div>
+
+    <!-- Statustext -->
+    <label class="flex items-center gap-2 cursor-pointer select-none">
+      <input type="checkbox" v-model="cfg.show_state_text" class="rounded" />
+      <span class="text-xs text-gray-500 dark:text-gray-400">EIN / AUS Beschriftung anzeigen</span>
+    </label>
 
     <hr class="border-gray-200 dark:border-gray-700" />
 
