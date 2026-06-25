@@ -1,12 +1,40 @@
 #!/bin/sh
-if [ -d /opt/obs/obs ] && [ -x /opt/obs/venv/bin/python3 ]; then
-  if [ -f /etc/obs.env ]; then
-    set -a
-    . /etc/obs.env
-    set +a
-  fi
-  cd /opt/obs || exit 1
-  exec /opt/obs/venv/bin/python3 -m obs.admin_cli "$@"
+obs_admin_load_env_file() {
+  env_file=$1
+  [ -f "$env_file" ] || return 0
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      ""|\#*)
+        continue
+        ;;
+      OBS_CONFIG=*|OBS_DATABASE__PATH=*)
+        key=${line%%=*}
+        value=${line#*=}
+        case "$value" in
+          \"*)
+            value=${value#\"}
+            value=${value%\"}
+            ;;
+          \'*)
+            value=${value#\'}
+            value=${value%\'}
+            ;;
+        esac
+        export "$key=$value"
+        ;;
+    esac
+  done < "$env_file"
+}
+
+obs_admin_app_dir=${OBS_ADMIN_APP_DIR:-/opt/obs}
+obs_admin_python=${OBS_ADMIN_PYTHON:-$obs_admin_app_dir/venv/bin/python3}
+obs_admin_env_file=${OBS_ADMIN_ENV_FILE:-/etc/obs.env}
+
+if [ -d "$obs_admin_app_dir/obs" ] && [ -x "$obs_admin_python" ]; then
+  obs_admin_load_env_file "$obs_admin_env_file"
+  cd "$obs_admin_app_dir" || exit 1
+  exec "$obs_admin_python" -m obs.admin_cli "$@"
 fi
 if [ -d /app/obs ]; then
   cd /app || exit 1
