@@ -27,7 +27,7 @@ TEXT_NODE_RE = re.compile(r">([^<{][^<]*)<")
 RAW_TRANSLATION_TEXT_RE = re.compile(r"\$t\s*\(")
 UI_CALL_RE = re.compile(r"\b(?:alert|confirm|prompt|toast(?:\.[A-Za-z_][A-Za-z0-9_]*)?|notify(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\(\s*(['\"`])(.+?)\1")
 ERROR_RE = re.compile(r"\b(?:throw\s+new\s+Error|new\s+Error)\s*\(\s*(['\"`])(.+?)\1")
-ASSIGN_RE = re.compile(r"\b(?:errorMessage|warningMessage|successMessage|message|label|title|placeholder|tooltip|caption)\s*[:=]\s*(['\"`])(.+?)\1")
+ASSIGN_RE = re.compile(r"\b(?:errorMessage|warningMessage|successMessage|message|label|title|placeholder|tooltip|caption)\s*[:=]\s*(['\"`])(.*?)\1")
 COMMENT_RE = re.compile(r"<!--.*?-->")
 
 

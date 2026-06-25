@@ -66,6 +66,18 @@ def test_dynamic_translation_attribute_is_allowed():
     assert violations == []
 
 
+def test_empty_string_assignments_do_not_bleed_into_next_literal():
+    src = """const props = {
+  label: '',
+  extra_datapoints: [{ id: 'dp-1', label: '', unit: '', decimals: 1 }],
+}
+"""
+
+    violations = gate.scan_script("frontend/src/widgets/Info/Config.test.ts", src, EmptyAllowlist())
+
+    assert violations == []
+
+
 def test_static_template_text_still_gets_flagged():
     src = """<template>
   <p>Additional values</p>
