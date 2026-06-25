@@ -53,11 +53,74 @@ def test_interpolated_translation_call_is_allowed():
     assert violations == []
 
 
+def test_spaced_inline_interpolated_translation_call_is_allowed():
+    src = """<template>
+  <p> {{ $t('widgets.info.additionalValues', { max: MAX_EXTRA }) }}</p>
+</template>
+"""
+
+    violations = gate.scan_vue("frontend/src/widgets/Info/Config.vue", src, EmptyAllowlist())
+
+    assert violations == []
+
+
+def test_multiline_interpolated_translation_call_is_allowed():
+    src = """<template>
+  <p>
+    {{
+      $t('widgets.info.additionalValues', { max: MAX_EXTRA })
+    }}
+  </p>
+</template>
+"""
+
+    violations = gate.scan_vue("frontend/src/widgets/Info/Config.vue", src, EmptyAllowlist())
+
+    assert violations == []
+
+
 def test_dynamic_translation_attribute_is_allowed():
     src = """<template>
   <input
     :placeholder="$t('widgets.info.mainLabelPlaceholder')"
   />
+</template>
+"""
+
+    violations = gate.scan_vue("frontend/src/widgets/Info/Config.vue", src, EmptyAllowlist())
+
+    assert violations == []
+
+
+def test_bound_literal_attribute_is_flagged():
+    src = """<template>
+  <input :placeholder="'Hardcoded label'" />
+</template>
+"""
+
+    violations = gate.scan_vue("frontend/src/widgets/Info/Config.vue", src, EmptyAllowlist())
+
+    assert len(violations) == 1
+    assert violations[0].kind == "template-bound-attr"
+    assert violations[0].snippet == "Hardcoded label"
+
+
+def test_bound_template_literal_attribute_is_flagged():
+    src = """<template>
+  <input :title="`Farbe ${i + 1}`" />
+</template>
+"""
+
+    violations = gate.scan_vue("frontend/src/widgets/Info/Config.vue", src, EmptyAllowlist())
+
+    assert len(violations) == 1
+    assert violations[0].kind == "template-bound-attr"
+    assert violations[0].snippet == "Farbe ${i + 1}"
+
+
+def test_bound_variable_attribute_is_allowed():
+    src = """<template>
+  <input :placeholder="placeholderText" />
 </template>
 """
 

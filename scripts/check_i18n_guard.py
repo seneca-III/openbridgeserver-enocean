@@ -23,6 +23,10 @@ TEMPLATE_BLOCK_RE = re.compile(r"<template\b[^>]*>(.*?)</template>", re.IGNORECA
 ATTR_RE = re.compile(
     r"(?<![:\w-])\b(label|title|placeholder|alt|aria-label|helper-text|tooltip|caption|headline|confirm-text|cancel-text|no-data-text|loading-text)\s*=\s*(['\"])(.*?)\2"
 )
+BOUND_ATTR_RE = re.compile(
+    r"(?:^|\s)(?::|v-bind:)(label|title|placeholder|alt|aria-label|helper-text|tooltip|caption|headline|confirm-text|cancel-text|no-data-text|loading-text)\s*=\s*(['\"])(.*?)\2"
+)
+STRING_LITERAL_RE = re.compile(r"^(['\"`])(.*)\1$")
 TEXT_NODE_RE = re.compile(r">([^<{][^<]*)<")
 RAW_TRANSLATION_TEXT_RE = re.compile(r"\$t\s*\(")
 UI_CALL_RE = re.compile(r"\b(?:alert|confirm|prompt|toast(?:\.[A-Za-z_][A-Za-z0-9_]*)?|notify(?:\.[A-Za-z_][A-Za-z0-9_]*)?)\s*\(\s*(['\"`])(.+?)\1")
@@ -122,12 +126,12 @@ def should_flag(candidate: str, allowlist: Allowlist) -> bool:
     text = normalize_text(candidate)
     if len(text) < 2:
         return False
-    if RAW_TRANSLATION_TEXT_RE.search(text):
-        return True
     if not has_letters(text):
         return False
     if "{{" in text or "}}" in text:
         return False
+    if RAW_TRANSLATION_TEXT_RE.search(text):
+        return True
     if text.startswith(("$t(", "t(")):
         return False
     if is_technical_token(text):
@@ -153,9 +157,26 @@ def add_violations_from_matches(
             sink.append(Violation(path=path, line=line, kind=kind, snippet=normalize_text(candidate)))
 
 
-def raw_translation_text_violation(path: str, line_no: int, line: str) -> Violation | None:
+def add_violations_from_bound_attrs(
+    *,
+    path: str,
+    line: int,
+    matches: Iterable[re.Match[str]],
+    allowlist: Allowlist,
+    sink: list[Violation],
+) -> None:
+    for match in matches:
+        expression = match.group(3).strip()
+        if RAW_TRANSLATION_TEXT_RE.search(expression):
+            continue
+        literal = STRING_LITERAL_RE.match(expression)
+        if literal and should_flag(literal.group(2), allowlist):
+            sink.append(Violation(path=path, line=line, kind="template-bound-attr", snippet=normalize_text(literal.group(2))))
+
+
+def raw_translation_text_violation(path: str, line_no: int, line: str, in_interpolation: bool) -> Violation | None:
     text = normalize_text(line)
-    if RAW_TRANSLATION_TEXT_RE.search(text) and "{{" not in text and "<" not in text and ">" not in text and "=" not in text:
+    if RAW_TRANSLATION_TEXT_RE.search(text) and not in_interpolation and "{{" not in text and "<" not in text and ">" not in text and "=" not in text:
         return Violation(path=path, line=line_no, kind="template-text", snippet=text)
     return None
 
@@ -166,11 +187,12 @@ def scan_vue(path: str, content: str, allowlist: Allowlist) -> list[Violation]:
     for tpl_match in TEMPLATE_BLOCK_RE.finditer(content):
         tpl = tpl_match.group(1)
         start_line = content.count("\n", 0, tpl_match.start(1)) + 1
+        interpolation_depth = 0
         for idx, raw_line in enumerate(tpl.splitlines(), start=start_line):
             line = COMMENT_RE.sub("", raw_line)
             if not line.strip():
                 continue
-            if violation := raw_translation_text_violation(path, idx, line):
+            if violation := raw_translation_text_violation(path, idx, line, interpolation_depth > 0):
                 violations.append(violation)
             add_violations_from_matches(
                 path=path,
@@ -178,6 +200,13 @@ def scan_vue(path: str, content: str, allowlist: Allowlist) -> list[Violation]:
                 kind="template-attr",
                 matches=ATTR_RE.finditer(line),
                 candidate_group=3,
+                allowlist=allowlist,
+                sink=violations,
+            )
+            add_violations_from_bound_attrs(
+                path=path,
+                line=idx,
+                matches=BOUND_ATTR_RE.finditer(line),
                 allowlist=allowlist,
                 sink=violations,
             )
@@ -190,6 +219,7 @@ def scan_vue(path: str, content: str, allowlist: Allowlist) -> list[Violation]:
                 allowlist=allowlist,
                 sink=violations,
             )
+            interpolation_depth = max(0, interpolation_depth + line.count("{{") - line.count("}}"))
 
     stripped = TEMPLATE_BLOCK_RE.sub("\n", content)
     for line_no, raw_line in enumerate(stripped.splitlines(), start=1):
