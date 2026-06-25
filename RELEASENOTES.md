@@ -12,6 +12,7 @@
 * Backend/Admin GUI: Repeated `.knxproj` imports now replace automatically generated ETS hierarchies per selected mode by default, while manual hierarchy trees remain untouched; the import dialog also offers an opt-out to keep a separate tree for each import run. https://github.com/abeggled/openbridgeserver/issues/730
 * Visu: Licht widget: the EIN/AUS state label can now be hidden via "show_state_text". https://github.com/abeggled/openbridgeserver/issues/840
 * Visu: Link widget now supports hiding the icon via the "show_icon" option. https://github.com/abeggled/openbridgeserver/issues/839
+* Visu: Editor grid limits extended — columns up to 120, cell size down to 10 px, enabling fullscreen/dense layouts. https://github.com/abeggled/openbridgeserver/issues/842
 
 ### Fixes 🐞
 * Backend: High-volume third-party DEBUG loggers (e.g. `aiosqlite`, which logs two lines per SQL operation) are now floored at INFO, so enabling DEBUG globally no longer floods the logs and saturates a CPU core. https://github.com/abeggled/openbridgeserver/issues/798
