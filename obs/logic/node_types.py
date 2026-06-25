@@ -704,10 +704,11 @@ BUILTIN_NODE_TYPES: list[NodeTypeDef] = [
         },
         color="#e11d48",
     ),
+    # ── Integration ───────────────────────────────────────────────────────
     NodeTypeDef(
         type="wake_on_lan",
         label="Wake on LAN",
-        category="notification",
+        category="integration",
         description="Sendet ein Wake-on-LAN Magic-Paket an ein Gerät per UDP-Broadcast. Wird ausgelöst wenn der Trigger-Eingang true ist.",
         inputs=[_port("trigger", "Trigger", "trigger")],
         outputs=[_port("sent", "Gesendet", "trigger")],
@@ -728,9 +729,8 @@ BUILTIN_NODE_TYPES: list[NodeTypeDef] = [
                 "label": "UDP-Port",
             },
         },
-        color="#e11d48",
+        color="#0369a1",
     ),
-    # ── Integration ───────────────────────────────────────────────────────
     NodeTypeDef(
         type="json_extractor",
         label="JSON Extractor",
