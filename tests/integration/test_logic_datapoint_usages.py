@@ -225,6 +225,22 @@ async def test_other_dp_not_included(client, auth_headers):
 
 
 @pytest.mark.asyncio
+async def test_other_dp_write_and_api_client_variable_not_included(client, auth_headers):
+    dp_a = await _create_dp(client, auth_headers, "dp_other_write_api_a_test")
+    dp_b = await _create_dp(client, auth_headers, "dp_other_write_api_b_test")
+    gid = await _create_graph(
+        client,
+        auth_headers,
+        "graph_only_write_api_a",
+        [_write_node(dp_a["id"]), _api_client_node(dp_a["id"])],
+    )
+    try:
+        assert await _get_usages(client, auth_headers, dp_b["id"]) == []
+    finally:
+        await _cleanup(client, auth_headers, graph_ids=[gid], dp_ids=[dp_a["id"], dp_b["id"]])
+
+
+@pytest.mark.asyncio
 async def test_requires_authentication(client):
     resp = await client.get("/api/v1/logic/datapoint/00000000-0000-0000-0000-000000000000/usages")
     assert resp.status_code == 401

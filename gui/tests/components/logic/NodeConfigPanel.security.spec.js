@@ -5,14 +5,16 @@ import { createPinia, setActivePinia } from 'pinia'
 let checkUrlTarget
 let addUrlTarget
 let searchDatapoints
+let listDatapoints
 
 beforeEach(() => {
   vi.resetModules()
   checkUrlTarget = vi.fn()
   addUrlTarget = vi.fn().mockResolvedValue({ data: { target: '10.38.113.23/32' } })
   searchDatapoints = vi.fn().mockResolvedValue({ data: { items: [] } })
+  listDatapoints = vi.fn().mockResolvedValue({ data: { items: [] } })
   vi.doMock('@/api/client', () => ({
-    dpApi: { list: vi.fn().mockResolvedValue({ data: { items: [] } }) },
+    dpApi: { list: listDatapoints },
     searchApi: { search: searchDatapoints },
     securityApi: { checkUrlTarget, addUrlTarget },
   }))
@@ -139,6 +141,61 @@ describe('NodeConfigPanel api_client URL target policy', () => {
     expect(wrapper.emitted('update').at(-1)[0].variables).toEqual([
       { slot: 2, datapoint_id: 'dp-2', datapoint_name: 'Second' },
     ])
+    wrapper.unmount()
+  })
+
+  it('normalises api_client variables from JSON string props', async () => {
+    const wrapper = await mountApiClientPanel({
+      url: 'http://example.com/api/###OBS4###',
+      auth_type: 'none',
+      variables: JSON.stringify([
+        { slot: '4', datapoint_id: 'dp-4', datapoint_name: 'Fourth' },
+      ]),
+    })
+
+    const variable = wrapper.find('[data-testid="api-client-variable-0"]')
+    expect(variable.text()).toContain('###OBS4###')
+    expect(wrapper.find('[data-testid="api-client-variable-search-0"]').element.value).toBe('Fourth')
+
+    await wrapper.find('[data-testid="api-client-add-variable"]').trigger('click')
+
+    expect(wrapper.emitted('update').at(-1)[0].variables).toEqual([
+      { slot: 4, datapoint_id: 'dp-4', datapoint_name: 'Fourth' },
+      { slot: 5, datapoint_id: '', datapoint_name: '' },
+    ])
+    wrapper.unmount()
+  })
+
+  it('uses the datapoint list endpoint for empty api_client variable searches', async () => {
+    listDatapoints.mockResolvedValueOnce({
+      data: [{ id: 'dp-list', name: 'Listed Object', data_type: 'BOOL' }],
+    })
+
+    const wrapper = await mountApiClientPanel()
+    await wrapper.find('[data-testid="api-client-add-variable"]').trigger('click')
+    await wrapper.find('[data-testid="api-client-variable-search-0"]').setValue('')
+    await flushPromises()
+
+    expect(listDatapoints).toHaveBeenCalledWith(0, 50)
+    expect(wrapper.text()).toContain('Listed Object')
+    wrapper.unmount()
+  })
+
+  it('clears api_client variable search results when search fails', async () => {
+    searchDatapoints
+      .mockResolvedValueOnce({ data: { items: [{ id: 'dp-ok', name: 'Found', data_type: 'FLOAT' }] } })
+      .mockRejectedValueOnce(new Error('search failed'))
+
+    const wrapper = await mountApiClientPanel()
+    await wrapper.find('[data-testid="api-client-add-variable"]').trigger('click')
+    await wrapper.find('[data-testid="api-client-variable-search-0"]').setValue('Found')
+    await flushPromises()
+    expect(wrapper.find('[data-testid="api-client-variable-result-0"]').exists()).toBe(true)
+
+    await wrapper.find('[data-testid="api-client-variable-search-0"]').setValue('Broken')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="api-client-variable-result-0"]').exists()).toBe(false)
     wrapper.unmount()
   })
 })
