@@ -76,6 +76,20 @@ describe('NodePalette — expanded', () => {
     expect(wrapper.html()).toContain('display: none')
   })
 
+  it('falls back to no collapsed categories when localStorage value is malformed JSON', () => {
+    mockStorage({ logic_palette_collapsed_cats: 'not-json{{{' })
+    const wrapper = mountPalette()
+    expect(wrapper.findAll('.cursor-grab')).toHaveLength(3)
+    expect(wrapper.html()).not.toContain('display: none')
+  })
+
+  it('falls back to no collapsed categories when localStorage value is non-array JSON', () => {
+    mockStorage({ logic_palette_collapsed_cats: '"logic"' })
+    const wrapper = mountPalette()
+    expect(wrapper.findAll('.cursor-grab')).toHaveLength(3)
+    expect(wrapper.html()).not.toContain('display: none')
+  })
+
   it('emits drag-start and sets dataTransfer on dragstart', () => {
     const wrapper = mountPalette()
     const block = wrapper.findAll('.cursor-grab')[0]

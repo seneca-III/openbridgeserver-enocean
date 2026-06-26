@@ -89,8 +89,12 @@ const categories = computed(() =>
 )
 
 const CATS_KEY = 'logic_palette_collapsed_cats'
-const savedCats = JSON.parse(localStorage.getItem(CATS_KEY) ?? '[]')
-const collapsedCategories = ref(new Set(savedCats))
+let _savedCats = []
+try {
+  const _parsed = JSON.parse(localStorage.getItem(CATS_KEY) ?? '[]')
+  if (Array.isArray(_parsed)) _savedCats = _parsed
+} catch { /* ignore malformed storage */ }
+const collapsedCategories = ref(new Set(_savedCats))
 
 function toggleCategory(id) {
   const next = new Set(collapsedCategories.value)
