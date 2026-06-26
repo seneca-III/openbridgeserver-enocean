@@ -376,6 +376,20 @@ def test_binding_disable_tolerates_broken_config_json(tmp_path: Path):
     assert enabled == 0
 
 
+def test_bindings_list_tolerates_broken_config_json(tmp_path: Path):
+    db_path = tmp_path / "obs.db"
+    ids = _make_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE adapter_bindings SET config=? WHERE id=?", ("{broken", ids["binding_id"]))
+    conn.commit()
+    conn.close()
+
+    bindings = list_bindings(db_path)
+
+    assert bindings[0]["id"] == ids["binding_id"]
+    assert bindings[0]["config"] == {"available": False, "reason": "invalid_json"}
+
+
 def test_missing_binding_raises_user_facing_error(tmp_path: Path):
     db_path = tmp_path / "obs.db"
     _make_db(db_path)
@@ -520,3 +534,15 @@ def test_main_returns_error_code_for_user_errors(tmp_path: Path, capsys: pytest.
     captured = capsys.readouterr()
     assert code == 2
     assert "Keine OBS-Konfigurationsdatenbank" in captured.err
+
+
+def test_main_returns_error_code_for_unreadable_sqlite_database(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    db_path = tmp_path / "obs.db"
+    db_path.write_bytes(b"not a sqlite database")
+
+    code = admin_main(["--db", str(db_path), "adapters", "list"])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "Fehler: Datenbank konnte nicht gelesen werden" in captured.err
+    assert "Traceback" not in captured.err

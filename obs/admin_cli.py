@@ -378,7 +378,7 @@ def list_bindings(db_path: Path, adapter: str | None = None) -> list[dict[str, A
                 "adapter_type": row["adapter_type"],
                 "adapter_instance_id": row["adapter_instance_id"],
                 "direction": row["direction"],
-                "config": _json_dict(row["config"], context=f"adapter_bindings.config ({row['id']})"),
+                "config": _config_or_placeholder(row["config"]),
                 "enabled": bool(row["enabled"]),
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
@@ -733,6 +733,9 @@ def main(argv: list[str] | None = None) -> int:
         payload, code = run(args)
     except AdminCliError as exc:
         print(f"Fehler: {exc}", file=sys.stderr)
+        return 2
+    except sqlite3.Error as exc:
+        print(f"Fehler: Datenbank konnte nicht gelesen werden: {exc}", file=sys.stderr)
         return 2
     _print(payload, json_output=args.json)
     return code
