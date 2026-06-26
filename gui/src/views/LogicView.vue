@@ -61,7 +61,12 @@
     <!-- Main area -->
     <div class="flex flex-1 overflow-hidden">
       <!-- Node Palette -->
-      <NodePalette v-if="auth.isAdmin" :node-types="store.nodeTypes" />
+      <NodePalette
+        v-if="auth.isAdmin"
+        :node-types="store.nodeTypes"
+        :collapsed="paletteCollapsed"
+        @toggle="paletteCollapsed = !paletteCollapsed"
+      />
 
       <!-- Canvas -->
       <div class="flex-1 relative" ref="canvasWrapper"
@@ -266,6 +271,9 @@ watch(() => activeGraph.value?.enabled, (enabled) => {
     },
   }))
 })
+const paletteCollapsed = ref(localStorage.getItem('logic_palette_collapsed') === '1')
+watch(paletteCollapsed, v => localStorage.setItem('logic_palette_collapsed', v ? '1' : '0'))
+
 const saving        = ref(false)
 const statusMsg     = ref(null)
 const canvasWrapper = ref(null)

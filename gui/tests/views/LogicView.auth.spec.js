@@ -574,6 +574,28 @@ describe('LogicView operation error handling', () => {
   })
 })
 
+describe('LogicView palette collapse', () => {
+  it('initialises paletteCollapsed from localStorage and persists changes', async () => {
+    const store = { logic_palette_collapsed: '1' }
+    const storage = {
+      getItem: vi.fn(k => store[k] ?? null),
+      setItem: vi.fn((k, v) => { store[k] = v }),
+      removeItem: vi.fn(),
+      clear: vi.fn(),
+    }
+    Object.defineProperty(window,     'localStorage', { value: storage, configurable: true })
+    Object.defineProperty(globalThis, 'localStorage', { value: storage, configurable: true })
+
+    const { wrapper } = await mountLogicView({ isAdmin: true })
+
+    expect(wrapper.vm.paletteCollapsed).toBe(true)
+
+    wrapper.vm.paletteCollapsed = false
+    await flushPromises()
+    expect(storage.setItem).toHaveBeenCalledWith('logic_palette_collapsed', '0')
+  })
+})
+
 describe('LogicView import edge cases', () => {
   it('opens rename dialog when imported graph name already exists', async () => {
     const graph = makeGraph('graph-1')
