@@ -187,6 +187,11 @@ def test_global_options_are_accepted_after_subcommands():
     assert args.db == "/tmp/obs.db"
 
 
+def test_global_option_normalizer_handles_db_edge_cases():
+    assert _normalize_global_options(["db", "info", "--db"]) == ["db", "info", "--db"]
+    assert _normalize_global_options(["db", "info", "--db=/tmp/obs.db"]) == ["--db=/tmp/obs.db", "db", "info"]
+
+
 def test_resolve_database_path_from_yaml_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db_path = tmp_path / "from-config.db"
     db_path.write_bytes(b"")
@@ -320,6 +325,19 @@ def test_create_backup_rejects_database_as_output(tmp_path: Path):
         create_backup(db_path, str(db_path))
 
 
+def test_create_backup_rejects_missing_database(tmp_path: Path):
+    with pytest.raises(AdminCliError, match="Datenbank nicht gefunden"):
+        create_backup(tmp_path / "missing.db")
+
+
+def test_list_helpers_return_empty_when_tables_are_missing(tmp_path: Path):
+    db_path = tmp_path / "empty.db"
+    sqlite3.connect(db_path).close()
+
+    assert list_adapters(db_path) == []
+    assert list_bindings(db_path) == []
+
+
 def test_list_and_show_adapters_include_binding_counts(tmp_path: Path):
     db_path = tmp_path / "obs.db"
     ids = _make_db(db_path)
@@ -363,6 +381,14 @@ def test_show_adapter_rejects_ambiguous_names(tmp_path: Path):
 
     with pytest.raises(AdminCliError, match="nicht eindeutig"):
         show_adapter(db_path, "mqtt.internal.local")
+
+
+def test_show_adapter_reports_missing_adapter(tmp_path: Path):
+    db_path = tmp_path / "obs.db"
+    _make_db(db_path)
+
+    with pytest.raises(AdminCliError, match="Adapter-Instanz nicht gefunden"):
+        show_adapter(db_path, str(uuid.uuid4()))
 
 
 def test_adapter_disable_tolerates_broken_config_json(tmp_path: Path):
@@ -500,6 +526,14 @@ def test_loglevel_set_rejects_unknown_level(tmp_path: Path):
         set_loglevel(db_path, "TRACE", backup=False)
 
 
+def test_loglevel_set_requires_app_settings_table(tmp_path: Path):
+    db_path = tmp_path / "empty.db"
+    sqlite3.connect(db_path).close()
+
+    with pytest.raises(AdminCliError, match="app_settings"):
+        set_loglevel(db_path, "INFO", backup=False)
+
+
 def test_support_package_sanitizes_adapter_secret_fields(tmp_path: Path):
     db_path = tmp_path / "obs.db"
     ids = _make_db(db_path)
@@ -551,6 +585,20 @@ def test_config_validate_reports_invalid_json(tmp_path: Path):
 
     assert result["ok"] is False
     assert result["errors"][0]["table"] == "adapter_instances"
+
+
+def test_config_validate_reports_non_object_json(tmp_path: Path):
+    db_path = tmp_path / "obs.db"
+    ids = _make_db(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE adapter_instances SET config=? WHERE id=?", ("[]", ids["instance_id"]))
+    conn.commit()
+    conn.close()
+
+    result = validate_config(db_path)
+
+    assert result["ok"] is False
+    assert "erwartet wurde ein Objekt" in result["errors"][0]["error"]
 
 
 def test_config_validate_reports_invalid_value_map_json(tmp_path: Path):
@@ -611,6 +659,33 @@ def test_main_dispatches_support_package_create(tmp_path: Path, capsys: pytest.C
     assert "output:" in capsys.readouterr().out
 
 
+def test_main_dispatches_offline_admin_commands(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    db_path = tmp_path / "obs.db"
+    ids = _make_db(db_path)
+    backup_dir = tmp_path / "backups"
+
+    commands = [
+        ["--db", str(db_path), "status"],
+        ["--db", str(db_path), "db", "info"],
+        ["--db", str(db_path), "db", "backup", "--output", f"{backup_dir}/"],
+        ["--db", str(db_path), "adapters", "show", ids["instance_id"]],
+        ["--db", str(db_path), "adapters", "disable", ids["instance_id"], "--no-backup"],
+        ["--db", str(db_path), "adapters", "enable", ids["instance_id"], "--no-backup"],
+        ["--db", str(db_path), "bindings", "list", "--adapter", ids["instance_id"]],
+        ["--db", str(db_path), "bindings", "disable", ids["binding_id"], "--no-backup"],
+        ["--db", str(db_path), "bindings", "enable", ids["binding_id"], "--no-backup"],
+        ["--db", str(db_path), "loglevel", "get"],
+        ["--db", str(db_path), "loglevel", "set", "WARNING", "--no-backup"],
+        ["--db", str(db_path), "config", "validate"],
+    ]
+
+    for command in commands:
+        assert admin_main(command) == 0
+        capsys.readouterr()
+
+    assert any(backup_dir.glob("obs-*.sqlite"))
+
+
 def test_main_support_package_create_accepts_output_directory(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     db_path = tmp_path / "obs.db"
     _make_db(db_path)
@@ -618,6 +693,19 @@ def test_main_support_package_create_accepts_output_directory(tmp_path: Path, ca
     output_dir.mkdir()
 
     code = admin_main(["--db", str(db_path), "support-package", "create", "--output", str(output_dir)])
+
+    files = list(output_dir.glob("obs-support-*.json"))
+    assert code == 0
+    assert len(files) == 1
+    assert f"output: {files[0]}" in capsys.readouterr().out
+
+
+def test_main_support_package_create_accepts_new_output_directory(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
+    db_path = tmp_path / "obs.db"
+    _make_db(db_path)
+    output_dir = tmp_path / "new-support"
+
+    code = admin_main(["--db", str(db_path), "support-package", "create", "--output", f"{output_dir}/"])
 
     files = list(output_dir.glob("obs-support-*.json"))
     assert code == 0
