@@ -1321,6 +1321,8 @@
     "negatePort": "{id} negieren",
     "palette": {
       "title": "Blöcke",
+      "collapse": "Blockpalette einklappen",
+      "expand": "Blockpalette ausklappen",
       "categories": {
         "logic": "Logik",
         "datapoint": "Objekte",

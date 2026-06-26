@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set template metadata
         id: meta
@@ -51,9 +51,11 @@ jobs:
           fi
           TEMPLATE_FILE="${{ env.TEMPLATE_NAME }}-lxc_${VERSION}_${{ matrix.arch }}.tar.zst"
           APP_BUNDLE_FILE="${{ env.TEMPLATE_NAME }}-app-bundle_${VERSION}.tar.gz"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "template_file=$TEMPLATE_FILE" >> "$GITHUB_OUTPUT"
-          echo "app_bundle_file=$APP_BUNDLE_FILE" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$VERSION"
+            echo "template_file=$TEMPLATE_FILE"
+            echo "app_bundle_file=$APP_BUNDLE_FILE"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Install debootstrap and tools
         run: |
@@ -185,38 +187,60 @@ jobs:
           echo "Installing $TARGET ..."
 
           ASSET_INFO=$(echo "$ALL_RELEASES" | python3 -c "
-          import sys, json
+          import sys, json, re
           target = '${TARGET}'
           releases = json.load(sys.stdin)
           r = next((r for r in releases if r['tag_name'] == target), None)
           if r:
               bundle = next((a for a in r['assets'] if 'app-bundle' in a['name'] and a['name'].endswith('.tar.gz')), None)
-              checksum = next((a for a in r['assets'] if 'app-bundle' in a['name'] and a['name'].endswith('.tar.gz.sha512')), None)
-              if bundle and checksum:
+              if bundle:
                   print(bundle['browser_download_url'])
-                  print(checksum['browser_download_url'])
+              else:
+                  print('')
+              # Prefer SHA-256 embedded in release notes body (new format).
+              # Fall back to the legacy .sha512 release asset for releases
+              # published before this migration (enables rollback/downgrade).
+              body = r.get('body') or ''
+              m = re.search(r'app-bundle[^\n]*\n\x60\x60\x60\s*\n([0-9a-f]{64})', body)
+              if m:
+                  print('sha256:' + m.group(1))
+              else:
+                  sha512 = next((a for a in r['assets'] if 'app-bundle' in a['name'] and a['name'].endswith('.tar.gz.sha512')), None)
+                  print('sha512url:' + sha512['browser_download_url'] if sha512 else '')
           ")
 
           BUNDLE_URL=$(echo "$ASSET_INFO" | sed -n '1p')
-          CHECKSUM_URL=$(echo "$ASSET_INFO" | sed -n '2p')
+          CHECKSUM_LINE=$(echo "$ASSET_INFO" | sed -n '2p')
 
-          if [[ -z "$BUNDLE_URL" ]] || [[ -z "$CHECKSUM_URL" ]]; then
-              echo "Error: missing app-bundle or checksum asset for $TARGET" >&2
+          if [[ -z "$BUNDLE_URL" ]]; then
+              echo "Error: missing app-bundle asset for $TARGET" >&2
               exit 1
           fi
 
           BUNDLE_FILENAME=$(basename "$BUNDLE_URL")
-          CHECKSUM_FILENAME=$(basename "$CHECKSUM_URL")
 
           TMP=$(mktemp -d)
           trap "rm -rf $TMP" EXIT
 
           echo "Downloading $BUNDLE_URL ..."
           curl -fL "$BUNDLE_URL" -o "$TMP/$BUNDLE_FILENAME"
-          echo "Downloading $CHECKSUM_URL ..."
-          curl -fL "$CHECKSUM_URL" -o "$TMP/$CHECKSUM_FILENAME"
 
-          (cd "$TMP" && sha512sum -c "$CHECKSUM_FILENAME")
+          if [[ "$CHECKSUM_LINE" == sha256:* ]]; then
+              EXPECTED_SHA256="${CHECKSUM_LINE#sha256:}"
+              echo "Verifying integrity (SHA-256) ..."
+              echo "${EXPECTED_SHA256}  ${BUNDLE_FILENAME}" | (cd "$TMP" && sha256sum -c -)
+          elif [[ "$CHECKSUM_LINE" == sha512url:* ]]; then
+              CHECKSUM_URL="${CHECKSUM_LINE#sha512url:}"
+              CHECKSUM_FILENAME=$(basename "$CHECKSUM_URL")
+              echo "Downloading checksum (legacy SHA-512) ..."
+              curl -fL "$CHECKSUM_URL" -o "$TMP/$CHECKSUM_FILENAME"
+              echo "Verifying integrity (SHA-512) ..."
+              (cd "$TMP" && sha512sum -c "$CHECKSUM_FILENAME")
+          else
+              echo "Error: no integrity checksum available for $TARGET." >&2
+              echo "Integrity check is required; aborting." >&2
+              exit 1
+          fi
 
           systemctl stop "$SERVICE"
 
@@ -251,13 +275,18 @@ jobs:
           tar -czf "${{ runner.temp }}/${{ steps.meta.outputs.app_bundle_file }}" \
             obs/ gui_dist/ frontend_dist/ requirements.txt obs-update
           cd "${{ runner.temp }}"
+          sha256sum "${{ steps.meta.outputs.app_bundle_file }}" \
+            > "${{ steps.meta.outputs.app_bundle_file }}.sha256"
+          # Backward-compat: obs-update versions prior to this release verify
+          # via a .sha512 release asset. Publish it so existing LXC installs
+          # can bootstrap the self-update once before switching to SHA-256.
           sha512sum "${{ steps.meta.outputs.app_bundle_file }}" \
             > "${{ steps.meta.outputs.app_bundle_file }}.sha512"
 
       # ── Base system ───────────────────────────────────────────────────────────
       - name: Cache base system
         id: cache-base
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: base-system-cache.tar.zst
           key: base-system-ubuntu-resolute-${{ matrix.arch }}-v1
@@ -340,7 +369,7 @@ jobs:
 
       # ── APT cache for app-specific packages ───────────────────────────────────
       - name: Cache APT packages
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: /tmp/apt-cache
           key: apt-obs-${{ matrix.arch }}-${{ hashFiles('requirements.txt') }}
@@ -362,7 +391,7 @@ jobs:
           if ! mountpoint -q "$ROOTFS/proc"; then
             sudo mount -t proc proc "$ROOTFS/proc"
           fi
-          cleanup() { mountpoint -q "$ROOTFS/proc" && sudo umount "$ROOTFS/proc" || true; }
+          cleanup() { if mountpoint -q "$ROOTFS/proc"; then sudo umount "$ROOTFS/proc" || true; fi; }
           trap cleanup EXIT
 
           # Copy application source and built assets into rootfs
@@ -525,8 +554,8 @@ jobs:
           sudo tar --numeric-owner --acls --xattrs \
             -cf - . | zstd -T0 -9 -o "${{ runner.temp }}/${{ steps.meta.outputs.template_file }}"
           cd "${{ runner.temp }}"
-          sha512sum "${{ steps.meta.outputs.template_file }}" \
-            > "${{ steps.meta.outputs.template_file }}.sha512"
+          sha256sum "${{ steps.meta.outputs.template_file }}" \
+            > "${{ steps.meta.outputs.template_file }}.sha256"
 
       - name: Upload LXC template artifact
         uses: actions/upload-artifact@v7
@@ -534,7 +563,7 @@ jobs:
           name: lxc-${{ matrix.arch }}
           path: |
             ${{ runner.temp }}/${{ steps.meta.outputs.template_file }}
-            ${{ runner.temp }}/${{ steps.meta.outputs.template_file }}.sha512
+            ${{ runner.temp }}/${{ steps.meta.outputs.template_file }}.sha256
 
       - name: Upload app bundle artifact
         if: matrix.arch == 'amd64'
@@ -543,6 +572,7 @@ jobs:
           name: app-bundle
           path: |
             ${{ runner.temp }}/${{ steps.meta.outputs.app_bundle_file }}
+            ${{ runner.temp }}/${{ steps.meta.outputs.app_bundle_file }}.sha256
             ${{ runner.temp }}/${{ steps.meta.outputs.app_bundle_file }}.sha512
 
   release:
@@ -569,8 +599,8 @@ jobs:
             echo "Invalid tag format: $RELEASE_TAG" >&2
             exit 1
           fi
-          find artifacts/ -type f \( -name "*.tar.zst" -o -name "*.tar.gz" -o -name "*.sha512" \) \
-            | xargs gh release upload "$RELEASE_TAG" \
+          find artifacts/ -type f \( -name "*.tar.zst" -o -name "*.tar.gz" -o -name "*.sha512" \) -print0 \
+            | xargs -0 gh release upload "$RELEASE_TAG" \
               --repo "$RELEASE_REPO" \
               --clobber
 
@@ -589,7 +619,7 @@ jobs:
             > /tmp/release_body.txt
 
           python3 <<'PYEOF' > /tmp/new_body.txt
-          import glob, os
+          import glob, os, re
 
           def read(path):
               with open(path) as f:
@@ -597,36 +627,30 @@ jobs:
 
           body = read('/tmp/release_body.txt')
 
-          lxc_entries = []
-          bundle_checksum = None
+          entries = []
 
-          for f in sorted(glob.glob('artifacts/**/*.sha512', recursive=True)):
+          for f in sorted(glob.glob('artifacts/**/*.sha256', recursive=True)):
               content = read(f).split()[0]
-              name = os.path.basename(f).removesuffix('.sha512')
-              if 'app-bundle' in name:
-                  bundle_checksum = content
-              elif name.endswith('.tar.zst'):
-                  lxc_entries.append((name, content))
+              name = os.path.basename(f).removesuffix('.sha256')
+              entries.append((name, content))
+
+          entries.sort(key=lambda x: x[0])
 
           marker = "<!-- LXC_INSERT -->"
 
-          lxc_section = "**LXC Templates** (`.tar.zst` — Proxmox CT template):\n"
-          for name, cs in lxc_entries:
-              lxc_section += f"\n*{name}*:\n```\n{cs}\n```\n"
-
-          bundle_section = ""
-          if bundle_checksum:
-              bundle_section = (
-                  "\n**App Bundle** (`.tar.gz` — for in-place updates via `obs-update`):\n"
-                  f"```\n{bundle_checksum}\n```\n\n"
-              )
-
-          section = (
-              "### Checksums\n\n"
-              + lxc_section
-              + bundle_section
-              + marker
+          # Strip any previously generated block so the step is idempotent on re-runs
+          body = re.sub(
+              r'### Checksums \(SHA-256\)\n.*?' + re.escape(marker),
+              marker,
+              body,
+              flags=re.DOTALL,
           )
+
+          section = "### Checksums (SHA-256)\n\n"
+          for name, cs in entries:
+              section += f"*{name}*:\n```\n{cs}\n```\n\n"
+          section += marker
+
           print(body.replace(marker, section), end='')
           PYEOF
 

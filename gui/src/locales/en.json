@@ -1321,6 +1321,8 @@
     "negatePort": "Negate {id}",
     "palette": {
       "title": "Blocks",
+      "collapse": "Collapse block palette",
+      "expand": "Expand block palette",
       "categories": {
         "logic": "Logic",
         "datapoint": "Objects",

@@ -69,15 +69,27 @@ Das LXC-Template enthält ein vollständiges Ubuntu 26.04-System mit **open brid
 
 **Schritt 1 — Template herunterladen**
 
-1. Auf der [Release-Seite](../../releases/latest) die URL der `.tar.zst`-Datei sowie den SHA512-Hash aus dem Abschnitt **LXC Template** kopieren.
+1. Auf der [Release-Seite](../../releases/latest) die Assets aufklappen und via rechter Maustaste die URL der `.tar.zst`-Datei der gewünschten Architektur kopieren:
+
+   ![ProxmoxDownloadFromURL](docs/Release-Assets.png)
+
 2. In der Proxmox-Weboberfläche zu **Datacenter → Storage → local → CT Templates** navigieren.
 3. **Download from URL** klicken.
 4. Die kopierte URL einfügen und auf **Query URL** klicken.
-5. Als Hash-Algorithmus **SHA512** auswählen.
-6. Den kopierten Hash einfügen.
-7. Auf **Download** klicken.
+5. Wenn nicht bereits aktiviert, im Popup unten rechts **Advanced** aktivieren.
+6. Als Hash-Algorithmus **SHA256** auswählen.
+7. Auf der [Release-Seite](../../releases/latest) im Abschnitt **Checksums** via Copy-Button die Checksumme des gewünschten Templates kopieren:
 
-![ProxmoxDownloadFromURL](docs/ProxmoxDownloadFromURL.png)
+   ![ProxmoxDownloadFromURL](docs/Release-Asset-Checksums.png)
+
+   Achtung: Wenn die Checksummen direkt aus der Spalte neben den Assets kopiert wurden, muss der Prefix `SHA256:` entfernt werden, da Proxmox diesen nicht erwartet!
+8. Zurück auf der Proxmox-Weboberfläche den kopierten Hash unter **Checksum** einfügen.
+9. Das sollte jetzt beispielsweise so aussehen:
+
+   ![ProxmoxDownloadFromURL](docs/ProxmoxDownloadFromURL.png)
+
+10. Auf **Download** klicken.
+
 
 **Schritt 2 — Container erstellen**
 
@@ -285,7 +297,7 @@ Optional: eine Tabelle, die Rohwerte auf andere Werte abbildet — nützlich z. 
 { "value_map": { "0": "Aus", "1": "Ein", "2": "Standby" } }
 ```
 
-Der Schlüssel ist immer ein String (der Rohwert wird intern umgewandelt). Gibt es keinen passenden Eintrag, wird der Originalwert unverändert weitergegeben. `value_map` wird nach `value_formula` angewendet.
+Der Schlüssel ist immer ein String (der Rohwert wird intern umgewandelt). Die Zuordnung prüft zuerst den exakten Schlüssel und danach ohne Beachtung der Gross-/Kleinschreibung, sodass `OFF` auch einen Eintrag wie `"off"` trifft. Gibt es keinen passenden Eintrag, wird der Originalwert unverändert weitergegeben. `value_map` wird nach `value_formula` angewendet.
 
 **Sendefilter** (nur für DEST/BOTH, werden der Reihe nach geprüft):
 
@@ -429,7 +441,8 @@ Der Parameter `q` durchsucht sowohl den Namen als auch die ID des Datenpunkts.
 - Pagination über `pagination.limit` + `pagination.offset`, Sortierung über `sort.field` (`id|ts`) und `sort.order` (`asc|desc`).
 - Das versionierte Metadatenmodell ist dokumentiert in `docs/ringbuffer-metadata-model-v1.md` (`metadata_version: 1`).
 
-`POST /api/v1/ringbuffer/export/csv` nutzt denselben Request-Body wie `/query`, exportiert aber immer die vollständige gefilterte Ergebnismenge (Pagination der UI wird ignoriert).  
+`POST /api/v1/ringbuffer/export/csv` nutzt denselben Request-Body wie `/query`, exportiert aber immer die vollständige gefilterte Ergebnismenge (Pagination der UI wird ignoriert).
+
 CSV-Spalten: `id`, `ts`, `datapoint_id`, `name`, `topic`, `old_value_json`, `new_value_json`, `source_adapter`, `quality`, `metadata_version`, `metadata_json`.
 
 ---
@@ -1498,7 +1511,7 @@ Das **Grundriss-Widget** ermöglicht es, einen Gebäudegrundriss oder ein Anlage
 
 Im Konfigurations-Panel des Widgets kann ein Bild hochgeladen werden (SVG, PNG oder JPG). Das Bild wird als Base64-Data-URL direkt im Konfig-JSON gespeichert — kein separater Upload-Endpunkt nötig. Bei Dateien über 2 MB erscheint ein Hinweis; für Grundrisse wird **SVG empfohlen**, da es verlustfrei skaliert.
 
-Die **Rotation** des Bildes lässt sich in 90°-Schritten einstellen (0° / 90° / 180° / 270°), um Landscape-Grafiken direkt im Portrait-Modus verwenden zu können. 
+Die **Rotation** des Bildes lässt sich in 90°-Schritten einstellen (0° / 90° / 180° / 270°), um Landscape-Grafiken direkt im Portrait-Modus verwenden zu können.
 
 #### Bereiche (Polygone) zeichnen
 

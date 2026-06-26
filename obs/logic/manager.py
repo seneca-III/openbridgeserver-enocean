@@ -54,6 +54,7 @@ _THROTTLE_UNITS: dict[str, float] = {
     "min": 60_000.0,
     "h": 3_600_000.0,
 }
+_MAX_LOGIC_CASCADE_DEPTH = 10
 
 _ICAL_MAX_BYTES = 1_048_576
 _ICAL_MAX_REDIRECTS = 5
@@ -760,6 +761,7 @@ class LogicManager:
     async def _on_value_event(self, event: Any) -> None:
         dp_id = str(event.datapoint_id)
         now = datetime.now(UTC)
+        logic_depth = int(getattr(event, "logic_depth", 0) or 0)
 
         for graph_id in list(self._graphs):
             entry = self._graphs.get(graph_id)
@@ -770,6 +772,15 @@ class LogicManager:
                 continue
             trigger_nodes = [n for n in flow.nodes if n.type == "datapoint_read" and n.data.get("datapoint_id") == dp_id]
             if not trigger_nodes:
+                continue
+            if logic_depth >= _MAX_LOGIC_CASCADE_DEPTH:
+                logger.warning(
+                    "Logic cascade depth limit reached: suppressing graph=%s (%s) for dp=%s depth=%d",
+                    graph_id[:8],
+                    name,
+                    dp_id,
+                    logic_depth,
+                )
                 continue
 
             graph_state = self._node_state.setdefault(graph_id, {})
@@ -826,7 +837,7 @@ class LogicManager:
 
             if not overrides:
                 continue
-            await self._execute_graph(graph_id, name, flow, overrides)
+            await self._execute_graph(graph_id, name, flow, overrides, logic_depth=logic_depth)
 
     async def _on_datapoint_renamed(self, event: Any) -> None:
         """Update datapoint_name in all logic nodes that reference the renamed DataPoint."""
@@ -887,6 +898,7 @@ class LogicManager:
         name: str,
         flow: FlowData,
         overrides: dict[str, dict[str, Any]],
+        logic_depth: int = 0,
     ) -> dict[str, Any]:
         execute_now = datetime.now(UTC)
         graph_state = self._node_state.setdefault(graph_id, {})
@@ -1608,6 +1620,7 @@ class LogicManager:
                     value=write_val,
                     quality="good",
                     source_adapter="logic",
+                    logic_depth=logic_depth + 1,
                 )
                 await self._event_bus.publish(event)
                 logger.debug("Graph %s: wrote dp %s = %s", graph_id, dp_id_str, write_val)

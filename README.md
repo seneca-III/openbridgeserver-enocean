@@ -69,15 +69,26 @@ The LXC template contains a complete Ubuntu 26.04 system with **open bridge serv
 
 **Step 1 — Download the template**
 
-1. On the [releases page](../../releases/latest), copy the URL of the `.tar.zst` file and the SHA512 hash from the **LXC Template** section.
+1. On the [releases page](../../releases/latest), expand the assets and right-click to copy the URL of the `.tar.zst` file for your architecture:
+
+   ![ProxmoxDownloadFromURL](docs/Release-Assets.png)
+
 2. In the Proxmox web interface, navigate to **Datacenter → Storage → local → CT Templates**.
 3. Click **Download from URL**.
 4. Paste the copied URL and click **Query URL**.
-5. Select **SHA512** as the hash algorithm.
-6. Paste the copied hash.
-7. Click **Download**.
+5. If not already enabled, activate **Advanced** in the bottom right of the popup.
+6. Select **SHA256** as the hash algorithm.
+7. On the [releases page](../../releases/latest), copy the checksum of the desired template from the **Checksums** section using the copy button:
 
-![ProxmoxDownloadFromURL](docs/ProxmoxDownloadFromURL.png)
+   ![ProxmoxDownloadFromURL](docs/Release-Asset-Checksums.png)
+
+   Note: If you copy the checksum directly from the column next to the asset, remove the `SHA256:` prefix, as Proxmox does not expect it!
+8. Back in the Proxmox web interface, paste the copied hash into the **Checksum** field.
+9. It should now look like this, for example:
+
+   ![ProxmoxDownloadFromURL](docs/ProxmoxDownloadFromURL.png)
+
+10. Click **Download**.
 
 **Step 2 — Create the container**
 
@@ -285,7 +296,7 @@ Optional: a table that maps raw values to other values — useful for enumeratio
 { "value_map": { "0": "Off", "1": "On", "2": "Standby" } }
 ```
 
-The key is always a string (the raw value is converted internally). If no matching entry exists, the original value is passed through unchanged. `value_map` is applied after `value_formula`.
+The key is always a string (the raw value is converted internally). Matching first tries the exact key and then a case-insensitive key, so `OFF` matches a map entry like `"off"`. If no matching entry exists, the original value is passed through unchanged. `value_map` is applied after `value_formula`.
 
 **Send filters** (DEST/BOTH only, checked in order):
 
@@ -429,7 +440,8 @@ The `q` parameter searches both the name and the ID of the data point.
 - Pagination via `pagination.limit` + `pagination.offset`, sorting via `sort.field` (`id|ts`) and `sort.order` (`asc|desc`).
 - The versioned metadata model is documented in `docs/ringbuffer-metadata-model-v1.md` (`metadata_version: 1`).
 
-`POST /api/v1/ringbuffer/export/csv` uses the same request body as `/query`, but always exports the complete filtered result set (UI pagination is ignored).  
+`POST /api/v1/ringbuffer/export/csv` uses the same request body as `/query`, but always exports the complete filtered result set (UI pagination is ignored).
+
 CSV columns: `id`, `ts`, `datapoint_id`, `name`, `topic`, `old_value_json`, `new_value_json`, `source_adapter`, `quality`, `metadata_version`, `metadata_json`.
 
 ---
