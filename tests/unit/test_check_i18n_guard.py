@@ -197,6 +197,28 @@ def test_bound_translated_template_literal_expression_is_allowed():
     assert violations == []
 
 
+def test_bound_template_literal_interpolation_literals_are_flagged():
+    src = """<template>
+  <button :title="`${enabled ? 'Enabled' : 'Disabled'}`" />
+</template>
+"""
+
+    violations = gate.scan_vue("frontend/src/components/ToggleButton.vue", src, EmptyAllowlist())
+
+    assert [v.snippet for v in violations] == ["Enabled", "Disabled"]
+
+
+def test_bound_expression_condition_literals_are_allowed_when_output_is_translated():
+    src = """<template>
+  <button :title="status === 'error' ? $t('errors.title') : ''" />
+</template>
+"""
+
+    violations = gate.scan_vue("frontend/src/components/StatusButton.vue", src, EmptyAllowlist())
+
+    assert violations == []
+
+
 def test_bound_expression_literal_piece_is_flagged():
     src = """<template>
   <input :placeholder="'Room ' + index" />
@@ -258,6 +280,37 @@ def test_bound_variable_attribute_is_allowed():
     assert violations == []
 
 
+def test_multiline_bound_literal_attribute_is_flagged():
+    src = """<template>
+  <input
+    :placeholder="
+      'Hardcoded label'
+    "
+  />
+</template>
+"""
+
+    violations = gate.scan_vue("frontend/src/widgets/Info/Config.vue", src, EmptyAllowlist())
+
+    assert len(violations) == 1
+    assert violations[0].kind == "template-bound-attr"
+    assert violations[0].snippet == "Hardcoded label"
+
+
+def test_multiline_tag_comparison_does_not_expose_translated_bound_attr_as_text():
+    src = """<template>
+  <button
+    :class="count > 0 ? 'has-items' : ''"
+    :title="$t('actions.save')"
+  />
+</template>
+"""
+
+    violations = gate.scan_vue("frontend/src/components/ActionButton.vue", src, EmptyAllowlist())
+
+    assert violations == []
+
+
 def test_multiline_bound_attribute_translation_calls_are_allowed():
     src = """<template>
   <button
@@ -297,6 +350,15 @@ def test_empty_string_assignments_do_not_bleed_into_next_literal():
   label: '',
   extra_datapoints: [{ id: 'dp-1', label: '', unit: '', decimals: 1 }],
 }
+"""
+
+    violations = gate.scan_script("frontend/src/widgets/Info/Config.test.ts", src, EmptyAllowlist())
+
+    assert violations == []
+
+
+def test_translated_script_template_literal_is_allowed():
+    src = """toast.success(`${t('common.saved')}`)
 """
 
     violations = gate.scan_script("frontend/src/widgets/Info/Config.test.ts", src, EmptyAllowlist())

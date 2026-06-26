@@ -24,7 +24,8 @@ ATTR_RE = re.compile(
     r"(?<![:\w-])\b(label|title|placeholder|alt|aria-label|helper-text|tooltip|caption|headline|confirm-text|cancel-text|no-data-text|loading-text)\s*=\s*(['\"])(.*?)\2"
 )
 BOUND_ATTR_RE = re.compile(
-    r"(?:^|\s)(?::|v-bind:)(label|title|placeholder|alt|aria-label|helper-text|tooltip|caption|headline|confirm-text|cancel-text|no-data-text|loading-text)\s*=\s*(['\"])(.*?)\2"
+    r"(?:^|\s)(?::|v-bind:)(label|title|placeholder|alt|aria-label|helper-text|tooltip|caption|headline|confirm-text|cancel-text|no-data-text|loading-text)\s*=\s*(['\"])(.*?)\2",
+    re.DOTALL,
 )
 HTML_TAG_RE = re.compile(r"</?[\w:-]+(?:\s+[^<>]*)?/?>")
 TEXT_NODE_RE = re.compile(r">([^<{][^<]*)<")
@@ -132,11 +133,17 @@ def should_flag(candidate: str, allowlist: Allowlist, *, allow_technical_tokens:
         return False
     if text.startswith(("$t(", "t(")):
         return False
+    if not has_letters(strip_translated_template_interpolations(text)):
+        return False
     if allow_technical_tokens and is_technical_token(text):
         return False
     if allowlist.contains(text):
         return False
     return True
+
+
+def strip_translated_template_interpolations(text: str) -> str:
+    return re.sub(r"\$\{\s*(?:\$t|(?<![\w$])t)\s*\([^{}]*\)\s*\}", "", text)
 
 
 def add_violations_from_matches(
@@ -165,9 +172,10 @@ def is_bound_literal_technical(text: str) -> bool:
     return compact.startswith(("http://", "https://", "/", "./", "../", "#"))
 
 
-def iter_template_literal_chunks(expression: str, idx: int) -> tuple[int, list[str]]:
-    chunks: list[str] = []
+def iter_template_literal_chunks(expression: str, idx: int) -> tuple[int, list[tuple[int, str]]]:
+    chunks: list[tuple[int, str]] = []
     current: list[str] = []
+    current_start = idx + 1
     escaped = False
     idx += 1
 
@@ -179,12 +187,13 @@ def iter_template_literal_chunks(expression: str, idx: int) -> tuple[int, list[s
         elif char == "\\":
             escaped = True
         elif char == "`":
-            chunks.append("".join(current))
+            chunks.append((current_start, "".join(current)))
             return idx, chunks
         elif char == "$" and idx + 1 < len(expression) and expression[idx + 1] == "{":
-            chunks.append("".join(current))
+            chunks.append((current_start, "".join(current)))
             current = []
             idx += 2
+            inner_start = idx
             depth = 1
             inner_quote: str | None = None
             inner_escaped = False
@@ -204,12 +213,15 @@ def iter_template_literal_chunks(expression: str, idx: int) -> tuple[int, list[s
                 elif inner == "}":
                     depth -= 1
                 idx += 1
+            inner_expression = expression[inner_start : max(inner_start, idx - 1)]
+            chunks.extend((inner_start + start, literal) for start, literal in iter_string_literals(inner_expression))
+            current_start = idx
             continue
         else:
             current.append(char)
         idx += 1
 
-    chunks.append("".join(current))
+    chunks.append((current_start, "".join(current)))
     return idx, chunks
 
 
@@ -225,8 +237,7 @@ def iter_string_literals(expression: str) -> Iterable[tuple[int, str]]:
         start = idx
         if quote == "`":
             end, chunks = iter_template_literal_chunks(expression, idx)
-            for chunk in chunks:
-                yield start, chunk
+            yield from chunks
             idx = end + 1
             continue
 
@@ -249,6 +260,38 @@ def iter_string_literals(expression: str) -> Iterable[tuple[int, str]]:
         idx += 1
 
 
+def has_top_level_conditional_after(expression: str, idx: int) -> bool:
+    depth = 0
+    quote: str | None = None
+    escaped = False
+
+    while idx < len(expression):
+        char = expression[idx]
+        if escaped:
+            escaped = False
+        elif char == "\\":
+            escaped = True
+        elif quote:
+            if char == quote:
+                quote = None
+        elif char in {"'", '"', "`"}:
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth = max(0, depth - 1)
+        elif char == "?" and depth == 0:
+            return True
+        idx += 1
+
+    return False
+
+
+def is_non_rendered_condition_literal(expression: str, start: int, literal: str) -> bool:
+    literal_end = start + len(literal) + 2
+    return has_top_level_conditional_after(expression, literal_end)
+
+
 def add_violations_from_bound_attrs(
     *,
     path: str,
@@ -264,17 +307,25 @@ def add_violations_from_bound_attrs(
                 continue
             if is_bound_literal_technical(literal):
                 continue
+            if is_non_rendered_condition_literal(expression, start, literal):
+                continue
             if should_flag(literal, allowlist, allow_technical_tokens=False):
                 sink.append(Violation(path=path, line=line, kind="template-bound-attr", snippet=normalize_text(literal)))
 
 
-def iter_visible_template_text(line: str, in_interpolation: bool, in_tag: bool) -> Iterable[str]:
+def iter_visible_template_text(line: str, in_interpolation: bool, in_tag: bool, tag_quote: str | None) -> Iterable[str]:
     idx = 0
     chunk: list[str] = []
+    quote = tag_quote
 
     while idx < len(line):
         if in_tag:
-            if line[idx] == ">":
+            if quote:
+                if line[idx] == quote:
+                    quote = None
+            elif line[idx] in {"'", '"'}:
+                quote = line[idx]
+            elif line[idx] == ">":
                 in_tag = False
             idx += 1
             continue
@@ -300,6 +351,7 @@ def iter_visible_template_text(line: str, in_interpolation: bool, in_tag: bool) 
                 yield "".join(chunk)
                 chunk = []
             in_tag = True
+            quote = None
             idx += 1
             continue
 
@@ -310,8 +362,10 @@ def iter_visible_template_text(line: str, in_interpolation: bool, in_tag: bool) 
         yield "".join(chunk)
 
 
-def raw_translation_text_violation(path: str, line_no: int, line: str, in_interpolation: bool, in_tag: bool) -> Violation | None:
-    for chunk in iter_visible_template_text(line, in_interpolation, in_tag):
+def raw_translation_text_violation(
+    path: str, line_no: int, line: str, in_interpolation: bool, in_tag: bool, tag_quote: str | None
+) -> Violation | None:
+    for chunk in iter_visible_template_text(line, in_interpolation, in_tag, tag_quote):
         text = normalize_text(chunk)
         if RAW_TRANSLATION_TEXT_RE.search(text):
             return Violation(path=path, line=line_no, kind="template-text", snippet=text)
@@ -342,9 +396,21 @@ def strip_template_blocks(content: str, blocks: list[tuple[int, int, int, int, i
     return stripped
 
 
-def update_tag_depth(depth: int, line: str) -> int:
-    cleaned = HTML_TAG_RE.sub("", line)
-    return max(0, depth + cleaned.count("<") - cleaned.count(">"))
+def update_tag_state(in_tag: bool, tag_quote: str | None, line: str) -> tuple[bool, str | None]:
+    quote = tag_quote
+    for char in line:
+        if in_tag:
+            if quote:
+                if char == quote:
+                    quote = None
+            elif char in {"'", '"'}:
+                quote = char
+            elif char == ">":
+                in_tag = False
+        elif char == "<":
+            in_tag = True
+            quote = None
+    return in_tag, quote
 
 
 def scan_vue(path: str, content: str, allowlist: Allowlist) -> list[Violation]:
@@ -353,13 +419,25 @@ def scan_vue(path: str, content: str, allowlist: Allowlist) -> list[Violation]:
     blocks = template_blocks(content)
     for start, end, start_line, _outer_start, _outer_end in blocks:
         tpl = content[start:end]
+        tpl_without_comments = COMMENT_RE.sub("", tpl)
+        for match in BOUND_ATTR_RE.finditer(tpl_without_comments):
+            line = start_line + tpl_without_comments.count("\n", 0, match.start())
+            add_violations_from_bound_attrs(
+                path=path,
+                line=line,
+                matches=[match],
+                allowlist=allowlist,
+                sink=violations,
+            )
+
         interpolation_depth = 0
-        tag_depth = 0
+        in_tag = False
+        tag_quote: str | None = None
         for idx, raw_line in enumerate(tpl.splitlines(), start=start_line):
             line = COMMENT_RE.sub("", raw_line)
             if not line.strip():
                 continue
-            if violation := raw_translation_text_violation(path, idx, line, interpolation_depth > 0, tag_depth > 0):
+            if violation := raw_translation_text_violation(path, idx, line, interpolation_depth > 0, in_tag, tag_quote):
                 violations.append(violation)
             add_violations_from_matches(
                 path=path,
@@ -367,13 +445,6 @@ def scan_vue(path: str, content: str, allowlist: Allowlist) -> list[Violation]:
                 kind="template-attr",
                 matches=ATTR_RE.finditer(line),
                 candidate_group=3,
-                allowlist=allowlist,
-                sink=violations,
-            )
-            add_violations_from_bound_attrs(
-                path=path,
-                line=idx,
-                matches=BOUND_ATTR_RE.finditer(line),
                 allowlist=allowlist,
                 sink=violations,
             )
@@ -387,7 +458,7 @@ def scan_vue(path: str, content: str, allowlist: Allowlist) -> list[Violation]:
                 sink=violations,
             )
             interpolation_depth = max(0, interpolation_depth + line.count("{{") - line.count("}}"))
-            tag_depth = update_tag_depth(tag_depth, line)
+            in_tag, tag_quote = update_tag_state(in_tag, tag_quote, line)
 
     stripped = strip_template_blocks(content, blocks)
     for line_no, raw_line in enumerate(stripped.splitlines(), start=1):
