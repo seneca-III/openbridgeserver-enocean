@@ -39,7 +39,7 @@ printf '%s\\n' "args=$*"
         encoding="utf-8",
     )
 
-    wrapper = Path(__file__).resolve().parents[2] / "obs-admin"
+    wrapper = Path(__file__).resolve().parents[2] / "scripts" / "obs-admin"
     env = {
         "PATH": os.environ["PATH"],
         "OBS_ADMIN_APP_DIR": str(app_dir),

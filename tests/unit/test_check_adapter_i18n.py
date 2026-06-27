@@ -1,4 +1,4 @@
-"""Tests for scripts/check_adapter_i18n.py — the backend adapter i18n hard gate (issue #779)."""
+"""Tests for tools/check_adapter_i18n.py — the backend adapter i18n hard gate (issue #779)."""
 
 from __future__ import annotations
 
