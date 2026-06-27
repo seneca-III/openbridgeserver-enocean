@@ -46,7 +46,7 @@ def test_updater_verifies_checksum_against_downloaded_filenames():
 
 
 def test_release_lxc_workflow_packages_obs_admin():
-    workflow   = _workflow_text()
+    workflow = _workflow_text()
     obs_update = _obs_update_text()
 
     # Bundle creation and initial rootfs install are in the workflow
