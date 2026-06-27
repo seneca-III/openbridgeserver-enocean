@@ -37,7 +37,7 @@ jobs:
         env:
           I18N_DIFF_BASE: ${{ github.event.pull_request.base.sha }}
           I18N_DIFF_HEAD: ${{ github.event.pull_request.head.sha }}
-        run: ./scripts/check-i18n-hardcoded-strings.sh
+        run: ./tools/check-i18n-hardcoded-strings.sh
 
       - name: Run i18n soft gate (push)
         id: i18n_push
@@ -46,7 +46,7 @@ jobs:
         env:
           I18N_DIFF_BASE: ${{ github.event.before }}
           I18N_DIFF_HEAD: ${{ github.sha }}
-        run: ./scripts/check-i18n-hardcoded-strings.sh
+        run: ./tools/check-i18n-hardcoded-strings.sh
 
       - name: Report i18n soft-gate warning (push)
         if: github.event_name == 'push' && steps.i18n_push.outcome == 'failure'

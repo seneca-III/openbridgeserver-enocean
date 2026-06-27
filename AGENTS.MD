@@ -85,7 +85,7 @@ Zusätzlich für i18n-Änderungen (Admin GUI + Visu) gilt ein harter Diff-Gate:
 
 ```bash
 # Diff-basierter i18n Hard-Gate (Hardcoded user-facing strings + locale parity)
-./scripts/check-i18n-hardcoded-strings.sh
+./tools/check-i18n-hardcoded-strings.sh
 ```
 
 Für GUI-Änderungen gilt zusätzlich ein weicher Coverage-Nachzieh-Hinweis:
@@ -355,16 +355,16 @@ When adding a new view, widget config, or significant UI component:
 
 #### Hard-Gate (local + CI)
 
-`./scripts/check-i18n-hardcoded-strings.sh` runs two gates on the PR/push diff; both must pass.
+`./tools/check-i18n-hardcoded-strings.sh` runs two gates on the PR/push diff; both must pass.
 
-**Frontend** (`scripts/check_i18n_guard.py`):
+**Frontend** (`tools/check_i18n_guard.py`):
 
 1. Changed files under `gui/src` and `frontend/src` with extension `.vue`, `.js`, `.ts` are scanned file-wide for hardcoded user-facing strings outside `$t()` / `t()`.
 2. If locale files changed, `de.json` and `en.json` are compared pairwise (`gui/src/locales/` and `frontend/src/locales/`); missing counterpart keys fail the gate.
 
-Allowlisted technical literals are maintained in `scripts/i18n-allowlist.txt`. Keep the list minimal and reviewable.
+Allowlisted technical literals are maintained in `tools/i18n-allowlist.txt`. Keep the list minimal and reviewable.
 
-**Backend adapter strings** (`scripts/check_adapter_i18n.py`, issue #779): changed files under `obs/adapters/**` and `obs/api/v1/adapters.py` are AST-scanned — any `_publish_status(...)` / `TestResult(...)` call (and the thin wrappers around them) whose `detail` is a non-empty **string literal** must also pass a stable `code=` / `detail_code=`, and every referenced code must exist in both `en.json` and `de.json`. Dynamic fallbacks (f-strings, variables, `str(exc)`) are allowed without a code.
+**Backend adapter strings** (`tools/check_adapter_i18n.py`, issue #779): changed files under `obs/adapters/**` and `obs/api/v1/adapters.py` are AST-scanned — any `_publish_status(...)` / `TestResult(...)` call (and the thin wrappers around them) whose `detail` is a non-empty **string literal** must also pass a stable `code=` / `detail_code=`, and every referenced code must exist in both `en.json` and `de.json`. Dynamic fallbacks (f-strings, variables, `str(exc)`) are allowed without a code.
 
 ##### Backend adapter status / schema strings (issue #779)
 

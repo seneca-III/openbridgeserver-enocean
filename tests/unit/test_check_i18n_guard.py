@@ -1,4 +1,4 @@
-"""Tests for scripts/check_i18n_guard.py."""
+"""Tests for tools/check_i18n_guard.py."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-_SCRIPT = REPO_ROOT / "scripts" / "check_i18n_guard.py"
+_SCRIPT = REPO_ROOT / "tools" / "check_i18n_guard.py"
 
 
 def _load_module():

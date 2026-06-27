@@ -1701,7 +1701,7 @@ Versioned hooks live in `.githooks/`. To activate them in a clone, set `core.hoo
 
 On each `git push`, the hook runs:
 
-- `./scripts/check-i18n-hardcoded-strings.sh`
+- `./tools/check-i18n-hardcoded-strings.sh`
 - `python3 -m ruff check .`
 - `python3 -m ruff format . --check`
 - `pytest tests/ -v --cov=obs --cov-report=xml --cov-report=term --junitxml="${TMPDIR:-/tmp}/openbridge-pre-push-junit.xml"`
