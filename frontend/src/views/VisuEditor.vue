@@ -104,7 +104,7 @@ const selectedDef = computed(() =>
 
 function withWidgetDefaults(type: string, raw: unknown): Record<string, unknown> {
   const def = WidgetRegistry.get(type)
-  const base = def?.defaultConfig ?? {}
+  const base = def?.defaultConfig ? structuredClone(def.defaultConfig) as Record<string, unknown> : {}
   const overrides = raw && typeof raw === 'object' && !Array.isArray(raw)
     ? raw as Record<string, unknown>
     : {}
