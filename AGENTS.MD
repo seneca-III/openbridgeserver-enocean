@@ -12,6 +12,17 @@ This file provides guidance to AI coding agents when working with code in this r
 
 **open bridge server** is an open-source multiprotocol building automation server (MIT-licensed replacement for the proprietary Timberwolf Server). It bridges KNX, Modbus RTU/TCP, 1-Wire, MQTT, SNMP, Home Assistant, ioBroker, Anwesenheitssimulation (presence simulation), and Zeitschaltuhr into a unified system with a FastAPI REST/WebSocket API and a Vue-based admin GUI.
 
+## Repository Layout
+
+Two top-level directories have distinct, non-overlapping purposes — keep them that way (see issue #877):
+
+| Directory | Audience | What belongs here |
+|---|---|---|
+| `tools/` | Developers, CI, release pipeline | Dev tooling only — linting, test helpers, LXC builder, worktree helpers, venv resolver, i18n guards, coverage summary, `build-local.sh`. Nothing in `tools/` is installed on a running OBS host. |
+| `scripts/` | Running OBS host | Deployed runtime scripts — every file that gets installed onto a production or LXC host lives here. Currently: `obs-admin` and `obs-update`. |
+
+**Rule of thumb:** if a file is only needed to build, test, or check the project, it goes in `tools/`. If it ends up on the host after installation, it goes in `scripts/`. Never mix the two.
+
 ## Common Commands
 
 ```bash
