@@ -628,6 +628,10 @@ Der Graph kann auch manuell über den **▶ Ausführen**-Button gestartet werden
 | **EXKLUSIV-ODER** | A, B | Aus | Wahr wenn **genau ein** Eingang wahr ist. |
 | **Vergleich** | A, B | Ergebnis | Vergleicht zwei Werte. Auswahl: `>` `<` `=` `>=` `<=` `≠` |
 | **Hysterese** | Wert | Aus | Schaltet ein wenn der Wert über „Schwelle EIN" steigt, und erst wieder aus wenn er unter „Schwelle AUS" fällt. Verhindert schnelles Hin- und Herschalten. |
+| **Entscheidung** | Wert | 2-n boolesche Ausgänge | Prüft mehrere unabhängige Bedingungen gegen einen Eingang. Jeder Ausgang hat eigenen Namen und eigene Bedingung; mehrere Ausgänge können gleichzeitig wahr sein. |
+| **Zuordnung** | Wert | Ergebnis | Prüft geordnete Regeln und gibt das Ergebnis der ersten passenden Regel aus. Ausgangstyp wählbar als Bool, Int, Float oder String; optionaler Sonst-Wert für nicht passende Eingänge. |
+
+Entscheidung und Zuordnung teilen dieselben Bedingungsoperatoren: gleich, ungleich, größer/kleiner als, größer/kleiner oder gleich, Wertebereich, Textvergleich, enthält, beginnt mit, endet mit und regulärer Ausdruck.
 
 #### Datenpunkt
 

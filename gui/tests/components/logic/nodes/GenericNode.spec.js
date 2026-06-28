@@ -71,6 +71,42 @@ describe('GenericNode — handles', () => {
     const targets = w.findAll('.handle').filter(h => h.attributes('data-type') === 'target')
     expect(targets.length).toBe(4)
   })
+
+  it('renders two default source handles for decision', async () => {
+    const w = await mountGN('decision')
+    await flushPromises()
+    const sources = w.findAll('.handle').filter(h => h.attributes('data-type') === 'source')
+    expect(sources.map(h => h.attributes('data-id'))).toEqual(['out_1', 'out_2'])
+  })
+
+  it('renders decision source handles from configured conditions', async () => {
+    const w = await mountGN('decision', {
+      conditions: JSON.stringify([
+        { handle: 'low', name: 'Low' },
+        { handle: 'ok', name: 'OK' },
+        { handle: 'high', name: 'High' },
+      ]),
+    })
+    await flushPromises()
+    const sources = w.findAll('.handle').filter(h => h.attributes('data-type') === 'source')
+    expect(sources.map(h => h.attributes('data-id'))).toEqual(['low', 'ok', 'high'])
+    expect(w.text()).toContain('Low')
+    expect(w.text()).toContain('High')
+  })
+
+  it('renders decision source handles from array-backed conditions', async () => {
+    const w = await mountGN('decision', {
+      conditions: [
+        { handle: 'out_10', name: 'Warm' },
+        { handle: 'out_20', name: 'Cold' },
+      ],
+    })
+    await flushPromises()
+    const sources = w.findAll('.handle').filter(h => h.attributes('data-type') === 'source')
+    expect(sources.map(h => h.attributes('data-id'))).toEqual(['out_10', 'out_20'])
+    expect(w.text()).toContain('Warm')
+    expect(w.text()).toContain('Cold')
+  })
 })
 
 describe('GenericNode — summary', () => {
@@ -96,6 +132,46 @@ describe('GenericNode — summary', () => {
     const w = await mountGN('timer_delay', { delay_s: 5 })
     await flushPromises()
     expect(w.find('.gn-summary').text()).toContain('5')
+  })
+
+  it('shows decision rule count summary', async () => {
+    const w = await mountGN('decision', {
+      conditions: JSON.stringify([
+        { handle: 'a', name: 'A' },
+        { handle: 'b', name: 'B' },
+        { handle: 'c', name: 'C' },
+      ]),
+    })
+    await flushPromises()
+    expect(w.find('.gn-summary').text()).toContain('3 Regeln')
+  })
+
+  it('shows mapping output type and rule count summary', async () => {
+    const w = await mountGN('value_mapping', {
+      output_type: 'int',
+      rules: JSON.stringify([
+        { name: 'A' },
+        { name: 'B' },
+      ]),
+    })
+    await flushPromises()
+    expect(w.find('.gn-summary').text()).toContain('int')
+    expect(w.find('.gn-summary').text()).toContain('2 Regeln')
+  })
+
+  it('counts array-backed decision and mapping rules in summaries', async () => {
+    const decision = await mountGN('decision', {
+      conditions: [{ handle: 'a' }, { handle: 'b' }, { handle: 'c' }],
+    })
+    await flushPromises()
+    expect(decision.find('.gn-summary').text()).toContain('3 Regeln')
+
+    const mapping = await mountGN('value_mapping', {
+      output_type: 'float',
+      rules: [{ result: '1' }, { result: '2' }, { result: '3' }, { result: '4' }],
+    })
+    await flushPromises()
+    expect(mapping.find('.gn-summary').text()).toContain('4 Regeln')
   })
 })
 

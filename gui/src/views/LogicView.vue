@@ -218,7 +218,7 @@ const nodeTypeComponents = {
   const_value: _generic,
   // Logic
   and: _generic, or: _generic, not: _generic, xor: _generic, gate: _generic,
-  compare: _generic, hysteresis: _generic,
+  compare: _generic, hysteresis: _generic, decision: _generic, value_mapping: _generic,
   // Math
   math_formula: _generic, math_map: _generic,
   // Timer

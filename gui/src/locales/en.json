@@ -1251,6 +1251,8 @@
       "gate": "Gate",
       "compare": "Comparison",
       "hysteresis": "Hysteresis",
+      "decision": "Decision",
+      "value_mapping": "Mapping",
       "datapoint_read": "Read Object",
       "datapoint_write": "Write Object",
       "math_formula": "Formula",
@@ -1368,6 +1370,7 @@
     "summary": {
       "inputs": "{n} Inputs",
       "parts": "{n} Parts",
+      "rules": "{n} Rules",
       "hold": "→ hold",
       "filters": "{n} Filters",
       "negateEnable": "¬Enable",
@@ -1551,6 +1554,45 @@
         "staticHint": "Connected inputs override static text. Empty fields produce an empty substring.",
         "inputPlaceholder": "Input {n} …"
       },
+      "rules": {
+        "add": "+ Rule",
+        "remove": "Remove rule",
+        "removeShort": "−",
+        "namePlaceholder": "Name",
+        "operator": "Operator",
+        "compareValue": "Compare value",
+        "valuePlaceholder": "Value",
+        "regexPlaceholder": "RegEx pattern",
+        "minValue": "From",
+        "maxValue": "To",
+        "minPlaceholder": "Minimum",
+        "maxPlaceholder": "Maximum",
+        "caseSensitive": "Case sensitive",
+        "operators": {
+          "eq": "equals",
+          "ne": "not equal",
+          "gt": "greater than",
+          "lt": "less than",
+          "gte": "greater or equal",
+          "lte": "less or equal",
+          "range": "range",
+          "text_eq": "text comparison",
+          "contains": "contains",
+          "starts_with": "starts with",
+          "ends_with": "ends with",
+          "regex": "regular expression"
+        }
+      },
+      "mapping": {
+        "rules": "Rules",
+        "outputType": "Output type",
+        "resultValue": "Return value",
+        "resultPlaceholder": "Result",
+        "hasDefault": "Use default value",
+        "defaultValue": "Default value",
+        "defaultPlaceholder": "Value when no rule matches",
+        "defaultRule": "Rule {n}"
+      },
       "extractor": {
         "receivedData": "Received data",
         "noDataPlaceholder": "No data received yet. Run the graph to load data.",
@@ -1659,6 +1701,16 @@
       },
       "compare": {
         "operator": "Operator"
+      },
+      "decision": {
+        "conditions": "Conditions",
+        "defaultOutput": "Output {n}"
+      },
+      "value_mapping": {
+        "output_type": "Output type",
+        "rules": "Rules",
+        "has_default": "Use default value",
+        "default_value": "Default value"
       },
       "clamp": {
         "min": "Minimum",
@@ -1848,6 +1900,8 @@
       "gate": "Signal gate: passes the input when enable=true, blocks otherwise. Behavior when closed: hold the last value (retain) or output a default value.",
       "compare": "Compares two values (>, <, =, >=, <=, !=)",
       "hysteresis": "Switches ON when threshold is exceeded, OFF only when it falls below",
+      "decision": "Checks one input value against multiple independent conditions. Each output returns TRUE or FALSE independently; multiple outputs can be TRUE at the same time.",
+      "value_mapping": "Checks an ordered rule list and returns the value from the first matching rule. An optional default value is returned when no rule matches.",
       "datapoint_read": "Outputs the current value of a DataPoint. Triggers on value change.",
       "datapoint_write": "Writes a value to a DataPoint",
       "math_formula": "Evaluates an expression. Variables: a (= IN 1), b (= IN 2)",

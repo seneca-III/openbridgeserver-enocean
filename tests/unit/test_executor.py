@@ -13,6 +13,8 @@ Covers:
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from obs.logic.executor import ExecutionError, GraphExecutor
@@ -366,6 +368,315 @@ class TestCompareNode:
         out = exc.execute()
 
         assert out["cmp"]["out"] is False
+
+
+# ===========================================================================
+# decision / value_mapping nodes
+# ===========================================================================
+
+
+class TestDecisionNode:
+    def test_conditions_are_evaluated_independently(self):
+        out = run_single(
+            "decision",
+            {
+                "conditions": [
+                    {"handle": "hot", "operator": "gte", "value": 25},
+                    {"handle": "comfortable", "operator": "range", "min": 20, "max": 26},
+                    {"handle": "cold", "operator": "lt", "value": 18},
+                ],
+            },
+            {"value": 25},
+        )
+
+        assert out == {"hot": True, "comfortable": True, "cold": False}
+
+    def test_text_and_regex_conditions(self):
+        out = run_single(
+            "decision",
+            {
+                "conditions": [
+                    {"handle": "contains", "operator": "contains", "value": "open"},
+                    {"handle": "starts", "operator": "starts_with", "value": "Door"},
+                    {"handle": "regex", "operator": "regex", "value": r"open-\d+"},
+                ],
+            },
+            {"value": "Door open-42"},
+        )
+
+        assert out == {"contains": True, "starts": True, "regex": True}
+
+    def test_default_outputs_exist_without_configuration(self):
+        out = run_single("decision", {}, {"value": "anything"})
+
+        assert out == {"out_1": False, "out_2": False}
+
+    def test_condition_without_compare_value_is_inert(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "empty_default", "operator": "eq"}]},
+            {"value": ""},
+        )
+
+        assert out["empty_default"] is False
+
+    def test_conditions_can_be_loaded_from_json_string(self):
+        out = run_single(
+            "decision",
+            {"conditions": json.dumps([{"handle": "match", "operator": "eq", "value": "on"}])},
+            {"value": "on"},
+        )
+
+        assert out["match"] is True
+
+    def test_equality_condition_can_match_empty_string(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "empty", "operator": "eq", "value": ""}]},
+            {"value": ""},
+        )
+
+        assert out["empty"] is True
+
+    @pytest.mark.parametrize(
+        "input_value, expected_value, expected",
+        [
+            (True, "true", True),
+            (False, "false", True),
+            (True, "false", False),
+            ("false", False, True),
+        ],
+    )
+    def test_equality_condition_normalizes_boolean_literals(self, input_value, expected_value, expected):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "bool_match", "operator": "eq", "value": expected_value}]},
+            {"value": input_value},
+        )
+
+        assert out["bool_match"] is expected
+
+    def test_invalid_rule_json_falls_back_to_default_outputs(self):
+        out = run_single("decision", {"conditions": "not json"}, {"value": "on"})
+
+        assert out == {"out_1": False, "out_2": False}
+
+    def test_non_list_rule_json_falls_back_to_default_outputs(self):
+        out = run_single("decision", {"conditions": json.dumps({"operator": "eq", "value": "on"})}, {"value": "on"})
+
+        assert out == {"out_1": False, "out_2": False}
+
+    def test_non_dict_rule_entries_are_ignored(self):
+        out = run_single(
+            "decision",
+            {"conditions": ["ignored", {"handle": "match", "operator": "eq", "value": "on"}]},
+            {"value": "on"},
+        )
+
+        assert out == {"match": True}
+
+    def test_invalid_regex_condition_returns_false(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "bad_re", "operator": "regex", "value": "["}]},
+            {"value": "abc"},
+        )
+
+        assert out["bad_re"] is False
+
+    def test_case_sensitive_text_condition(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "case", "operator": "contains", "value": "OPEN", "case_sensitive": True}]},
+            {"value": "door open"},
+        )
+
+        assert out["case"] is False
+
+    def test_text_operators_support_case_insensitive_variants(self):
+        out = run_single(
+            "decision",
+            {
+                "conditions": [
+                    {"handle": "text", "operator": "text_eq", "value": "OPEN"},
+                    {"handle": "ends", "operator": "ends_with", "value": "42"},
+                ],
+            },
+            {"value": "open-42"},
+        )
+
+        assert out == {"text": False, "ends": True}
+
+    @pytest.mark.parametrize("operator_key", ["contains", "starts_with", "ends_with"])
+    def test_blank_substring_conditions_do_not_match_everything(self, operator_key):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "blank", "operator": operator_key, "value": ""}]},
+            {"value": "anything"},
+        )
+
+        assert out["blank"] is False
+
+    def test_range_accepts_value_and_value_to_aliases(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "in_range", "operator": "range", "value": 10, "value_to": 20}]},
+            {"value": 15},
+        )
+
+        assert out["in_range"] is True
+
+    def test_range_with_non_numeric_input_returns_false(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "bad_range", "operator": "range", "min": 10, "max": 20}]},
+            {"value": "hot"},
+        )
+
+        assert out["bad_range"] is False
+
+    def test_numeric_compare_with_non_numeric_value_returns_false(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "gt", "operator": "gt", "value": 10}]},
+            {"value": "hot"},
+        )
+
+        assert out["gt"] is False
+
+    def test_none_input_returns_false_for_condition(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "match", "operator": "eq", "value": ""}]},
+            {"value": None},
+        )
+
+        assert out["match"] is False
+
+
+class TestValueMappingNode:
+    def test_first_matching_rule_wins(self):
+        out = run_single(
+            "value_mapping",
+            {
+                "output_type": "string",
+                "rules": [
+                    {"operator": "gte", "value": 20, "result": "warm"},
+                    {"operator": "gte", "value": 10, "result": "mild"},
+                ],
+                "has_default": True,
+                "default_value": "cold",
+            },
+            {"value": 25},
+        )
+
+        assert out["result"] == "warm"
+
+    @pytest.mark.parametrize(
+        "output_type, result, expected",
+        [
+            ("bool", "true", True),
+            ("int", "42.8", 42),
+            ("float", "21.5", 21.5),
+            ("string", 7, "7"),
+        ],
+    )
+    def test_result_is_coerced_to_selected_output_type(self, output_type, result, expected):
+        out = run_single(
+            "value_mapping",
+            {
+                "output_type": output_type,
+                "rules": [{"operator": "eq", "value": "on", "result": result}],
+            },
+            {"value": "on"},
+        )
+
+        assert out["result"] == expected
+
+    def test_default_value_is_used_when_no_rule_matches(self):
+        out = run_single(
+            "value_mapping",
+            {
+                "output_type": "int",
+                "rules": [{"operator": "eq", "value": "open", "result": 1}],
+                "has_default": True,
+                "default_value": "0",
+            },
+            {"value": "closed"},
+        )
+
+        assert out["result"] == 0
+
+    def test_no_match_without_default_returns_none(self):
+        out = run_single(
+            "value_mapping",
+            {"rules": [{"operator": "eq", "value": "open", "result": "yes"}]},
+            {"value": "closed"},
+        )
+
+        assert out["result"] is None
+
+    def test_rule_without_compare_value_is_inert(self):
+        out = run_single(
+            "value_mapping",
+            {"rules": [{"operator": "eq", "result": "blank"}]},
+            {"value": ""},
+        )
+
+        assert out["result"] is None
+
+    def test_string_false_default_flag_is_not_treated_as_enabled(self):
+        out = run_single(
+            "value_mapping",
+            {
+                "rules": [{"operator": "eq", "value": "open", "result": "yes"}],
+                "has_default": "false",
+                "default_value": "fallback",
+            },
+            {"value": "closed"},
+        )
+
+        assert out["result"] is None
+
+    def test_invalid_int_result_coerces_to_zero(self):
+        out = run_single(
+            "value_mapping",
+            {
+                "output_type": "int",
+                "rules": [{"operator": "eq", "value": "on", "result": "not-int"}],
+            },
+            {"value": "on"},
+        )
+
+        assert out["result"] == 0
+
+    def test_invalid_float_default_coerces_to_zero(self):
+        out = run_single(
+            "value_mapping",
+            {
+                "output_type": "float",
+                "rules": [{"operator": "eq", "value": "on", "result": "1.5"}],
+                "has_default": True,
+                "default_value": "not-float",
+            },
+            {"value": "off"},
+        )
+
+        assert out["result"] == 0.0
+
+    def test_string_default_none_coerces_to_empty_string(self):
+        out = run_single(
+            "value_mapping",
+            {
+                "output_type": "string",
+                "rules": [{"operator": "eq", "value": "on", "result": "yes"}],
+                "has_default": True,
+                "default_value": None,
+            },
+            {"value": "off"},
+        )
+
+        assert out["result"] == ""
 
 
 # ===========================================================================

@@ -172,6 +172,46 @@ BUILTIN_NODE_TYPES: list[NodeTypeDef] = [
         },
         color="#1d4ed8",
     ),
+    NodeTypeDef(
+        type="decision",
+        label="Entscheidung",
+        category="logic",
+        description="Prüft einen Eingangswert gegen mehrere unabhängige Bedingungen. Jeder Ausgang liefert TRUE/FALSE.",
+        inputs=[_port("value", "Wert")],
+        outputs=[_port("out_1", "Ausgang 1", "trigger"), _port("out_2", "Ausgang 2", "trigger")],
+        config_schema={
+            "conditions": {
+                "type": "string",
+                "default": ('[{"handle":"out_1","operator":"eq"},{"handle":"out_2","operator":"eq"}]'),
+                "label": "Bedingungen",
+            },
+        },
+        color="#1d4ed8",
+    ),
+    NodeTypeDef(
+        type="value_mapping",
+        label="Zuordnung",
+        category="logic",
+        description="Ordnet einem Eingangswert anhand einer geordneten Regelliste genau einen Ergebniswert zu.",
+        inputs=[_port("value", "Wert")],
+        outputs=[_port("result", "Ergebnis")],
+        config_schema={
+            "output_type": {
+                "type": "string",
+                "enum": ["bool", "int", "float", "string"],
+                "default": "string",
+                "label": "Ausgangstyp",
+            },
+            "rules": {
+                "type": "string",
+                "default": ('[{"operator":"eq","result":""},{"operator":"eq","result":""}]'),
+                "label": "Regeln",
+            },
+            "has_default": {"type": "boolean", "default": False, "label": "Sonst-Wert verwenden"},
+            "default_value": {"type": "string", "default": "", "label": "Sonst-Wert"},
+        },
+        color="#1d4ed8",
+    ),
     # ── DataPoint ─────────────────────────────────────────────────────────
     NodeTypeDef(
         type="datapoint_read",
