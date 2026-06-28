@@ -369,6 +369,111 @@ class TestCompareNode:
 
 
 # ===========================================================================
+# decision / value_mapping nodes
+# ===========================================================================
+
+
+class TestDecisionNode:
+    def test_conditions_are_evaluated_independently(self):
+        out = run_single(
+            "decision",
+            {
+                "conditions": [
+                    {"handle": "hot", "operator": "gte", "value": 25},
+                    {"handle": "comfortable", "operator": "range", "min": 20, "max": 26},
+                    {"handle": "cold", "operator": "lt", "value": 18},
+                ],
+            },
+            {"value": 25},
+        )
+
+        assert out == {"hot": True, "comfortable": True, "cold": False}
+
+    def test_text_and_regex_conditions(self):
+        out = run_single(
+            "decision",
+            {
+                "conditions": [
+                    {"handle": "contains", "operator": "contains", "value": "open"},
+                    {"handle": "starts", "operator": "starts_with", "value": "Door"},
+                    {"handle": "regex", "operator": "regex", "value": r"open-\d+"},
+                ],
+            },
+            {"value": "Door open-42"},
+        )
+
+        assert out == {"contains": True, "starts": True, "regex": True}
+
+    def test_default_outputs_exist_without_configuration(self):
+        out = run_single("decision", {}, {"value": "anything"})
+
+        assert out == {"out_1": False, "out_2": False}
+
+
+class TestValueMappingNode:
+    def test_first_matching_rule_wins(self):
+        out = run_single(
+            "value_mapping",
+            {
+                "output_type": "string",
+                "rules": [
+                    {"operator": "gte", "value": 20, "result": "warm"},
+                    {"operator": "gte", "value": 10, "result": "mild"},
+                ],
+                "has_default": True,
+                "default_value": "cold",
+            },
+            {"value": 25},
+        )
+
+        assert out["result"] == "warm"
+
+    @pytest.mark.parametrize(
+        "output_type, result, expected",
+        [
+            ("bool", "true", True),
+            ("int", "42.8", 42),
+            ("float", "21.5", 21.5),
+            ("string", 7, "7"),
+        ],
+    )
+    def test_result_is_coerced_to_selected_output_type(self, output_type, result, expected):
+        out = run_single(
+            "value_mapping",
+            {
+                "output_type": output_type,
+                "rules": [{"operator": "eq", "value": "on", "result": result}],
+            },
+            {"value": "on"},
+        )
+
+        assert out["result"] == expected
+
+    def test_default_value_is_used_when_no_rule_matches(self):
+        out = run_single(
+            "value_mapping",
+            {
+                "output_type": "int",
+                "rules": [{"operator": "eq", "value": "open", "result": 1}],
+                "has_default": True,
+                "default_value": "0",
+            },
+            {"value": "closed"},
+        )
+
+        assert out["result"] == 0
+
+    def test_no_match_without_default_returns_none(self):
+        out = run_single(
+            "value_mapping",
+            {"rules": [{"operator": "eq", "value": "open", "result": "yes"}]},
+            {"value": "closed"},
+        )
+
+        assert out["result"] is None
+
+
+# ===========================================================================
 # hysteresis node
 # ===========================================================================
 

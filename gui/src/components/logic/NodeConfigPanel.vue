@@ -424,6 +424,141 @@
       </div>
     </template>
 
+    <!-- ── decision / value_mapping ─────────────────────────────────────── -->
+    <template v-else-if="isDecisionNode || isValueMappingNode">
+      <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+        <p class="text-xs text-slate-500">{{ nodeDescription(nodeDef) }}</p>
+
+        <template v-if="isValueMappingNode">
+          <div class="form-group">
+            <label class="label">{{ $t('logic.nodeConfig.mapping.outputType') }}</label>
+            <select v-model="localData.output_type" class="input text-sm" @change="emitUpdate" data-testid="mapping-output-type">
+              <option value="bool">BOOL</option>
+              <option value="int">INT</option>
+              <option value="float">FLOAT</option>
+              <option value="string">STRING</option>
+            </select>
+          </div>
+        </template>
+
+        <div class="flex items-center justify-between">
+          <span class="section-label">{{ isDecisionNode ? $t('logic.nodeConfig.decision.conditions') : $t('logic.nodeConfig.mapping.rules') }}</span>
+          <button
+            @click="isDecisionNode ? addDecisionCondition() : addMappingRule()"
+            class="btn-secondary btn-sm text-teal-400"
+            data-testid="rule-add"
+          >{{ $t('logic.nodeConfig.rules.add') }}</button>
+        </div>
+
+        <div
+          v-for="(rule, i) in conditionRows" :key="rule.handle || i"
+          class="rule-row"
+          :data-testid="`rule-row-${i}`"
+        >
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-mono text-slate-400 w-5 shrink-0">{{ i + 1 }}</span>
+            <input
+              :value="rule.name || ''"
+              @input="updateConditionRow(i, 'name', $event.target.value)"
+              class="input text-xs flex-1"
+              :placeholder="$t('logic.nodeConfig.rules.namePlaceholder')"
+            />
+            <button
+              @click="removeConditionRow(i)"
+              class="text-xs text-red-400 hover:text-red-300 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+              :disabled="conditionRows.length <= 2"
+              :title="$t('logic.nodeConfig.rules.remove')"
+            >{{ $t('logic.nodeConfig.rules.removeShort') }}</button>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2">
+            <div class="form-group">
+              <label class="label">{{ $t('logic.nodeConfig.rules.operator') }}</label>
+              <select
+                :value="rule.operator || 'eq'"
+                @change="updateConditionRow(i, 'operator', $event.target.value)"
+                class="input text-xs"
+              >
+                <option v-for="op in CONDITION_OPERATOR_OPTIONS" :key="op.value" :value="op.value">{{ op.label }}</option>
+              </select>
+            </div>
+            <div v-if="rule.operator === 'range'" class="form-group">
+              <label class="label">{{ $t('logic.nodeConfig.rules.maxValue') }}</label>
+              <input
+                :value="rule.max ?? rule.value_to ?? ''"
+                @input="updateConditionRow(i, 'max', $event.target.value)"
+                class="input text-xs"
+                :placeholder="$t('logic.nodeConfig.rules.maxPlaceholder')"
+              />
+            </div>
+            <div v-else class="form-group">
+              <label class="label">{{ $t('logic.nodeConfig.rules.compareValue') }}</label>
+              <input
+                :value="rule.value ?? ''"
+                @input="updateConditionRow(i, 'value', $event.target.value)"
+                class="input text-xs"
+                :placeholder="rule.operator === 'regex' ? $t('logic.nodeConfig.rules.regexPlaceholder') : $t('logic.nodeConfig.rules.valuePlaceholder')"
+              />
+            </div>
+          </div>
+
+          <div v-if="rule.operator === 'range'" class="form-group">
+            <label class="label">{{ $t('logic.nodeConfig.rules.minValue') }}</label>
+            <input
+              :value="rule.min ?? rule.value ?? ''"
+              @input="updateConditionRow(i, 'min', $event.target.value)"
+              class="input text-xs"
+              :placeholder="$t('logic.nodeConfig.rules.minPlaceholder')"
+            />
+          </div>
+
+          <label v-if="isTextCondition(rule.operator)" class="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              :checked="!!rule.case_sensitive"
+              @change="updateConditionRow(i, 'case_sensitive', $event.target.checked)"
+              class="accent-teal-500"
+            />
+            <span class="text-xs text-slate-600 dark:text-slate-300">{{ $t('logic.nodeConfig.rules.caseSensitive') }}</span>
+          </label>
+
+          <div v-if="isValueMappingNode" class="form-group">
+            <label class="label">{{ $t('logic.nodeConfig.mapping.resultValue') }}</label>
+            <input
+              :value="rule.result ?? ''"
+              @input="updateConditionRow(i, 'result', $event.target.value)"
+              class="input text-xs"
+              :placeholder="$t('logic.nodeConfig.mapping.resultPlaceholder')"
+              data-testid="mapping-result"
+            />
+          </div>
+        </div>
+
+        <template v-if="isValueMappingNode">
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              :checked="boolVal('has_default')"
+              @change="e => { setBool('has_default', e.target.checked); emitUpdate() }"
+              class="accent-teal-500"
+              data-testid="mapping-has-default"
+            />
+            <span class="text-xs text-slate-600 dark:text-slate-300">{{ $t('logic.nodeConfig.mapping.hasDefault') }}</span>
+          </label>
+          <div v-if="boolVal('has_default')" class="form-group">
+            <label class="label">{{ $t('logic.nodeConfig.mapping.defaultValue') }}</label>
+            <input
+              v-model="localData.default_value"
+              @change="emitUpdate"
+              class="input text-sm"
+              :placeholder="$t('logic.nodeConfig.mapping.defaultPlaceholder')"
+              data-testid="mapping-default"
+            />
+          </div>
+        </template>
+      </div>
+    </template>
+
     <!-- ── json_extractor / xml_extractor ───────────────────────────────── -->
     <template v-else-if="isExtractorNode">
       <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
@@ -926,6 +1061,21 @@ const urlTargetSaving = ref(false)
 const urlTargetDecision = ref(null)
 const urlTargetMsg = ref(null)
 
+const CONDITION_OPERATOR_OPTIONS = computed(() => [
+  { value: 'eq',          label: t('logic.nodeConfig.rules.operators.eq') },
+  { value: 'ne',          label: t('logic.nodeConfig.rules.operators.ne') },
+  { value: 'gt',          label: t('logic.nodeConfig.rules.operators.gt') },
+  { value: 'lt',          label: t('logic.nodeConfig.rules.operators.lt') },
+  { value: 'gte',         label: t('logic.nodeConfig.rules.operators.gte') },
+  { value: 'lte',         label: t('logic.nodeConfig.rules.operators.lte') },
+  { value: 'range',       label: t('logic.nodeConfig.rules.operators.range') },
+  { value: 'text_eq',     label: t('logic.nodeConfig.rules.operators.text_eq') },
+  { value: 'contains',    label: t('logic.nodeConfig.rules.operators.contains') },
+  { value: 'starts_with', label: t('logic.nodeConfig.rules.operators.starts_with') },
+  { value: 'ends_with',   label: t('logic.nodeConfig.rules.operators.ends_with') },
+  { value: 'regex',       label: t('logic.nodeConfig.rules.operators.regex') },
+])
+
 // ── Value Map Presets ──────────────────────────────────────────────────────
 const VALUE_MAP_PRESETS = computed(() => [
   { key: '',            label: t('logic.nodeConfig.transform.noMapping'),            map: null },
@@ -1085,6 +1235,8 @@ const isSubstringExtractorNode = computed(() => props.node?.type === 'substring_
 const isStringConcatNode = computed(() => props.node?.type === 'string_concat')
 const isICalNode          = computed(() => props.node?.type === 'ical')
 const isWakeOnLanNode     = computed(() => props.node?.type === 'wake_on_lan')
+const isDecisionNode      = computed(() => props.node?.type === 'decision')
+const isValueMappingNode  = computed(() => props.node?.type === 'value_mapping')
 
 const MAC_RE = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/
 const macAddressError = computed(() => {
@@ -1155,6 +1307,106 @@ function onConcatCountChange(e) {
   const v = Math.max(2, Math.min(20, parseInt(e.target.value) || 2))
   localData.value.count = v
   emitUpdate()
+}
+
+// ── Decision / value_mapping: shared condition row management ─────────────
+function _parseRows(raw) {
+  try {
+    const parsed = JSON.parse(raw || '[]')
+    return Array.isArray(parsed) ? parsed : []
+  } catch { return [] }
+}
+
+function _defaultDecisionRows() {
+  return [
+    { handle: 'out_1', name: t('logic.nodeConfig.decision.defaultOutput', { n: 1 }), operator: 'eq', value: '' },
+    { handle: 'out_2', name: t('logic.nodeConfig.decision.defaultOutput', { n: 2 }), operator: 'eq', value: '' },
+  ]
+}
+
+function _defaultMappingRows() {
+  return [
+    { name: t('logic.nodeConfig.mapping.defaultRule', { n: 1 }), operator: 'eq', value: '', result: '' },
+    { name: t('logic.nodeConfig.mapping.defaultRule', { n: 2 }), operator: 'eq', value: '', result: '' },
+  ]
+}
+
+const decisionConditions = computed(() => {
+  const rows = _parseRows(localData.value.conditions)
+  return rows.length ? rows : _defaultDecisionRows()
+})
+
+const mappingRules = computed(() => {
+  const rows = _parseRows(localData.value.rules)
+  return rows.length ? rows : _defaultMappingRows()
+})
+
+const conditionRows = computed(() =>
+  isDecisionNode.value ? decisionConditions.value : mappingRules.value
+)
+
+function _saveConditionRows(rows) {
+  if (isDecisionNode.value) {
+    localData.value.conditions = JSON.stringify(rows.map((row, i) => ({
+      ...row,
+      handle: row.handle || `out_${i + 1}`,
+      name: row.name || t('logic.nodeConfig.decision.defaultOutput', { n: i + 1 }),
+    })))
+  } else {
+    localData.value.rules = JSON.stringify(rows.map(row => ({ ...row })))
+  }
+  emitUpdate()
+}
+
+function addDecisionCondition() {
+  const rows = decisionConditions.value.map(r => ({ ...r }))
+  rows.push({
+    handle: `out_${rows.length + 1}`,
+    name: t('logic.nodeConfig.decision.defaultOutput', { n: rows.length + 1 }),
+    operator: 'eq',
+    value: '',
+  })
+  _saveConditionRows(rows)
+}
+
+function addMappingRule() {
+  const rows = mappingRules.value.map(r => ({ ...r }))
+  rows.push({
+    name: t('logic.nodeConfig.mapping.defaultRule', { n: rows.length + 1 }),
+    operator: 'eq',
+    value: '',
+    result: '',
+  })
+  _saveConditionRows(rows)
+}
+
+function updateConditionRow(i, key, value) {
+  const rows = conditionRows.value.map(r => ({ ...r }))
+  if (!rows[i]) return
+  rows[i][key] = value
+  if (key === 'operator' && value !== 'range') {
+    delete rows[i].min
+    delete rows[i].max
+    delete rows[i].value_to
+  }
+  _saveConditionRows(rows)
+}
+
+function removeConditionRow(i) {
+  const rows = conditionRows.value.map(r => ({ ...r }))
+  if (rows.length <= 2) return
+  rows.splice(i, 1)
+  if (isDecisionNode.value) {
+    rows.forEach((row, idx) => {
+      row.handle = `out_${idx + 1}`
+      row.name = row.name || t('logic.nodeConfig.decision.defaultOutput', { n: idx + 1 })
+    })
+  }
+  _saveConditionRows(rows)
+}
+
+function isTextCondition(operator) {
+  return ['text_eq', 'contains', 'starts_with', 'ends_with', 'regex'].includes(operator)
 }
 
 // ── Extractor: preview + path helpers ─────────────────────────────────────
@@ -1796,6 +2048,16 @@ function emitUpdate() {
 
 .extractor-output-row {
   background: var(--extractor-output-bg);
+}
+
+.rule-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(100, 116, 139, 0.35);
+  border-radius: 8px;
+  background: rgba(30, 41, 59, 0.35);
 }
 
 .extractor-output-index {
