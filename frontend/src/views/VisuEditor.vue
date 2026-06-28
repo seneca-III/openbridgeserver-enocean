@@ -102,6 +102,15 @@ const selectedDef = computed(() =>
   selectedWidget.value ? WidgetRegistry.get(selectedWidget.value.type) : null,
 )
 
+function withWidgetDefaults(type: string, raw: unknown): Record<string, unknown> {
+  const def = WidgetRegistry.get(type)
+  const base = def?.defaultConfig ? structuredClone(def.defaultConfig) as Record<string, unknown> : {}
+  const overrides = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {}
+  return { ...base, ...overrides }
+}
+
 const showPaletteMobile = ref(false)
 const showConfigMobile = ref(false)
 
@@ -449,6 +458,7 @@ onMounted(async () => {
       for (const w of config.value.widgets) {
         w.status_datapoint_id ??= null
         w.name ??= ''
+        w.config = withWidgetDefaults(w.type, w.config)
       }
       // Datenpunkt-Referenzen im Hintergrund validieren (non-blocking)
       validateDatapointRefs()
@@ -522,7 +532,7 @@ function removeSelected() {
 // ── Config aktualisieren ──────────────────────────────────────────────────────
 function updateConfig(newCfg: Record<string, unknown>) {
   if (!selectedWidget.value) return
-  selectedWidget.value.config = newCfg
+  selectedWidget.value.config = withWidgetDefaults(selectedWidget.value.type, newCfg)
 }
 
 function setDataPoint(id: string | null) {
