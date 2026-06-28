@@ -1518,6 +1518,7 @@
         "methodLabel": "Method",
         "responseContentType": "Response Content-Type",
         "headersLabel": "Headers (JSON object, optional)",
+        "headersPlaceholder": "{\"X-Api-Key\": \"abc\"}",
         "timeoutLabel": "Timeout (s)",
         "verifySsl": "Verify SSL certificate",
         "authSection": "Authentication",

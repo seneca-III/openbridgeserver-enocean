@@ -392,7 +392,7 @@
         <div class="form-group">
           <label class="label">{{ $t('logic.nodeConfig.apiClient.headersLabel') }}</label>
           <input v-model="localData.headers" type="text" class="input text-sm font-mono" @change="emitUpdate"
-            placeholder='{"X-Api-Key": "abc"}' />
+            :placeholder="$t('logic.nodeConfig.apiClient.headersPlaceholder')" />
         </div>
         <div class="form-group">
           <label class="label">{{ $t('logic.nodeConfig.apiClient.timeoutLabel') }}</label>
