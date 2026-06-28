@@ -207,10 +207,7 @@ BUILTIN_NODE_TYPES: list[NodeTypeDef] = [
             },
             "rules": {
                 "type": "string",
-                "default": (
-                    '[{"name":"Regel 1","operator":"eq","value":"","result":""},'
-                    '{"name":"Regel 2","operator":"eq","value":"","result":""}]'
-                ),
+                "default": ('[{"name":"Regel 1","operator":"eq","value":"","result":""},{"name":"Regel 2","operator":"eq","value":"","result":""}]'),
                 "label": "Regeln",
             },
             "has_default": {"type": "boolean", "default": False, "label": "Sonst-Wert verwenden"},
