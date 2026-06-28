@@ -62,23 +62,27 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+
 const props = defineProps({
   modelValue: { type: Object, default: () => ({}) },
 })
 const emit = defineEmits(['update:modelValue'])
+const { t } = useI18n()
 
-const PROVIDERS = [
-  { key: 'pushover', label: 'Pushover', fields: [{ key: 'api_token', label: 'API Token', secret: true }] },
-  { key: 'telegram', label: 'Telegram', fields: [{ key: 'bot_token', label: 'Bot Token', secret: true }] },
+const PROVIDERS = computed(() => [
+  { key: 'pushover', label: 'Pushover', fields: [{ key: 'api_token', label: t('adapters.message.apiToken'), secret: true }] },
+  { key: 'telegram', label: 'Telegram', fields: [{ key: 'bot_token', label: t('adapters.message.botToken'), secret: true }] },
   {
     key: 'seven.io',
     label: 'seven.io',
     fields: [
-      { key: 'api_key', label: 'API Key', secret: true },
-      { key: 'sender', label: 'Sender', secret: false },
+      { key: 'api_key', label: t('adapters.message.apiKey'), secret: true },
+      { key: 'sender', label: t('adapters.message.sender'), secret: false },
     ],
   },
-]
+])
 
 function cloneConfig() {
   return {
@@ -108,10 +112,10 @@ function targetEntries(provider) {
 }
 
 function targetLabel(provider) {
-  if (provider === 'pushover') return 'User Key'
-  if (provider === 'telegram') return 'Chat ID'
-  if (provider === 'seven.io') return 'To'
-  return 'Recipient'
+  if (provider === 'pushover') return t('adapters.message.userKey')
+  if (provider === 'telegram') return t('adapters.message.chatId')
+  if (provider === 'seven.io') return t('adapters.message.to')
+  return t('adapters.message.recipient')
 }
 
 function targetSecret(provider) {

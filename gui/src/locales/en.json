@@ -258,7 +258,15 @@
     "message": {
       "addTarget": "Add target",
       "targetName": "Target name",
-      "channel": "Channel"
+      "channel": "Channel",
+      "apiToken": "API token",
+      "botToken": "Bot token",
+      "apiKey": "API key",
+      "sender": "Sender",
+      "userKey": "User key",
+      "chatId": "Chat ID",
+      "to": "Recipient",
+      "recipient": "Recipient"
     },
     "anwesenheit": {
       "modalTitle": "Presence simulation",
@@ -1003,7 +1011,9 @@
       "knxNoTunnelingInterfaces": "No tunneling interfaces found in keyfile — please check the individual address in the keyfile.",
       "knxTunnelOverload": "KNX tunnel slot likely occupied by another client — gateway pool overloaded.",
       "knxTunnelStable": "Tunnel pool stable again.",
-      "invalidBindingsSkipped": "{count} invalid binding(s) skipped ({examples})"
+      "invalidBindingsSkipped": "{count} invalid binding(s) skipped ({examples})",
+      "messageProviderFailures": "MESSAGE provider failures: {count} target(s)",
+      "messageSent": "MESSAGE sent"
     },
     "testResult": {
       "typeNotRegistered": "Adapter type '{type}' not registered",

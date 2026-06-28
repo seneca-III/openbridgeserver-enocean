@@ -258,7 +258,15 @@
     "message": {
       "addTarget": "Ziel hinzufügen",
       "targetName": "Zielname",
-      "channel": "Kanal"
+      "channel": "Kanal",
+      "apiToken": "API-Token",
+      "botToken": "Bot-Token",
+      "apiKey": "API-Schlüssel",
+      "sender": "Absender",
+      "userKey": "User-Key",
+      "chatId": "Chat-ID",
+      "to": "Empfänger",
+      "recipient": "Empfänger"
     },
     "anwesenheit": {
       "modalTitle": "Anwesenheitssimulation",
@@ -1003,7 +1011,9 @@
       "knxNoTunnelingInterfaces": "Keine Tunneling-Interfaces im Keyfile gefunden — bitte Individual Address im Keyfile prüfen.",
       "knxTunnelOverload": "KNX-Tunnel-Slot wahrscheinlich von anderem Client belegt — Gateway-Pool überlastet.",
       "knxTunnelStable": "Tunnel-Pool wieder stabil.",
-      "invalidBindingsSkipped": "{count} ungültige Verknüpfung(en) übersprungen ({examples})"
+      "invalidBindingsSkipped": "{count} ungültige Verknüpfung(en) übersprungen ({examples})",
+      "messageProviderFailures": "MESSAGE-Provider-Fehler: {count} Ziel(e)",
+      "messageSent": "MESSAGE gesendet"
     },
     "testResult": {
       "typeNotRegistered": "Adapter-Typ '{type}' nicht registriert",
