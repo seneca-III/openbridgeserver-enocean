@@ -48,6 +48,17 @@ describe('NodeConfigPanel decision', () => {
     w.unmount()
   })
 
+  it('falls back to default condition rows when stored JSON is invalid', async () => {
+    const w = await mountPanel('decision', { conditions: '{' })
+    await flushPromises()
+
+    const rows = w.findAll('[data-testid^="rule-row-"]')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].find('input').element.value).toBe('Ausgang 1')
+    expect(rows[1].find('input').element.value).toBe('Ausgang 2')
+    w.unmount()
+  })
+
   it('adds a condition with the next output handle', async () => {
     const w = await mountPanel('decision', {})
     await flushPromises()
@@ -84,6 +95,26 @@ describe('NodeConfigPanel decision', () => {
     w.unmount()
   })
 
+  it('clears range bounds when switching back to a scalar operator', async () => {
+    const w = await mountPanel('decision', {
+      conditions: JSON.stringify([
+        { handle: 'out_1', name: 'Inside', operator: 'range', min: '18', max: '23', value_to: '23' },
+        { handle: 'out_2', name: 'Outside', operator: 'eq', value: 'x' },
+      ]),
+    })
+    await flushPromises()
+
+    await w.find('[data-testid="rule-row-0"]').find('select').setValue('eq')
+    await flushPromises()
+
+    const rule = JSON.parse(lastUpdate(w).conditions)[0]
+    expect(rule.operator).toBe('eq')
+    expect(rule).not.toHaveProperty('min')
+    expect(rule).not.toHaveProperty('max')
+    expect(rule).not.toHaveProperty('value_to')
+    w.unmount()
+  })
+
   it('removes a condition only when more than two exist and renumbers handles', async () => {
     const w = await mountPanel('decision', {
       conditions: JSON.stringify([
@@ -106,6 +137,20 @@ describe('NodeConfigPanel decision', () => {
 })
 
 describe('NodeConfigPanel value_mapping', () => {
+  it('renders defaults and adds a mapping rule', async () => {
+    const w = await mountPanel('value_mapping', {})
+    await flushPromises()
+
+    expect(w.findAll('[data-testid^="rule-row-"]')).toHaveLength(2)
+    await w.find('[data-testid="rule-add"]').trigger('click')
+    await flushPromises()
+
+    const rules = JSON.parse(lastUpdate(w).rules)
+    expect(rules).toHaveLength(3)
+    expect(rules[2]).toMatchObject({ name: 'Regel 3', operator: 'eq', value: '', result: '' })
+    w.unmount()
+  })
+
   it('updates output type and rule result', async () => {
     const w = await mountPanel('value_mapping', {
       output_type: 'string',
@@ -123,6 +168,44 @@ describe('NodeConfigPanel value_mapping', () => {
     const update = lastUpdate(w)
     expect(update.output_type).toBe('int')
     expect(JSON.parse(update.rules)[0].result).toBe('42')
+    w.unmount()
+  })
+
+  it('updates a scalar compare value and removes mapping rules above the minimum', async () => {
+    const w = await mountPanel('value_mapping', {
+      rules: JSON.stringify([
+        { name: 'R1', operator: 'eq', value: 'a', result: 'A' },
+        { name: 'R2', operator: 'eq', value: 'b', result: 'B' },
+        { name: 'R3', operator: 'eq', value: 'c', result: 'C' },
+      ]),
+    })
+    await flushPromises()
+
+    await w.find('[data-testid="rule-row-0"]').findAll('input')[1].setValue('alpha')
+    await flushPromises()
+    expect(JSON.parse(lastUpdate(w).rules)[0].value).toBe('alpha')
+
+    await w.find('[data-testid="rule-row-2"]').findAll('button').at(-1).trigger('click')
+    await flushPromises()
+
+    const rules = JSON.parse(lastUpdate(w).rules)
+    expect(rules).toHaveLength(2)
+    expect(rules.map(r => r.name)).toEqual(['R1', 'R2'])
+    w.unmount()
+  })
+
+  it('shows an existing default value field before toggling', async () => {
+    const w = await mountPanel('value_mapping', {
+      has_default: true,
+      default_value: 'fallback',
+      rules: JSON.stringify([
+        { name: 'R1', operator: 'eq', value: 'a', result: 'A' },
+        { name: 'R2', operator: 'eq', value: 'b', result: 'B' },
+      ]),
+    })
+    await flushPromises()
+
+    expect(w.find('[data-testid="mapping-default"]').element.value).toBe('fallback')
     w.unmount()
   })
 

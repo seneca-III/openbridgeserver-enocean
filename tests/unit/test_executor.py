@@ -425,6 +425,20 @@ class TestDecisionNode:
 
         assert out == {"out_1": False, "out_2": False}
 
+    def test_non_list_rule_json_falls_back_to_default_outputs(self):
+        out = run_single("decision", {"conditions": json.dumps({"operator": "eq", "value": "on"})}, {"value": "on"})
+
+        assert out == {"out_1": False, "out_2": False}
+
+    def test_non_dict_rule_entries_are_ignored(self):
+        out = run_single(
+            "decision",
+            {"conditions": ["ignored", {"handle": "match", "operator": "eq", "value": "on"}]},
+            {"value": "on"},
+        )
+
+        assert out == {"match": True}
+
     def test_invalid_regex_condition_returns_false(self):
         out = run_single(
             "decision",
@@ -443,6 +457,20 @@ class TestDecisionNode:
 
         assert out["case"] is False
 
+    def test_text_operators_support_case_insensitive_variants(self):
+        out = run_single(
+            "decision",
+            {
+                "conditions": [
+                    {"handle": "text", "operator": "text_eq", "value": "OPEN"},
+                    {"handle": "ends", "operator": "ends_with", "value": "42"},
+                ],
+            },
+            {"value": "open-42"},
+        )
+
+        assert out == {"text": False, "ends": True}
+
     def test_range_accepts_value_and_value_to_aliases(self):
         out = run_single(
             "decision",
@@ -451,6 +479,33 @@ class TestDecisionNode:
         )
 
         assert out["in_range"] is True
+
+    def test_range_with_non_numeric_input_returns_false(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "bad_range", "operator": "range", "min": 10, "max": 20}]},
+            {"value": "hot"},
+        )
+
+        assert out["bad_range"] is False
+
+    def test_numeric_compare_with_non_numeric_value_returns_false(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "gt", "operator": "gt", "value": 10}]},
+            {"value": "hot"},
+        )
+
+        assert out["gt"] is False
+
+    def test_none_input_returns_false_for_condition(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "match", "operator": "eq", "value": ""}]},
+            {"value": None},
+        )
+
+        assert out["match"] is False
 
 
 class TestValueMappingNode:
@@ -539,6 +594,34 @@ class TestValueMappingNode:
         )
 
         assert out["result"] == 0
+
+    def test_invalid_float_default_coerces_to_zero(self):
+        out = run_single(
+            "value_mapping",
+            {
+                "output_type": "float",
+                "rules": [{"operator": "eq", "value": "on", "result": "1.5"}],
+                "has_default": True,
+                "default_value": "not-float",
+            },
+            {"value": "off"},
+        )
+
+        assert out["result"] == 0.0
+
+    def test_string_default_none_coerces_to_empty_string(self):
+        out = run_single(
+            "value_mapping",
+            {
+                "output_type": "string",
+                "rules": [{"operator": "eq", "value": "on", "result": "yes"}],
+                "has_default": True,
+                "default_value": None,
+            },
+            {"value": "off"},
+        )
+
+        assert out["result"] == ""
 
 
 # ===========================================================================
