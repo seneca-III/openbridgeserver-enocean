@@ -561,7 +561,7 @@ async def _ping_host(host: str, count: int, timeout_s: float) -> tuple[bool, flo
             stderr=asyncio.subprocess.PIPE,
         )
         try:
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s + 2)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout_s * count + 2)
         except asyncio.TimeoutError:
             proc.kill()
             await proc.wait()
@@ -1235,17 +1235,14 @@ class LogicManager:
                 ns["accumulated_hours"] += (execute_now - ns["last_start"]).total_seconds() / 3600
                 ns["last_start"] = None
 
-        # ── Handle wake_on_lan ────────────────────────────────────────────
-        # Runs BEFORE api_client/notify so that graphs with wol.sent →
-        # api_client or wol.sent → notify fire correctly in the same execution.
-        # Rising-edge: packet is sent only on the False→True transition of
-        # _trigger, preventing repeated broadcasts on sustained truthy inputs.
-        # Exception: cron-triggered executions are always treated as a fresh
-        # rising edge, since each cron tick is an independent scheduled event.
+        # ── Cron-reachability preamble ────────────────────────────────────
+        # Shared by host_check and wake_on_lan: each cron tick is treated as a
+        # fresh rising edge, so nodes that fire on sustained truthy inputs from
+        # cron are not suppressed by the rising-edge deduplication below.
         cron_node_ids = {n.id for n in flow.nodes if n.type == "timer_cron"}
         # Forward-reachability from the cron nodes that actually fired this
-        # execution.  Used below to scope the cron-retrigger exception to WoL
-        # nodes that are driven by the firing cron, not every cron in the graph.
+        # execution — scopes the cron-retrigger exception to only those async
+        # nodes driven by the firing cron, not every cron in the graph.
         fired_crons = overrides.keys() & cron_node_ids
         cron_reachable: set[str] = set(fired_crons)
         if fired_crons:
@@ -1256,6 +1253,88 @@ class LogicManager:
                     if _ce.source == _cn and _ce.target not in cron_reachable:
                         cron_reachable.add(_ce.target)
                         _cq.append(_ce.target)
+        # ── Handle host_check ─────────────────────────────────────────────
+        # Rising-edge trigger (same cron-exemption logic as wake_on_lan):
+        # ping is sent only on the False→True transition of _trigger, or on
+        # every cron tick if this node is reachable from a firing cron node.
+        # Runs BEFORE wake_on_lan so that graphs with host_check → WoL see
+        # real reachability values, not executor placeholders.
+        triggered_host_check_nodes: set[str] = set()
+        for node in flow.nodes:
+            if node.type != "host_check":
+                continue
+            out = outputs.get(node.id, {})
+            hyst_hc = hyst.setdefault(node.id, {})
+            is_triggered = GraphExecutor._to_bool(out.get("_trigger"))
+            was_triggered = hyst_hc.get("hc_prev_trigger", False)
+            is_cron_triggered = node.id in cron_reachable
+            if not is_triggered:
+                hyst_hc["hc_prev_trigger"] = False
+                continue
+            if was_triggered and not is_cron_triggered:
+                # Sustained high trigger — restore last known result so downstream
+                # nodes see the real value instead of the executor placeholder.
+                outputs[node.id]["reachable"] = hyst_hc.get("hc_last_reachable", False)
+                outputs[node.id]["latency_ms"] = hyst_hc.get("hc_last_latency_ms")
+                continue
+            host = (node.data.get("host") or "").strip()
+            if not host:
+                logger.warning("host_check: host missing on node %s", node.id[:8])
+                continue
+            try:
+                timeout_s = float(node.data.get("timeout_s") or 1)
+                count = max(1, int(node.data.get("count") or 1))
+                reachable, latency_ms = await _ping_host(host, count, timeout_s)
+                hyst_hc["hc_prev_trigger"] = True
+                hyst_hc["hc_last_reachable"] = reachable
+                hyst_hc["hc_last_latency_ms"] = latency_ms
+                outputs[node.id]["reachable"] = reachable
+                outputs[node.id]["latency_ms"] = latency_ms
+                triggered_host_check_nodes.add(node.id)
+                logger.info(
+                    "Graph %s: host_check %s → reachable=%s latency=%s ms",
+                    graph_id[:8],
+                    host,
+                    reachable,
+                    f"{latency_ms:.1f}" if latency_ms is not None else "—",
+                )
+            except Exception as exc:
+                logger.warning("Graph %s: host_check %s failed: %s", graph_id[:8], host, exc)
+
+        # ── Re-propagate host_check outputs to downstream nodes ───────────
+        if triggered_host_check_nodes:
+            hc_downstream_overrides: dict[str, dict[str, Any]] = {}
+            for e in flow.edges:
+                if e.source in triggered_host_check_nodes:
+                    src_handle = e.sourceHandle or "out"
+                    tgt_handle = e.targetHandle or "in"
+                    hc_downstream_overrides.setdefault(e.target, {})[tgt_handle] = GraphExecutor._get_output_value(outputs[e.source], src_handle)
+            if hc_downstream_overrides:
+                hc_merged: dict[str, dict[str, Any]] = {nid: dict(vals) for nid, vals in aug_overrides.items()}
+                for nid, vals in hc_downstream_overrides.items():
+                    hc_merged.setdefault(nid, {}).update(vals)
+                hc_hyst_snapshot = copy.deepcopy(hyst)
+                hc_second_executor = GraphExecutor(flow, hc_hyst_snapshot, self._app_config)
+                hc_second_outputs = hc_second_executor.execute(hc_merged)
+                hc_descendants: set[str] = set()
+                hc_queue: list[str] = list(triggered_host_check_nodes)
+                while hc_queue:
+                    nid = hc_queue.pop()
+                    for e in flow.edges:
+                        if e.source == nid and e.target not in hc_descendants:
+                            hc_descendants.add(e.target)
+                            hc_queue.append(e.target)
+                hc_node_ids = {n.id for n in flow.nodes if n.type == "host_check"}
+                for nid, vals in hc_second_outputs.items():
+                    if nid not in hc_node_ids and nid in hc_descendants:
+                        outputs[nid] = vals
+                        if nid in hc_hyst_snapshot:
+                            hyst[nid] = hc_hyst_snapshot[nid]
+
+        # ── Handle wake_on_lan ────────────────────────────────────────────
+        # Runs AFTER host_check so that graphs with host_check → WoL read
+        # real reachability, and BEFORE api_client/notify so that wol.sent
+        # can propagate to downstream api_client or notify in the same tick.
         triggered_wol_nodes: set[str] = set()
         for node in flow.nodes:
             if node.type != "wake_on_lan":
@@ -1340,73 +1419,6 @@ class LogicManager:
                 wol_node_ids = {n.id for n in flow.nodes if n.type == "wake_on_lan"}
                 for nid, vals in wol_second_outputs.items():
                     if nid not in wol_node_ids and nid in wol_descendants:
-                        outputs[nid] = vals
-
-        # ── Handle host_check ─────────────────────────────────────────────
-        # Rising-edge trigger (same cron-exemption logic as wake_on_lan):
-        # ping is sent only on the False→True transition of _trigger, or on
-        # every cron tick if this node is reachable from a firing cron node.
-        triggered_host_check_nodes: set[str] = set()
-        for node in flow.nodes:
-            if node.type != "host_check":
-                continue
-            out = outputs.get(node.id, {})
-            hyst_hc = hyst.setdefault(node.id, {})
-            is_triggered = GraphExecutor._to_bool(out.get("_trigger"))
-            was_triggered = hyst_hc.get("hc_prev_trigger", False)
-            is_cron_triggered = node.id in cron_reachable
-            if not is_triggered:
-                hyst_hc["hc_prev_trigger"] = False
-                continue
-            if was_triggered and not is_cron_triggered:
-                continue
-            host = (node.data.get("host") or "").strip()
-            if not host:
-                logger.warning("host_check: host missing on node %s", node.id[:8])
-                continue
-            timeout_s = float(node.data.get("timeout_s") or 1)
-            count = max(1, int(node.data.get("count") or 1))
-            try:
-                reachable, latency_ms = await _ping_host(host, count, timeout_s)
-                hyst_hc["hc_prev_trigger"] = True
-                outputs[node.id]["reachable"] = reachable
-                outputs[node.id]["latency_ms"] = latency_ms
-                triggered_host_check_nodes.add(node.id)
-                logger.info(
-                    "Graph %s: host_check %s → reachable=%s latency=%s ms",
-                    graph_id[:8],
-                    host,
-                    reachable,
-                    f"{latency_ms:.1f}" if latency_ms is not None else "—",
-                )
-            except Exception as exc:
-                logger.warning("Graph %s: host_check %s failed: %s", graph_id[:8], host, exc)
-
-        # ── Re-propagate host_check outputs to downstream nodes ───────────
-        if triggered_host_check_nodes:
-            hc_downstream_overrides: dict[str, dict[str, Any]] = {}
-            for e in flow.edges:
-                if e.source in triggered_host_check_nodes:
-                    src_handle = e.sourceHandle or "out"
-                    tgt_handle = e.targetHandle or "in"
-                    hc_downstream_overrides.setdefault(e.target, {})[tgt_handle] = GraphExecutor._get_output_value(outputs[e.source], src_handle)
-            if hc_downstream_overrides:
-                hc_merged: dict[str, dict[str, Any]] = {nid: dict(vals) for nid, vals in aug_overrides.items()}
-                for nid, vals in hc_downstream_overrides.items():
-                    hc_merged.setdefault(nid, {}).update(vals)
-                hc_second_executor = GraphExecutor(flow, copy.deepcopy(hyst), self._app_config)
-                hc_second_outputs = hc_second_executor.execute(hc_merged)
-                hc_descendants: set[str] = set()
-                queue: list[str] = list(triggered_host_check_nodes)
-                while queue:
-                    nid = queue.pop()
-                    for e in flow.edges:
-                        if e.source == nid and e.target not in hc_descendants:
-                            hc_descendants.add(e.target)
-                            queue.append(e.target)
-                hc_node_ids = {n.id for n in flow.nodes if n.type == "host_check"}
-                for nid, vals in hc_second_outputs.items():
-                    if nid not in hc_node_ids and nid in hc_descendants:
                         outputs[nid] = vals
 
         # ── Handle api_client ─────────────────────────────────────────────
@@ -1645,6 +1657,80 @@ class LogicManager:
                             outputs[nid] = vals
                             if nid in replay_hyst:
                                 hyst[nid] = replay_hyst[nid]
+
+        # ── Post-api-replay host_check pass ───────────────────────────────
+        # api_client outputs (via the second executor pass above) may have
+        # updated host_check trigger values. Re-run host_check for any nodes
+        # not fired in the first pass whose trigger is now true.
+        post_api_triggered_hc: set[str] = set()
+        for node in flow.nodes:
+            if node.type != "host_check" or node.id in triggered_host_check_nodes:
+                continue
+            out = outputs.get(node.id, {})
+            hyst_hc = hyst.setdefault(node.id, {})
+            is_triggered = GraphExecutor._to_bool(out.get("_trigger"))
+            was_triggered = hyst_hc.get("hc_prev_trigger", False)
+            is_cron_triggered = node.id in cron_reachable
+            if not is_triggered:
+                hyst_hc["hc_prev_trigger"] = False
+                continue
+            if was_triggered and not is_cron_triggered:
+                outputs[node.id]["reachable"] = hyst_hc.get("hc_last_reachable", False)
+                outputs[node.id]["latency_ms"] = hyst_hc.get("hc_last_latency_ms")
+                continue
+            host = (node.data.get("host") or "").strip()
+            if not host:
+                logger.warning("host_check: host missing on node %s", node.id[:8])
+                continue
+            try:
+                timeout_s = float(node.data.get("timeout_s") or 1)
+                count = max(1, int(node.data.get("count") or 1))
+                reachable, latency_ms = await _ping_host(host, count, timeout_s)
+                hyst_hc["hc_prev_trigger"] = True
+                hyst_hc["hc_last_reachable"] = reachable
+                hyst_hc["hc_last_latency_ms"] = latency_ms
+                outputs[node.id]["reachable"] = reachable
+                outputs[node.id]["latency_ms"] = latency_ms
+                post_api_triggered_hc.add(node.id)
+                triggered_host_check_nodes.add(node.id)
+                logger.info(
+                    "Graph %s: host_check (post-api) %s → reachable=%s latency=%s ms",
+                    graph_id[:8],
+                    host,
+                    reachable,
+                    f"{latency_ms:.1f}" if latency_ms is not None else "—",
+                )
+            except Exception as exc:
+                logger.warning("Graph %s: host_check %s failed: %s", graph_id[:8], host, exc)
+
+        if post_api_triggered_hc:
+            pat_hc_overrides: dict[str, dict[str, Any]] = {}
+            for e in flow.edges:
+                if e.source in post_api_triggered_hc:
+                    src_handle = e.sourceHandle or "out"
+                    tgt_handle = e.targetHandle or "in"
+                    pat_hc_overrides.setdefault(e.target, {})[tgt_handle] = GraphExecutor._get_output_value(outputs[e.source], src_handle)
+            if pat_hc_overrides:
+                pat_merged: dict[str, dict[str, Any]] = {nid: dict(vals) for nid, vals in aug_overrides.items()}
+                for nid, vals in pat_hc_overrides.items():
+                    pat_merged.setdefault(nid, {}).update(vals)
+                pat_hyst_snapshot = copy.deepcopy(hyst)
+                pat_executor = GraphExecutor(flow, pat_hyst_snapshot, self._app_config)
+                pat_outputs = pat_executor.execute(pat_merged)
+                pat_descendants: set[str] = set()
+                pat_queue: list[str] = list(post_api_triggered_hc)
+                while pat_queue:
+                    nid = pat_queue.pop()
+                    for e in flow.edges:
+                        if e.source == nid and e.target not in pat_descendants:
+                            pat_descendants.add(e.target)
+                            pat_queue.append(e.target)
+                pat_hc_node_ids = {n.id for n in flow.nodes if n.type == "host_check"}
+                for nid, vals in pat_outputs.items():
+                    if nid not in pat_hc_node_ids and nid in pat_descendants:
+                        outputs[nid] = vals
+                        if nid in pat_hyst_snapshot:
+                            hyst[nid] = pat_hyst_snapshot[nid]
 
         # ── Handle notify_pushover ────────────────────────────────────────
         # Runs AFTER api_client second-pass so that graphs with api_client →

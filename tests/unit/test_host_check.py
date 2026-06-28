@@ -381,3 +381,91 @@ class TestHostCheckDownstreamPropagation:
 
         assert outputs["hc"]["reachable"] is True
         assert outputs["unrelated"]["out"] is False
+
+
+# ===========================================================================
+# _ping_host: asyncio watchdog scales with count
+# ===========================================================================
+
+
+class TestPingHostTimeoutScaling:
+    def test_asyncio_timeout_includes_count_factor(self):
+        """With count=3 and timeout_s=2.0, asyncio.wait_for gets timeout=8.0 (2*3+2)."""
+        captured: list[float] = []
+
+        async def _fake_wait_for(coro, timeout):
+            captured.append(timeout)
+            return await asyncio.wait_for(coro, timeout=30)
+
+        proc = _FakeProcess(0, b"time=1.0 ms\n")
+        with (
+            patch("obs.logic.manager.asyncio.create_subprocess_exec", new_callable=AsyncMock, return_value=proc),
+            patch("obs.logic.manager.asyncio.wait_for", side_effect=_fake_wait_for),
+        ):
+            asyncio.run(_ping_host("host", count=3, timeout_s=2.0))
+
+        assert captured[0] == pytest.approx(8.0)  # 2.0 * 3 + 2
+
+
+# ===========================================================================
+# Manager: sustained trigger restores last result (Fix 6)
+# ===========================================================================
+
+
+class TestHostCheckSustainedTrigger:
+    def _make_flow(self) -> FlowData:
+        return _flow([node("hc", "host_check", {"host": "192.168.1.1", "timeout_s": 1, "count": 1})])
+
+    def _exec(self, manager, flow, trigger: bool):
+        graph_id = "g"
+        manager._graphs[graph_id] = ("test", True, flow)
+        manager._node_state[graph_id] = {}
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            return asyncio.run(manager._execute_graph(graph_id, "test", flow, {"hc": {"trigger": trigger}}))
+
+    def test_sustained_trigger_returns_last_real_result(self):
+        manager = _make_manager()
+        flow = self._make_flow()
+        with patch("obs.logic.manager._ping_host", new_callable=AsyncMock, return_value=(True, 7.5)):
+            self._exec(manager, flow, True)  # rising edge: real ping → reachable=True, latency=7.5
+            out2 = self._exec(manager, flow, True)  # sustained: no new ping but last result restored
+        assert out2["hc"]["reachable"] is True
+        assert out2["hc"]["latency_ms"] == pytest.approx(7.5)
+
+    def test_sustained_trigger_unreachable_restores_false(self):
+        manager = _make_manager()
+        flow = self._make_flow()
+        with patch("obs.logic.manager._ping_host", new_callable=AsyncMock, return_value=(False, None)):
+            self._exec(manager, flow, True)  # rising edge: unreachable
+            out2 = self._exec(manager, flow, True)  # sustained: should still show False, not placeholder
+        assert out2["hc"]["reachable"] is False
+        assert out2["hc"]["latency_ms"] is None
+
+
+# ===========================================================================
+# Manager: non-numeric config values do not crash the graph (Fix 5)
+# ===========================================================================
+
+
+class TestHostCheckConfigGuard:
+    def test_nonnumeric_timeout_does_not_crash(self):
+        manager = _make_manager()
+        flow = _flow([node("hc", "host_check", {"host": "192.168.1.1", "timeout_s": "bad", "count": 1})])
+        graph_id = "g"
+        manager._graphs[graph_id] = ("test", True, flow)
+        manager._node_state[graph_id] = {}
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            with patch("obs.logic.manager._ping_host", new_callable=AsyncMock, return_value=(True, 1.0)):
+                outputs = asyncio.run(manager._execute_graph(graph_id, "test", flow, {"hc": {"trigger": True}}))
+        assert "hc" in outputs
+
+    def test_nonnumeric_count_does_not_crash(self):
+        manager = _make_manager()
+        flow = _flow([node("hc", "host_check", {"host": "192.168.1.1", "timeout_s": 1, "count": "bad"})])
+        graph_id = "g"
+        manager._graphs[graph_id] = ("test", True, flow)
+        manager._node_state[graph_id] = {}
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            with patch("obs.logic.manager._ping_host", new_callable=AsyncMock, return_value=(True, 1.0)):
+                outputs = asyncio.run(manager._execute_graph(graph_id, "test", flow, {"hc": {"trigger": True}}))
+        assert "hc" in outputs
