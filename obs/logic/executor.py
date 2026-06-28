@@ -169,6 +169,18 @@ class GraphExecutor:
             return None
 
     @staticmethod
+    def _try_bool_literal(v: Any) -> bool | None:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in {"true", "1", "yes", "on"}:
+                return True
+            if s in {"false", "0", "no", "off"}:
+                return False
+        return None
+
+    @staticmethod
     def _to_bool(v: Any) -> bool:
         """Coerce any value to bool. Strings '0'/'false'/'off' → False."""
         if v is None:
@@ -248,8 +260,14 @@ class GraphExecutor:
         equality_ops = {"=", "==", "eq"}
         inequality_ops = {"!=", "ne"}
         if operator_key in equality_ops:
+            bool_left, bool_right = cls._try_bool_literal(input_value), cls._try_bool_literal(expected)
+            if bool_left is not None and bool_right is not None:
+                return bool_left == bool_right
             return str(input_value) == str(expected)
         if operator_key in inequality_ops:
+            bool_left, bool_right = cls._try_bool_literal(input_value), cls._try_bool_literal(expected)
+            if bool_left is not None and bool_right is not None:
+                return bool_left != bool_right
             return str(input_value) != str(expected)
         return False
 

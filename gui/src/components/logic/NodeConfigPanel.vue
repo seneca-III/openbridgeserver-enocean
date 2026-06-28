@@ -519,7 +519,7 @@
           <div class="flex items-center gap-2">
             <span class="text-xs font-mono text-slate-400 w-5 shrink-0">{{ i + 1 }}</span>
             <input
-              :value="rule.name || ''"
+              :value="conditionRowName(rule, i)"
               @input="updateConditionRow(i, 'name', $event.target.value)"
               class="input text-xs flex-1"
               :placeholder="$t('logic.nodeConfig.rules.namePlaceholder')"
@@ -1389,15 +1389,15 @@ function _parseRows(raw) {
 
 function _defaultDecisionRows() {
   return [
-    { handle: 'out_1', name: t('logic.nodeConfig.decision.defaultOutput', { n: 1 }), operator: 'eq', value: '' },
-    { handle: 'out_2', name: t('logic.nodeConfig.decision.defaultOutput', { n: 2 }), operator: 'eq', value: '' },
+    { handle: 'out_1', operator: 'eq' },
+    { handle: 'out_2', operator: 'eq' },
   ]
 }
 
 function _defaultMappingRows() {
   return [
-    { name: t('logic.nodeConfig.mapping.defaultRule', { n: 1 }), operator: 'eq', value: '', result: '' },
-    { name: t('logic.nodeConfig.mapping.defaultRule', { n: 2 }), operator: 'eq', value: '', result: '' },
+    { operator: 'eq', result: '' },
+    { operator: 'eq', result: '' },
   ]
 }
 
@@ -1415,15 +1415,28 @@ const conditionRows = computed(() =>
   isDecisionNode.value ? decisionConditions.value : mappingRules.value
 )
 
+function conditionRowName(row, i) {
+  if (row.name) return row.name
+  return isDecisionNode.value
+    ? t('logic.nodeConfig.decision.defaultOutput', { n: i + 1 })
+    : t('logic.nodeConfig.mapping.defaultRule', { n: i + 1 })
+}
+
 function _saveConditionRows(rows) {
   if (isDecisionNode.value) {
     localData.value.conditions = JSON.stringify(rows.map((row, i) => ({
       ...row,
       handle: row.handle || `out_${i + 1}`,
-      name: row.name || t('logic.nodeConfig.decision.defaultOutput', { n: i + 1 }),
-    })))
+    })).map(row => {
+      if (!row.name) delete row.name
+      return row
+    }))
   } else {
-    localData.value.rules = JSON.stringify(rows.map(row => ({ ...row })))
+    localData.value.rules = JSON.stringify(rows.map(row => {
+      const next = { ...row }
+      if (!next.name) delete next.name
+      return next
+    }))
   }
   emitUpdate()
 }
@@ -1436,9 +1449,7 @@ function addDecisionCondition() {
   }, 0) + 1
   rows.push({
     handle: `out_${nextNumber}`,
-    name: t('logic.nodeConfig.decision.defaultOutput', { n: nextNumber }),
     operator: 'eq',
-    value: '',
   })
   _saveConditionRows(rows)
 }
@@ -1446,9 +1457,7 @@ function addDecisionCondition() {
 function addMappingRule() {
   const rows = mappingRules.value.map(r => ({ ...r }))
   rows.push({
-    name: t('logic.nodeConfig.mapping.defaultRule', { n: rows.length + 1 }),
     operator: 'eq',
-    value: '',
     result: '',
   })
   _saveConditionRows(rows)

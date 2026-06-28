@@ -14,8 +14,8 @@ def test_decision_default_conditions_do_not_persist_localized_names():
     conditions = json.loads(decision.config_schema["conditions"]["default"])
 
     assert conditions == [
-        {"handle": "out_1", "operator": "eq", "value": ""},
-        {"handle": "out_2", "operator": "eq", "value": ""},
+        {"handle": "out_1", "operator": "eq"},
+        {"handle": "out_2", "operator": "eq"},
     ]
 
 
@@ -24,6 +24,6 @@ def test_value_mapping_default_rules_do_not_persist_localized_names():
     rules = json.loads(mapping.config_schema["rules"]["default"])
 
     assert rules == [
-        {"operator": "eq", "value": "", "result": ""},
-        {"operator": "eq", "value": "", "result": ""},
+        {"operator": "eq", "result": ""},
+        {"operator": "eq", "result": ""},
     ]

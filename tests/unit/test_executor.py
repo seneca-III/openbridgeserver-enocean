@@ -411,6 +411,15 @@ class TestDecisionNode:
 
         assert out == {"out_1": False, "out_2": False}
 
+    def test_condition_without_compare_value_is_inert(self):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "empty_default", "operator": "eq"}]},
+            {"value": ""},
+        )
+
+        assert out["empty_default"] is False
+
     def test_conditions_can_be_loaded_from_json_string(self):
         out = run_single(
             "decision",
@@ -428,6 +437,24 @@ class TestDecisionNode:
         )
 
         assert out["empty"] is True
+
+    @pytest.mark.parametrize(
+        "input_value, expected_value, expected",
+        [
+            (True, "true", True),
+            (False, "false", True),
+            (True, "false", False),
+            ("false", False, True),
+        ],
+    )
+    def test_equality_condition_normalizes_boolean_literals(self, input_value, expected_value, expected):
+        out = run_single(
+            "decision",
+            {"conditions": [{"handle": "bool_match", "operator": "eq", "value": expected_value}]},
+            {"value": input_value},
+        )
+
+        assert out["bool_match"] is expected
 
     def test_invalid_rule_json_falls_back_to_default_outputs(self):
         out = run_single("decision", {"conditions": "not json"}, {"value": "on"})
@@ -585,6 +612,15 @@ class TestValueMappingNode:
             "value_mapping",
             {"rules": [{"operator": "eq", "value": "open", "result": "yes"}]},
             {"value": "closed"},
+        )
+
+        assert out["result"] is None
+
+    def test_rule_without_compare_value_is_inert(self):
+        out = run_single(
+            "value_mapping",
+            {"rules": [{"operator": "eq", "result": "blank"}]},
+            {"value": ""},
         )
 
         assert out["result"] is None

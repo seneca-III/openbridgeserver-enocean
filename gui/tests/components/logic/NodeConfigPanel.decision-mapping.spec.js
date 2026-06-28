@@ -84,7 +84,27 @@ describe('NodeConfigPanel decision', () => {
 
     const conditions = JSON.parse(lastUpdate(w).conditions)
     expect(conditions).toHaveLength(3)
-    expect(conditions[2]).toMatchObject({ handle: 'out_3', name: 'Ausgang 3', operator: 'eq' })
+    expect(conditions[2]).toMatchObject({ handle: 'out_3', operator: 'eq' })
+    expect(conditions[2]).not.toHaveProperty('name')
+    expect(conditions[2]).not.toHaveProperty('value')
+    w.unmount()
+  })
+
+  it('does not persist localized fallback names when editing an unnamed condition', async () => {
+    const w = await mountPanel('decision', {
+      conditions: JSON.stringify([
+        { handle: 'out_1', operator: 'eq' },
+        { handle: 'out_2', operator: 'eq' },
+      ]),
+    })
+    await flushPromises()
+
+    await w.find('[data-testid="rule-row-0"]').find('select').setValue('contains')
+    await flushPromises()
+
+    const conditions = JSON.parse(lastUpdate(w).conditions)
+    expect(conditions[0]).toMatchObject({ handle: 'out_1', operator: 'contains' })
+    expect(conditions[0]).not.toHaveProperty('name')
     w.unmount()
   })
 
@@ -183,7 +203,9 @@ describe('NodeConfigPanel value_mapping', () => {
 
     const rules = JSON.parse(lastUpdate(w).rules)
     expect(rules).toHaveLength(3)
-    expect(rules[2]).toMatchObject({ name: 'Regel 3', operator: 'eq', value: '', result: '' })
+    expect(rules[2]).toMatchObject({ operator: 'eq', result: '' })
+    expect(rules[2]).not.toHaveProperty('name')
+    expect(rules[2]).not.toHaveProperty('value')
     w.unmount()
   })
 
