@@ -158,6 +158,16 @@ def test_enabled_binding_requires_message_target():
     assert cfg.enabled is False
 
 
+def test_binding_rejects_duplicate_message_targets():
+    with pytest.raises(ValueError, match="Duplicate MESSAGE target"):
+        MessageBindingConfig(
+            providers=[
+                {"provider": "telegram", "target": "default"},
+                {"provider": "telegram", "target": "default"},
+            ]
+        )
+
+
 @pytest.fixture
 def dummy_provider():
     provider = _DummyProvider()

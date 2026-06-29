@@ -87,6 +87,7 @@ def _validate_adapter_binding(
     config: dict[str, Any],
     *,
     validate_schema: bool = True,
+    enabled: bool = True,
 ) -> None:
     if adapter_type == "MESSAGE" and direction != "SOURCE":
         raise HTTPException(
@@ -101,7 +102,8 @@ def _validate_adapter_binding(
     cls = get_class(adapter_type)
     if cls and hasattr(cls, "binding_config_schema"):
         try:
-            cls.binding_config_schema(**config)
+            schema_config = {**config, "enabled": enabled} if adapter_type == "MESSAGE" else config
+            cls.binding_config_schema(**schema_config)
         except Exception as exc:
             raise HTTPException(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -173,7 +175,7 @@ async def create_binding(
         )
     adapter_type = instance_row["adapter_type"]
 
-    _validate_adapter_binding(adapter_type, body.direction, body.config)
+    _validate_adapter_binding(adapter_type, body.direction, body.config, enabled=body.enabled)
 
     # Formel validieren
     if body.value_formula:
@@ -247,7 +249,13 @@ async def update_binding(
     value_map_new = updates.get("value_map", json.loads(row["value_map"]) if row["value_map"] else None)
     value_map_json = json.dumps(value_map_new) if value_map_new else None
 
-    _validate_adapter_binding(row["adapter_type"], direction, config, validate_schema="config" in updates)
+    _validate_adapter_binding(
+        row["adapter_type"],
+        direction,
+        config,
+        validate_schema="config" in updates or "enabled" in updates,
+        enabled=bool(enabled),
+    )
 
     # Formel validieren
     if formula:

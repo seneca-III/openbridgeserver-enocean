@@ -552,6 +552,7 @@ def test_sanitize_support_data_redacts_dictionary_keys_and_preserves_path_basena
             "logger": "mqtt.customer.local api_key=logger-secret",
             "to": "+41000000000",
             "user_key": "pushover-user-key",
+            "chat_id": "123456789",
             "path": "obs.db",
             "config_source": r"C:\Users\Alice\obs\customer.com.key",
         }
@@ -569,6 +570,7 @@ def test_sanitize_support_data_redacts_dictionary_keys_and_preserves_path_basena
     assert sanitized["devices"]["access_token"] == "[REDACTED]"
     assert sanitized["to"] == "[REDACTED]"
     assert sanitized["user_key"] == "[REDACTED]"
+    assert sanitized["chat_id"] == "[REDACTED]"
     assert "mqtt.customer.local" not in sanitized["logger"]
     assert "logger-secret" not in sanitized["logger"]
     assert "[REDACTED_DOMAIN]" in sanitized["logger"]

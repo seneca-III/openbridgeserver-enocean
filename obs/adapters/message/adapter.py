@@ -69,6 +69,12 @@ class MessageBindingConfig(BaseModel):
     def _validate_targets(self) -> "MessageBindingConfig":
         if self.enabled and not self.providers:
             raise ValueError("MESSAGE binding requires at least one target")
+        seen_targets: set[tuple[str, str]] = set()
+        for ref in self.providers:
+            key = (ref.provider, ref.target)
+            if key in seen_targets:
+                raise ValueError(f"Duplicate MESSAGE target: {ref.provider}/{ref.target}")
+            seen_targets.add(key)
         return self
 
 

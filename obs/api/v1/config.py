@@ -636,7 +636,7 @@ async def import_config(
                 err = validate_formula(formula)
                 if err:
                     raise ValueError(f"Ungültige Formel: {err}")
-            _validate_adapter_binding(b_data.adapter_type, b_data.direction, b_data.config)
+            _validate_adapter_binding(b_data.adapter_type, b_data.direction, b_data.config, enabled=b_data.enabled)
             row = await db.fetchone("SELECT id FROM adapter_bindings WHERE id=?", (b_id,))
             if row:
                 await db.execute_and_commit(

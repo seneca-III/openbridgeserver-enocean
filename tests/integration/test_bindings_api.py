@@ -48,6 +48,21 @@ async def _create_instance(client, auth_headers, name: str = "") -> dict:
     return resp.json()
 
 
+async def _create_message_instance(client, auth_headers, name: str = "") -> dict:
+    resp = await client.post(
+        "/api/v1/adapters/instances",
+        json={
+            "adapter_type": "MESSAGE",
+            "name": name or f"MsgBindTest-{uuid.uuid4().hex[:6]}",
+            "config": {},
+            "enabled": False,
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
 async def _create_non_admin_headers(client, auth_headers) -> tuple[str, dict]:
     username = f"bind-user-{uuid.uuid4().hex[:8]}"
     resp = await client.post(
@@ -194,6 +209,25 @@ async def test_create_binding_with_formula(client, auth_headers):
     assert resp.json()["value_formula"] == "x * 2"
 
 
+async def test_create_disabled_message_binding_allows_no_targets(client, auth_headers):
+    dp = await _create_dp(client, auth_headers)
+    inst = await _create_message_instance(client, auth_headers)
+
+    resp = await client.post(
+        f"/api/v1/datapoints/{dp['id']}/bindings",
+        json={
+            "adapter_instance_id": inst["id"],
+            "direction": "SOURCE",
+            "config": {"providers": []},
+            "enabled": False,
+        },
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["enabled"] is False
+
+
 async def test_create_binding_invalid_formula_returns_422(client, auth_headers):
     dp = await _create_dp(client, auth_headers)
     inst = await _create_instance(client, auth_headers)
@@ -267,6 +301,31 @@ async def test_update_binding_success(client, auth_headers):
     body = resp.json()
     assert body["enabled"] is False
     assert body["direction"] == "BOTH"
+
+
+async def test_update_disabled_message_binding_allows_no_targets(client, auth_headers):
+    dp = await _create_dp(client, auth_headers)
+    inst = await _create_message_instance(client, auth_headers)
+    create_resp = await client.post(
+        f"/api/v1/datapoints/{dp['id']}/bindings",
+        json={
+            "adapter_instance_id": inst["id"],
+            "direction": "SOURCE",
+            "config": {"providers": [{"provider": "pushover", "target": "default"}]},
+        },
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+
+    resp = await client.patch(
+        f"/api/v1/datapoints/{dp['id']}/bindings/{create_resp.json()['id']}",
+        json={"enabled": False, "config": {"providers": []}},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["enabled"] is False
+    assert resp.json()["config"] == {"providers": []}
 
 
 async def test_update_binding_formula(client, auth_headers):
