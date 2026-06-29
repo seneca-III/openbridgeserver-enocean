@@ -136,6 +136,32 @@ BUILTIN_NODE_TYPES: list[NodeTypeDef] = [
         },
         color="#1d4ed8",
     ),
+    NodeTypeDef(
+        type="memory",
+        label="Speicher",
+        category="logic",
+        description=(
+            "Gibt den gespeicherten Wert aus dem vorherigen Logiklauf aus und speichert den aktuellen Eingangswert für den nächsten Lauf. "
+            "Diese Node ist die explizite Tick-Grenze für kontrollierte Rückkopplungen."
+        ),
+        inputs=[_port("in", "Eingang"), _port("reset", "Reset", "trigger")],
+        outputs=[_port("out", "Ausgang")],
+        config_schema={
+            "initial_value": {"type": "string", "default": "", "label": "Initialwert"},
+            "data_type": {
+                "type": "string",
+                "enum": ["auto", "number", "bool", "string"],
+                "default": "auto",
+                "label": "Datentyp",
+            },
+            "persist_state": {
+                "type": "boolean",
+                "default": True,
+                "label": "Zustand nach Neustart wiederherstellen",
+            },
+        },
+        color="#1d4ed8",
+    ),
     # ── Comparison ────────────────────────────────────────────────────────
     NodeTypeDef(
         type="compare",

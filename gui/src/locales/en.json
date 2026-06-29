@@ -1249,6 +1249,7 @@
       "not": "NOT",
       "xor": "XOR",
       "gate": "Gate",
+      "memory": "Memory",
       "compare": "Comparison",
       "hysteresis": "Hysteresis",
       "decision": "Decision",
@@ -1309,7 +1310,12 @@
     "saved": "Graph saved",
     "errorSave": "Error saving graph",
     "runResult": "Graph executed — {count} nodes evaluated",
+    "runResultWithWarnings": "Graph executed — {count} nodes checked, {warnings} warnings",
     "nodeError": "⚠ Error",
+    "graphValidationCycle": "Cycle detected: {count} node(s) need a Memory node as tick boundary.",
+    "graphValidationConnectBlocked": "Connection not created: cycle detected ({count} node(s)). Use a Memory node for feedback.",
+    "graphValidationSaveBlocked": "Save blocked: cycle detected ({count} node(s)). Use a Memory node for feedback.",
+    "graphValidationNodeError": "Cycle detected; direct feedback needs a Memory node.",
     "duplicated": "Graph duplicated as “{name}”",
     "errorDuplicate": "Error duplicating graph",
     "errorExport": "Error exporting graph",
@@ -1696,6 +1702,11 @@
         "negate_enable": "Invert enable",
         "persist_state": "Restore state on restart"
       },
+      "memory": {
+        "initial_value": "Initial value",
+        "data_type": "Data type",
+        "persist_state": "Restore state on restart"
+      },
       "hysteresis": {
         "persist_state": "Restore state on restart"
       },
@@ -1898,6 +1909,7 @@
       "not": "Inverts the input",
       "xor": "Output is true when EXACTLY ONE input is true. Inputs (2–30) and output can be individually negated.",
       "gate": "Signal gate: passes the input when enable=true, blocks otherwise. Behavior when closed: hold the last value (retain) or output a default value.",
+      "memory": "Outputs the stored value from the previous logic run and stores the current input value for the next run. Explicit tick boundary for controlled feedback.",
       "compare": "Compares two values (>, <, =, >=, <=, !=)",
       "hysteresis": "Switches ON when threshold is exceeded, OFF only when it falls below",
       "decision": "Checks one input value against multiple independent conditions. Each output returns TRUE or FALSE independently; multiple outputs can be TRUE at the same time.",

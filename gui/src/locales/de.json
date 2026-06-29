@@ -1249,6 +1249,7 @@
       "not": "NOT",
       "xor": "XOR",
       "gate": "TOR",
+      "memory": "Speicher",
       "compare": "Vergleich",
       "hysteresis": "Hysterese",
       "decision": "Entscheidung",
@@ -1309,7 +1310,12 @@
     "saved": "Graph gespeichert",
     "errorSave": "Fehler beim Speichern",
     "runResult": "Graph ausgeführt — {count} Nodes evaluiert",
+    "runResultWithWarnings": "Graph ausgeführt — {count} Nodes geprüft, {warnings} Warnungen",
     "nodeError": "⚠ Fehler",
+    "graphValidationCycle": "Zyklus erkannt: {count} Node(s) benötigen eine Speicher-Node als Tick-Grenze.",
+    "graphValidationConnectBlocked": "Verbindung nicht erstellt: Zyklus erkannt ({count} Node(s)). Nutze eine Speicher-Node für Rückkopplungen.",
+    "graphValidationSaveBlocked": "Speichern blockiert: Zyklus erkannt ({count} Node(s)). Nutze eine Speicher-Node für Rückkopplungen.",
+    "graphValidationNodeError": "Zyklus erkannt; direkte Rückkopplung benötigt eine Speicher-Node.",
     "duplicated": "Graph dupliziert als „{name}“",
     "errorDuplicate": "Fehler beim Duplizieren",
     "errorExport": "Fehler beim Exportieren",
@@ -1696,6 +1702,11 @@
         "negate_enable": "Freigabe invertieren",
         "persist_state": "Zustand nach Neustart wiederherstellen"
       },
+      "memory": {
+        "initial_value": "Initialwert",
+        "data_type": "Datentyp",
+        "persist_state": "Zustand nach Neustart wiederherstellen"
+      },
       "hysteresis": {
         "persist_state": "Zustand nach Neustart wiederherstellen"
       },
@@ -1898,6 +1909,7 @@
       "not": "Invertiert den Eingang",
       "xor": "Ausgang ist true wenn GENAU EIN Eingang true ist. Eingänge (2–30) und Ausgang einzeln negierbar.",
       "gate": "Signal-Tor: lässt den Eingang durch wenn Freigabe=true, sperrt sonst. Verhalten bei gesperrtem Tor: letzten Wert halten (retain) oder Standardwert ausgeben.",
+      "memory": "Gibt den gespeicherten Wert aus dem vorherigen Logiklauf aus und speichert den aktuellen Eingangswert für den nächsten Lauf. Explizite Tick-Grenze für kontrollierte Rückkopplungen.",
       "compare": "Vergleicht zwei Werte (>, <, =, >=, <=, !=)",
       "hysteresis": "Schaltet bei Überschreitung ON, erst bei Unterschreitung OFF",
       "decision": "Prüft einen Eingangswert gegen mehrere unabhängige Bedingungen. Jeder Ausgang liefert unabhängig TRUE oder FALSE; mehrere Ausgänge können gleichzeitig TRUE sein.",

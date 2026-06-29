@@ -57,6 +57,9 @@
     <div v-if="statusMsg" :class="['px-4 py-1.5 text-xs flex-shrink-0', statusMsg.ok ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400']">
       {{ statusMsg.text }}
     </div>
+    <div v-else-if="validationWarnings.length" class="px-4 py-1.5 text-xs flex-shrink-0 bg-amber-500/10 text-amber-500">
+      {{ $t('logic.graphValidationCycle', { count: validationWarnings.length }) }}
+    </div>
 
     <!-- Main area -->
     <div class="flex flex-1 overflow-hidden">
@@ -217,7 +220,7 @@ const nodeTypeComponents = {
   // Constant
   const_value: _generic,
   // Logic
-  and: _generic, or: _generic, not: _generic, xor: _generic, gate: _generic,
+  and: _generic, or: _generic, not: _generic, xor: _generic, gate: _generic, memory: _generic,
   compare: _generic, hysteresis: _generic, decision: _generic, value_mapping: _generic,
   // Math
   math_formula: _generic, math_map: _generic,
@@ -289,6 +292,102 @@ function showStatus(ok, text, ms = 3000) {
   setTimeout(() => { statusMsg.value = null }, ms)
 }
 
+const validationWarnings = computed(() => analyzeFlowWarnings(nodes.value, edges.value))
+
+function currentFlowData() {
+  return {
+    nodes: nodes.value.map(n => {
+      // eslint-disable-next-line no-unused-vars
+      const { _dbg, _dbg_title, ...nodeData } = n.data ?? {}
+      return { id: n.id, type: n.type, position: n.position, data: nodeData }
+    }),
+    edges: edges.value.map(e => ({
+      id: e.id, source: e.source, target: e.target,
+      sourceHandle: e.sourceHandle, targetHandle: e.targetHandle
+    })),
+  }
+}
+
+function analyzeFlowWarnings(flowNodes, flowEdges) {
+  const nodeMap = new Map(flowNodes.map(n => [n.id, n]))
+  const inDegree = new Map(flowNodes.map(n => [n.id, 0]))
+  const adj = new Map(flowNodes.map(n => [n.id, []]))
+
+  for (const edge of flowEdges) {
+    if (!adj.has(edge.source) || !inDegree.has(edge.target)) continue
+    if (nodeMap.get(edge.target)?.type === 'memory') continue
+    adj.get(edge.source).push(edge.target)
+    inDegree.set(edge.target, inDegree.get(edge.target) + 1)
+  }
+
+  const queue = [...inDegree.entries()].filter(([, deg]) => deg === 0).map(([id]) => id)
+  const ordered = new Set()
+  while (queue.length) {
+    const id = queue.shift()
+    ordered.add(id)
+    for (const next of adj.get(id) || []) {
+      inDegree.set(next, inDegree.get(next) - 1)
+      if (inDegree.get(next) === 0) queue.push(next)
+    }
+  }
+
+  const unresolved = new Set(flowNodes.map(n => n.id).filter(id => !ordered.has(id)))
+  const cyclic = findCyclicNodeIds(adj, unresolved)
+  const cycleList = flowNodes.filter(n => cyclic.has(n.id)).map(n => n.id)
+  return flowNodes
+    .filter(n => unresolved.has(n.id))
+    .map(n => ({
+      node_id: n.id,
+      code: cyclic.has(n.id) ? 'graph_cycle' : 'graph_cycle_blocked',
+      message: `${n.id}: ${cycleList.slice(0, 5).join(', ')}`,
+    }))
+}
+
+function findCyclicNodeIds(adj, candidates) {
+  let index = 0
+  const stack = []
+  const indices = new Map()
+  const lowlinks = new Map()
+  const onStack = new Set()
+  const cyclic = new Set()
+
+  function strongconnect(id) {
+    indices.set(id, index)
+    lowlinks.set(id, index)
+    index += 1
+    stack.push(id)
+    onStack.add(id)
+
+    for (const next of adj.get(id) || []) {
+      if (!candidates.has(next)) continue
+      if (!indices.has(next)) {
+        strongconnect(next)
+        lowlinks.set(id, Math.min(lowlinks.get(id), lowlinks.get(next)))
+      } else if (onStack.has(next)) {
+        lowlinks.set(id, Math.min(lowlinks.get(id), indices.get(next)))
+      }
+    }
+
+    if (lowlinks.get(id) !== indices.get(id)) return
+    const component = []
+    while (stack.length) {
+      const member = stack.pop()
+      onStack.delete(member)
+      component.push(member)
+      if (member === id) break
+    }
+    const hasSelfLoop = component.length === 1 && (adj.get(component[0]) || []).includes(component[0])
+    if (component.length > 1 || hasSelfLoop) {
+      for (const member of component) cyclic.add(member)
+    }
+  }
+
+  for (const id of candidates) {
+    if (!indices.has(id)) strongconnect(id)
+  }
+  return cyclic
+}
+
 async function loadGraph() {
   if (!activeGraphId.value) { nodes.value = []; edges.value = []; return }
   const { data } = await logicApi.getGraph(activeGraphId.value)
@@ -303,20 +402,18 @@ async function loadGraph() {
 
 async function saveGraph() {
   if (!auth.isAdmin || !activeGraphId.value) return
+  const graphWarnings = analyzeFlowWarnings(nodes.value, edges.value)
+  if (graphWarnings.length) {
+    showStatus(false, t('logic.graphValidationSaveBlocked', { count: graphWarnings.length }), 6000)
+    applyDebugValues(Object.fromEntries(
+      graphWarnings.map(w => [w.node_id, { __error__: t('logic.graphValidationNodeError'), __diagnostic__: w.code }])
+    ))
+    return
+  }
   saving.value = true
   try {
     const graph = store.graphs.find(g => g.id === activeGraphId.value)
-    await store.saveGraph(activeGraphId.value, graph.name, graph.description, graph.enabled, {
-      nodes: nodes.value.map(n => {
-        // eslint-disable-next-line no-unused-vars
-        const { _dbg, _dbg_title, ...nodeData } = n.data ?? {}
-        return { id: n.id, type: n.type, position: n.position, data: nodeData }
-      }),
-      edges: edges.value.map(e => ({
-        id: e.id, source: e.source, target: e.target,
-        sourceHandle: e.sourceHandle, targetHandle: e.targetHandle
-      })),
-    })
+    await store.saveGraph(activeGraphId.value, graph.name, graph.description, graph.enabled, currentFlowData())
     showStatus(true, t('logic.saved'))
   } catch (err) {
     showStatus(false, err.response?.data?.detail ?? t('logic.errorSave'))
@@ -413,6 +510,15 @@ function clearDebugValues() {
   })
 }
 
+function countGraphDiagnostics(outputs) {
+  return Object.values(outputs || {}).filter(out =>
+    out &&
+    typeof out === 'object' &&
+    typeof out.__diagnostic__ === 'string' &&
+    out.__diagnostic__.startsWith('graph_cycle')
+  ).length
+}
+
 function toggleDebug() {
   debugMode.value = !debugMode.value
   localStorage.setItem('logic_debug_mode', debugMode.value ? '1' : '0')
@@ -423,11 +529,20 @@ async function runGraph() {
   if (!auth.isAdmin || !activeGraphId.value) return
   try {
     const { data } = await logicApi.runGraph(activeGraphId.value)
-    const evalCount = Object.keys(data.outputs || {}).length
-    showStatus(true, t('logic.runResult', { count: evalCount }))
+    const outputs = data.outputs || {}
+    const evalCount = Object.keys(outputs).length
+    const diagnosticCount = Array.isArray(data.warnings) ? data.warnings.length : countGraphDiagnostics(outputs)
+    showStatus(
+      diagnosticCount === 0,
+      diagnosticCount > 0
+        ? t('logic.runResultWithWarnings', { count: evalCount, warnings: diagnosticCount })
+        : t('logic.runResult', { count: evalCount }),
+      diagnosticCount > 0 ? 6000 : 3000
+    )
     // Always update lastRunOutputs (needed for extractor config panels)
-    lastRunOutputs.value = data.outputs || {}
-    if (debugMode.value) applyDebugValues(data.outputs || {})
+    lastRunOutputs.value = outputs
+    if (debugMode.value || diagnosticCount > 0) applyDebugValues(outputs)
+    else clearDebugValues()
   } catch (err) {
     showStatus(false, err.response?.data?.detail ?? t('common.error'))
   }
@@ -563,12 +678,18 @@ async function onImportFile(event) {
 function onConnect(params) {
   if (!auth.isAdmin) return
   const opts = defaultEdgeOptions.value
-  edges.value = addEdge({
+  const nextEdges = addEdge({
     ...params,
     type: opts.type,
     animated: opts.animated,
     style: opts.style,
   }, edges.value)
+  const graphWarnings = analyzeFlowWarnings(nodes.value, nextEdges)
+  if (graphWarnings.length) {
+    showStatus(false, t('logic.graphValidationConnectBlocked', { count: graphWarnings.length }), 6000)
+    return
+  }
+  edges.value = nextEdges
 }
 
 // ── Drop node from palette ─────────────────────────────────────────────────

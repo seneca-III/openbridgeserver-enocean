@@ -1174,7 +1174,7 @@ class LogicManager:
         executor = GraphExecutor(flow, hyst, self._app_config)
         try:
             pre_execute_hyst = copy.deepcopy(hyst) if needs_api_client_replay_snapshot else None
-            outputs = executor.execute(aug_overrides)
+            outputs = executor.execute(aug_overrides, commit_memory=False)
         except Exception as exc:
             logger.error("Graph %s (%s) execution error: %s", graph_id, name, exc)
             return {}
@@ -1288,7 +1288,7 @@ class LogicManager:
                 # a WoL edge is present — we only want their *outputs*, not
                 # a second mutation of their persisted state.
                 wol_second_executor = GraphExecutor(flow, copy.deepcopy(hyst), self._app_config)
-                wol_second_outputs = wol_second_executor.execute(wol_merged)
+                wol_second_outputs = wol_second_executor.execute(wol_merged, commit_memory=False)
                 # Compute transitive closure of WoL-triggered nodes so that only
                 # their descendants are updated, leaving unrelated nodes intact.
                 wol_descendants: set[str] = set()
@@ -1522,7 +1522,7 @@ class LogicManager:
                 if pre_execute_hyst is not None:
                     replay_hyst = copy.deepcopy(pre_execute_hyst)
                     second_executor = GraphExecutor(flow, replay_hyst, self._app_config)
-                    second_outputs = second_executor.execute(replay_overrides)
+                    second_outputs = second_executor.execute(replay_overrides, commit_memory=False)
                     # Compute transitive descendants of triggered api_clients so that
                     # only their subtree is updated. This prevents the api_client
                     # second pass from overwriting WoL-propagated outputs that were
@@ -1710,6 +1710,11 @@ class LogicManager:
                     msg[:40],
                     exc,
                 )
+
+        # Memory is the explicit tick boundary for feedback loops. Commit it
+        # after all async node re-propagation so the stored value always reflects
+        # the final graph outputs, not executor placeholders from an earlier pass.
+        executor.commit_memory_inputs(outputs, aug_overrides)
 
         # ── Process datapoint_write outputs — apply trigger gating + write-side filters,
         # then publish DataValueEvent so registry, ring-buffer, MQTT and WS all get notified.

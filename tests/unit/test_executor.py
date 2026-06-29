@@ -1205,6 +1205,140 @@ class TestMultiNodeGraph:
         out = exc.execute({"f": {"in1": 100, "in2": 0}})
         assert out["f"]["result"] == pytest.approx(100.0)
 
+    def test_cycle_nodes_are_reported_instead_of_dropped(self, caplog):
+        nodes = [
+            node("a", "not", {}),
+            node("b", "not", {}),
+        ]
+        edges = [
+            edge("a", "b", source_handle="out", target_handle="in1"),
+            edge("b", "a", source_handle="out", target_handle="in1"),
+        ]
+        exc = make_executor(nodes, edges)
+
+        out = exc.execute()
+
+        assert set(out) == {"a", "b"}
+        assert out["a"]["__diagnostic__"] == "graph_cycle"
+        assert out["b"]["__diagnostic__"] == "graph_cycle"
+        assert set(out["a"]["__cycle_nodes__"]) == {"a", "b"}
+        assert "Logic graph contains cycle" in caplog.text
+
+    def test_cycle_keeps_acyclic_branch_and_marks_blocked_descendants(self):
+        nodes = [
+            node("root", "const_value", {"value": "7", "data_type": "number"}),
+            node("ok", "math_formula", {"formula": "a + 1"}),
+            node("a", "not", {}),
+            node("b", "not", {}),
+            node("blocked", "math_formula", {"formula": "a + 1"}),
+        ]
+        edges = [
+            edge("root", "ok", source_handle="value", target_handle="in1"),
+            edge("a", "b", source_handle="out", target_handle="in1"),
+            edge("b", "a", source_handle="out", target_handle="in1"),
+            edge("b", "blocked", source_handle="out", target_handle="in1"),
+        ]
+        exc = make_executor(nodes, edges)
+
+        out = exc.execute()
+
+        assert out["ok"]["result"] == pytest.approx(8.0)
+        assert out["a"]["__diagnostic__"] == "graph_cycle"
+        assert out["b"]["__diagnostic__"] == "graph_cycle"
+        assert out["blocked"]["__diagnostic__"] == "graph_cycle_blocked"
+
+    def test_memory_outputs_previous_value_and_commits_current_input_after_run(self):
+        nodes = [
+            node("src", "const_value", {"value": "10", "data_type": "number"}),
+            node("mem", "memory", {"initial_value": "2", "data_type": "number"}),
+        ]
+        edges = [edge("src", "mem", source_handle="value", target_handle="in")]
+        state = {}
+        exc = make_executor(nodes, edges, hysteresis_state=state)
+
+        first = exc.execute()
+        second = exc.execute()
+
+        assert first["mem"]["out"] == pytest.approx(2.0)
+        assert second["mem"]["out"] == pytest.approx(10.0)
+        assert state["mem"]["value"] == pytest.approx(10.0)
+
+    def test_memory_commit_can_be_deferred_and_applied_later(self):
+        nodes = [
+            node("src", "const_value", {"value": "10", "data_type": "number"}),
+            node("mem", "memory", {"initial_value": "2", "data_type": "number"}),
+        ]
+        edges = [edge("src", "mem", source_handle="value", target_handle="in")]
+        state = {}
+        exc = make_executor(nodes, edges, hysteresis_state=state)
+
+        out = exc.execute(commit_memory=False)
+
+        assert out["mem"]["out"] == pytest.approx(2.0)
+        assert state == {}
+
+        exc.commit_memory_inputs(out)
+        assert state["mem"]["value"] == pytest.approx(10.0)
+
+    def test_memory_honors_wired_reset_before_committing_input(self):
+        nodes = [
+            node("src", "const_value", {"value": "10", "data_type": "number"}),
+            node("rst", "const_value", {"value": "true", "data_type": "bool"}),
+            node("mem", "memory", {"initial_value": "2", "data_type": "number"}),
+        ]
+        edges = [
+            edge("src", "mem", source_handle="value", target_handle="in"),
+            edge("rst", "mem", source_handle="value", target_handle="reset"),
+        ]
+        state = {"mem": {"value": 7.0}}
+        exc = make_executor(nodes, edges, hysteresis_state=state)
+
+        out = exc.execute()
+
+        assert out["mem"]["out"] == pytest.approx(7.0)
+        assert state["mem"]["value"] == pytest.approx(2.0)
+
+    def test_memory_does_not_commit_diagnostic_source_value(self):
+        nodes = [
+            node("a", "not", {}),
+            node("b", "not", {}),
+            node("mem", "memory", {"initial_value": "2", "data_type": "number"}),
+        ]
+        edges = [
+            edge("a", "b", source_handle="out", target_handle="in1"),
+            edge("b", "a", source_handle="out", target_handle="in1"),
+            edge("a", "mem", source_handle="out", target_handle="in"),
+        ]
+        state = {"mem": {"value": 7.0}}
+        exc = make_executor(nodes, edges, hysteresis_state=state)
+
+        out = exc.execute()
+
+        assert out["a"]["__diagnostic__"] == "graph_cycle"
+        assert out["mem"]["out"] == pytest.approx(7.0)
+        assert state["mem"]["value"] == pytest.approx(7.0)
+
+    def test_memory_breaks_feedback_cycle_by_one_run(self):
+        nodes = [
+            node("mem", "memory", {"initial_value": "false", "data_type": "bool"}),
+            node("not", "not", {}),
+        ]
+        edges = [
+            edge("mem", "not", source_handle="out", target_handle="in1"),
+            edge("not", "mem", source_handle="out", target_handle="in"),
+        ]
+        exc = make_executor(nodes, edges, hysteresis_state={})
+
+        first = exc.execute()
+        second = exc.execute()
+
+        assert "__diagnostic__" not in first["mem"]
+        assert "__diagnostic__" not in first["not"]
+        assert first["mem"]["out"] is False
+        assert first["not"]["out"] is True
+        assert second["mem"]["out"] is True
+        assert second["not"]["out"] is False
+
 
 # ===========================================================================
 # Enhanced AND / OR / XOR  (variable inputs 2–30, per-input/output negation)

@@ -611,7 +611,9 @@ The logic editor enables visual creation of automation rules — without program
 
 The graph can also be started manually via the **▶ Run** button.
 
-**States** (hysteresis, statistics, operating hours, min/max tracker, consumption counter) are stored in the database and survive a restart.
+**States** (hysteresis, memory, statistics, operating hours, min/max tracker, consumption counter) are stored in the database and survive a restart.
+
+Direct feedback loops are validated in the editor and blocked when saving or connecting nodes. Use a **Memory** block as an explicit tick boundary for controlled feedback: it outputs the value stored from the previous graph run and stores the current input for the next run.
 
 ---
 
@@ -631,6 +633,7 @@ The graph can also be started manually via the **▶ Run** button.
 | **OR** | A, B | Out | True when **at least one** input is true. |
 | **NOT** | In | Out | Inverts the input. |
 | **XOR** | A, B | Out | True when **exactly one** input is true. |
+| **Memory** | In, Reset | Out | Outputs the stored value from the previous graph run and stores the current input for the next run. Use this block to build controlled feedback loops. |
 | **Compare** | A, B | Result | Compares two values. Options: `>` `<` `=` `>=` `<=` `≠` |
 | **Hysteresis** | Value | Out | Switches on when the value exceeds "threshold ON", and switches off only when it falls below "threshold OFF". Prevents rapid toggling. |
 | **Decision** | Value | 2-n boolean outputs | Evaluates multiple independent conditions against one input. Every output has its own name and condition; several outputs can be true at the same time. |

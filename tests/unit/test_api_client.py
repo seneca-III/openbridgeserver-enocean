@@ -1515,6 +1515,37 @@ class TestApiClientDownstreamPropagation:
         assert outputs["ac"]["success"] is False
         assert outputs["gate"]["out"] is False
 
+    @patch("obs.logic.manager.httpx.AsyncClient")
+    def test_memory_downstream_of_api_client_keeps_tick_boundary(self, mock_client_cls):
+        mock_client = AsyncMock()
+        mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
+        mock_client.request = AsyncMock(return_value=_mock_response(404))
+
+        nodes = [
+            node("cv_trig", "const_value", {"value": "true", "data_type": "bool"}),
+            node("ac", "api_client", {"url": "http://93.184.216.34"}),
+            node("mem", "memory", {"initial_value": "false", "data_type": "bool"}),
+        ]
+        edges = [
+            edge("cv_trig", "ac", "value", "trigger"),
+            edge("ac", "mem", "success", "in"),
+        ]
+        flow = _flow(nodes, edges)
+
+        manager = _make_manager()
+        graph_id = "g-memory-api"
+        manager._graphs[graph_id] = ("t", True, flow)
+        manager._node_state[graph_id] = {}
+        manager._hysteresis[graph_id] = {"mem": {"value": True}}
+
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            outputs = asyncio.run(manager._execute_graph(graph_id, "t", flow, {}))
+
+        assert outputs["ac"]["success"] is False
+        assert outputs["mem"]["out"] is True
+        assert manager._hysteresis[graph_id]["mem"]["value"] is False
+
     def test_downstream_node_receives_variable_error_response(self):
         nodes = [
             node("cv_trig", "const_value", {"value": "true", "data_type": "bool"}),
@@ -1783,13 +1814,13 @@ class TestNotifyPushoverImageUrlSecurity:
         mock_client = AsyncMock()
         mock_client_cls.return_value.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client_cls.return_value.__aexit__ = AsyncMock(return_value=False)
-        mock_client.get = AsyncMock()
+        mock_client.stream = MagicMock()
         mock_client.post = AsyncMock()
 
-        with patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("100.64.0.1", 443))]):
+        with patch("obs.logic.manager._resolve_safe_image_url", new=AsyncMock(return_value=None)):
             outputs = self._run_notify_pushover("https://example.com/image.png")
 
-        mock_client.get.assert_not_called()
+        mock_client.stream.assert_not_called()
         mock_client.post.assert_not_called()
         assert outputs["po"]["sent"] is False
 
@@ -1818,7 +1849,10 @@ class TestNotifyPushoverImageUrlSecurity:
         post_resp.raise_for_status = MagicMock()
         mock_client.post = AsyncMock(return_value=post_resp)
 
-        with patch("obs.security.url_targets.socket.getaddrinfo", return_value=[(0, 0, 0, "", ("93.184.216.34", 443))]):
+        with patch(
+            "obs.logic.manager._resolve_safe_image_url",
+            new=AsyncMock(return_value=("https://93.184.216.34/path/image.png?size=1", "example.com", "93.184.216.34")),
+        ):
             outputs = self._run_notify_pushover("https://example.com/path/image.png?size=1")
 
         assert outputs["po"]["sent"] is True

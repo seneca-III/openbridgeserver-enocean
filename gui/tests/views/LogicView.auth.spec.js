@@ -294,6 +294,30 @@ describe('LogicView fmtDebugVal branches', () => {
     expect(wrapper.vm.nodes[0].data._dbg).toMatch(/Division by zero/)
   })
 
+  it('marks graph cycle diagnostics even when debug mode is off', async () => {
+    const { wrapper, logicApi } = await mountWithActiveGraph()
+    logicApi.runGraph.mockResolvedValueOnce({
+      data: {
+        outputs: {
+          n1: {
+            __error__: 'Graph cycle detected; node was not executed.',
+            __diagnostic__: 'graph_cycle',
+            __cycle_nodes__: ['n1'],
+          },
+        },
+      },
+    })
+
+    await wrapper.vm.runGraph()
+
+    expect(wrapper.vm.debugMode).toBe(false)
+    expect(wrapper.vm.nodes[0].data._dbg).toMatch(/Graph cycle detected/)
+
+    logicApi.runGraph.mockResolvedValueOnce({ data: { outputs: { n1: { value: 42, changed: true } } } })
+    await wrapper.vm.runGraph()
+    expect(wrapper.vm.nodes[0].data._dbg).toBeUndefined()
+  })
+
   it('formats _message output for notify nodes', async () => {
     const { wrapper } = await mountWithActiveGraph()
 
@@ -499,6 +523,116 @@ describe('LogicView WebSocket', () => {
     const { wrapper } = await mountLogicView({ isAdmin: true })
     expect(wrapper.vm).toBeTruthy()
     wrapper.unmount()
+  })
+})
+
+describe('LogicView graph cycle validation', () => {
+  it('blocks direct cycle connections', async () => {
+    const graph = makeGraph('graph-1', {
+      flow_data: {
+        nodes: [
+          { id: 'a', type: 'not', position: { x: 0, y: 0 }, data: {} },
+          { id: 'b', type: 'not', position: { x: 160, y: 0 }, data: {} },
+        ],
+        edges: [
+          { id: 'a-b', source: 'a', target: 'b', sourceHandle: 'out', targetHandle: 'in1' },
+        ],
+      },
+    })
+    const { wrapper } = await mountLogicView({
+      isAdmin: true,
+      graphs: [graph],
+      routeQuery: { graph: 'graph-1' },
+      graphDetails: { 'graph-1': graph },
+    })
+
+    wrapper.vm.onConnect({ source: 'b', target: 'a', sourceHandle: 'out', targetHandle: 'in1' })
+
+    expect(wrapper.vm.edges).toHaveLength(1)
+    expect(wrapper.vm.statusMsg.ok).toBe(false)
+  })
+
+  it('allows feedback connections through memory nodes', async () => {
+    const graph = makeGraph('graph-1', {
+      flow_data: {
+        nodes: [
+          { id: 'mem', type: 'memory', position: { x: 0, y: 0 }, data: { initial_value: 'false', data_type: 'bool' } },
+          { id: 'not', type: 'not', position: { x: 160, y: 0 }, data: {} },
+        ],
+        edges: [
+          { id: 'mem-not', source: 'mem', target: 'not', sourceHandle: 'out', targetHandle: 'in1' },
+        ],
+      },
+    })
+    const { wrapper } = await mountLogicView({
+      isAdmin: true,
+      graphs: [graph],
+      routeQuery: { graph: 'graph-1' },
+      graphDetails: { 'graph-1': graph },
+    })
+
+    wrapper.vm.onConnect({ source: 'not', target: 'mem', sourceHandle: 'out', targetHandle: 'in' })
+
+    expect(wrapper.vm.edges).toHaveLength(2)
+    expect(wrapper.vm.validationWarnings).toEqual([])
+  })
+
+  it('blocks saving graphs with direct cycles and marks the nodes', async () => {
+    const graph = makeGraph('graph-1', {
+      flow_data: {
+        nodes: [
+          { id: 'a', type: 'not', position: { x: 0, y: 0 }, data: {} },
+          { id: 'b', type: 'not', position: { x: 160, y: 0 }, data: {} },
+        ],
+        edges: [
+          { id: 'a-b', source: 'a', target: 'b', sourceHandle: 'out', targetHandle: 'in1' },
+          { id: 'b-a', source: 'b', target: 'a', sourceHandle: 'out', targetHandle: 'in1' },
+        ],
+      },
+    })
+    const { wrapper, logicApi } = await mountLogicView({
+      isAdmin: true,
+      graphs: [graph],
+      routeQuery: { graph: 'graph-1' },
+      graphDetails: { 'graph-1': graph },
+    })
+
+    await wrapper.vm.saveGraph()
+
+    expect(logicApi.saveGraph).not.toHaveBeenCalled()
+    expect(wrapper.vm.statusMsg.ok).toBe(false)
+    expect(wrapper.vm.validationWarnings).toHaveLength(2)
+    expect(wrapper.vm.nodes.map(n => n.data._dbg)).toEqual([
+      expect.stringContaining('Zyklus'),
+      expect.stringContaining('Zyklus'),
+    ])
+  })
+
+  it('uses API warning counts from runGraph responses', async () => {
+    const graph = makeGraph('graph-1')
+    const { wrapper, logicApi } = await mountLogicView({
+      isAdmin: true,
+      graphs: [graph],
+      routeQuery: { graph: 'graph-1' },
+      graphDetails: { 'graph-1': graph },
+    })
+    logicApi.runGraph.mockResolvedValueOnce({
+      data: {
+        outputs: {
+          n1: {
+            __error__: 'Graph cycle detected; node was not executed.',
+            __diagnostic__: 'graph_cycle',
+          },
+        },
+        warnings: [{ node_id: 'n1', code: 'graph_cycle', message: 'cycle' }],
+      },
+    })
+
+    await wrapper.vm.runGraph()
+
+    expect(wrapper.vm.statusMsg.ok).toBe(false)
+    expect(wrapper.vm.statusMsg.text).toContain('Warnungen')
+    expect(wrapper.vm.nodes[0].data._dbg).toContain('Graph cycle detected')
   })
 })
 
