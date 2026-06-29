@@ -636,6 +636,10 @@ Direct feedback loops are validated in the editor and blocked when saving or con
 | **Memory** | In, Reset | Out | Outputs the stored value from the previous graph run and stores the current input for the next run. Use this block to build controlled feedback loops. |
 | **Compare** | A, B | Result | Compares two values. Options: `>` `<` `=` `>=` `<=` `≠` |
 | **Hysteresis** | Value | Out | Switches on when the value exceeds "threshold ON", and switches off only when it falls below "threshold OFF". Prevents rapid toggling. |
+| **Decision** | Value | 2-n boolean outputs | Evaluates multiple independent conditions against one input. Every output has its own name and condition; several outputs can be true at the same time. |
+| **Mapping** | Value | Result | Evaluates ordered rules and returns the first matching result. Output type can be bool, int, float, or string; an optional default value handles unmatched inputs. |
+
+Decision and Mapping share the same condition operators: equals, not equal, greater/less than, greater/less or equal, range, text comparison, contains, starts with, ends with, and regular expression.
 
 #### Data point
 

@@ -7,6 +7,7 @@ Returns a dict of node_id → output_values.
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import math
 import operator
@@ -36,6 +37,12 @@ _COMPARE_OPS = {
     "!=": operator.ne,
     "ne": operator.ne,
 }
+_TEXT_COMPARE_OPS = {"text", "text_eq", "equals_text"}
+_RANGE_OPS = {"range", "between"}
+_CONTAINS_OPS = {"contains"}
+_STARTS_WITH_OPS = {"starts_with", "startswith", "begins_with"}
+_ENDS_WITH_OPS = {"ends_with", "endswith"}
+_REGEX_OPS = {"regex", "regexp"}
 
 
 class ExecutionError(Exception):
@@ -235,6 +242,28 @@ class GraphExecutor:
             return None
 
     @staticmethod
+    def _try_bool_literal(v: Any) -> bool | None:
+        if isinstance(v, bool):
+            return v
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in {"true", "1", "yes", "on"}:
+                return True
+            if s in {"false", "0", "no", "off"}:
+                return False
+        return None
+
+    @classmethod
+    def _values_equal(cls, left: Any, right: Any) -> bool:
+        bool_left, bool_right = cls._try_bool_literal(left), cls._try_bool_literal(right)
+        if bool_left is not None and bool_right is not None:
+            return bool_left == bool_right
+        num_left, num_right = cls._try_num(left), cls._try_num(right)
+        if num_left is not None and num_right is not None:
+            return num_left == num_right
+        return str(left) == str(right)
+
+    @staticmethod
     def _to_bool(v: Any) -> bool:
         """Coerce any value to bool. Strings '0'/'false'/'off' → False."""
         if v is None:
@@ -266,6 +295,96 @@ class GraphExecutor:
         if dtype == "string":
             return "" if value is None else str(value)
         return value
+
+    @staticmethod
+    def _load_rule_list(value: Any) -> list[dict[str, Any]]:
+        if isinstance(value, list):
+            return [r for r in value if isinstance(r, dict)]
+        if isinstance(value, str):
+            try:
+                parsed = json.loads(value or "[]")
+            except (TypeError, ValueError):
+                return []
+            if isinstance(parsed, list):
+                return [r for r in parsed if isinstance(r, dict)]
+        return []
+
+    @staticmethod
+    def _condition_value(rule: dict[str, Any], key: str, fallback: Any = None, *, blank_is_missing: bool = False) -> Any:
+        value = rule.get(key, fallback)
+        if blank_is_missing and isinstance(value, str) and value.strip() == "":
+            return fallback
+        return value
+
+    @classmethod
+    def _condition_matches(cls, input_value: Any, rule: dict[str, Any]) -> bool:
+        operator_key = str(rule.get("operator") or rule.get("op") or "eq").strip().lower()
+        expected = cls._condition_value(rule, "value")
+        if input_value is None:
+            return False
+
+        if operator_key in _RANGE_OPS:
+            lo = cls._condition_value(rule, "min", expected, blank_is_missing=True)
+            hi = cls._condition_value(rule, "max", cls._condition_value(rule, "value_to", blank_is_missing=True), blank_is_missing=True)
+            num_value, num_lo, num_hi = cls._try_num(input_value), cls._try_num(lo), cls._try_num(hi)
+            if num_value is None or num_lo is None or num_hi is None:
+                return False
+            lower, upper = sorted((num_lo, num_hi))
+            return lower <= num_value <= upper
+
+        if operator_key in _REGEX_OPS:
+            pattern = str(expected or "")
+            if not pattern:
+                return False
+            flags = 0 if rule.get("case_sensitive") else re.IGNORECASE
+            try:
+                return re.search(pattern, str(input_value), flags=flags) is not None
+            except re.error:
+                return False
+
+        if operator_key in _CONTAINS_OPS | _STARTS_WITH_OPS | _ENDS_WITH_OPS | _TEXT_COMPARE_OPS:
+            left = str(input_value)
+            right = str(expected if expected is not None else "")
+            if operator_key in _CONTAINS_OPS | _STARTS_WITH_OPS | _ENDS_WITH_OPS and right == "":
+                return False
+            if not rule.get("case_sensitive"):
+                left = left.casefold()
+                right = right.casefold()
+            if operator_key in _CONTAINS_OPS:
+                return right in left
+            if operator_key in _STARTS_WITH_OPS:
+                return left.startswith(right)
+            if operator_key in _ENDS_WITH_OPS:
+                return left.endswith(right)
+            return left == right
+
+        if input_value is None or expected is None:
+            return False
+        equality_ops = {"=", "==", "eq"}
+        inequality_ops = {"!=", "ne"}
+        if operator_key in equality_ops:
+            return cls._values_equal(input_value, expected)
+        if operator_key in inequality_ops:
+            return not cls._values_equal(input_value, expected)
+        op = _COMPARE_OPS.get(operator_key, operator.eq)
+        num_left, num_right = cls._try_num(input_value), cls._try_num(expected)
+        if num_left is not None and num_right is not None:
+            return op(num_left, num_right)
+        return False
+
+    @classmethod
+    def _coerce_mapping_result(cls, value: Any, output_type: str) -> Any:
+        output_type = str(output_type or "string").lower()
+        if output_type == "bool":
+            return cls._to_bool(value)
+        if output_type == "int":
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                return 0
+        if output_type == "float":
+            return cls._to_num(value)
+        return "" if value is None else str(value)
 
     # ── Node Evaluators ───────────────────────────────────────────────────
 
@@ -369,6 +488,27 @@ class GraphExecutor:
                     state = prev
                 self.hysteresis_state[node.id] = state
                 return {"out": state}
+
+            case "decision":
+                value = inputs.get("value")
+                conditions = self._load_rule_list(d.get("conditions"))
+                if not conditions:
+                    conditions = [{"handle": "out_1"}, {"handle": "out_2"}]
+                result: dict[str, Any] = {}
+                for idx, rule in enumerate(conditions):
+                    handle = str(rule.get("handle") or f"out_{idx + 1}")
+                    result[handle] = self._condition_matches(value, rule)
+                return result
+
+            case "value_mapping":
+                value = inputs.get("value")
+                output_type = str(d.get("output_type", "string")).lower()
+                for rule in self._load_rule_list(d.get("rules")):
+                    if self._condition_matches(value, rule):
+                        return {"result": self._coerce_mapping_result(rule.get("result"), output_type)}
+                if self._to_bool(d.get("has_default")):
+                    return {"result": self._coerce_mapping_result(d.get("default_value"), output_type)}
+                return {"result": None}
 
             case "math_formula":
                 formula = d.get("formula", "a + b")

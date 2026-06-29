@@ -102,6 +102,15 @@ const selectedDef = computed(() =>
   selectedWidget.value ? WidgetRegistry.get(selectedWidget.value.type) : null,
 )
 
+function withWidgetDefaults(type: string, raw: unknown): Record<string, unknown> {
+  const def = WidgetRegistry.get(type)
+  const base = def?.defaultConfig ? structuredClone(def.defaultConfig) as Record<string, unknown> : {}
+  const overrides = raw && typeof raw === 'object' && !Array.isArray(raw)
+    ? raw as Record<string, unknown>
+    : {}
+  return { ...base, ...overrides }
+}
+
 const showPaletteMobile = ref(false)
 const showConfigMobile = ref(false)
 
@@ -362,6 +371,13 @@ function widgetStyle(w: WidgetInstance) {
   }
 }
 
+function widgetChrome(w: WidgetInstance): string {
+  const v = w.config?.chrome_variant
+  if (v === 'flat')    return 'rounded-xl border-2 border-transparent overflow-hidden'
+  if (v === 'outline') return 'rounded-xl border border-gray-300 dark:border-gray-600 overflow-hidden'
+  return 'bg-gray-100 dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 overflow-hidden'
+}
+
 // ── Drag & Resize ─────────────────────────────────────────────────────────────
 interface DragState {
   type: 'move' | 'resize'
@@ -449,6 +465,7 @@ onMounted(async () => {
       for (const w of config.value.widgets) {
         w.status_datapoint_id ??= null
         w.name ??= ''
+        w.config = withWidgetDefaults(w.type, w.config)
       }
       // Datenpunkt-Referenzen im Hintergrund validieren (non-blocking)
       validateDatapointRefs()
@@ -522,7 +539,14 @@ function removeSelected() {
 // ── Config aktualisieren ──────────────────────────────────────────────────────
 function updateConfig(newCfg: Record<string, unknown>) {
   if (!selectedWidget.value) return
-  selectedWidget.value.config = newCfg
+  const nextCfg = { ...newCfg }
+  if (
+    selectedWidget.value.config?.chrome_variant !== undefined
+    && !Object.prototype.hasOwnProperty.call(newCfg, 'chrome_variant')
+  ) {
+    nextCfg.chrome_variant = selectedWidget.value.config.chrome_variant
+  }
+  selectedWidget.value.config = withWidgetDefaults(selectedWidget.value.type, nextCfg)
 }
 
 function setDataPoint(id: string | null) {
@@ -824,11 +848,12 @@ const showSettings = ref(false)
           <div
             v-for="w in config.widgets"
             :key="w.id"
-            class="absolute overflow-hidden rounded-xl border-2 transition-[border-color,box-shadow] group"
+            class="absolute transition-[border-color,box-shadow] group"
             :class="[
+              widgetChrome(w),
               selectedId === w.id
-                ? 'border-blue-500 shadow-lg shadow-blue-500/30 z-10'
-                : 'border-gray-300 dark:border-gray-700 hover:border-gray-400 dark:hover:border-gray-500 z-0',
+                ? '!border-2 !border-blue-500 shadow-lg shadow-blue-500/30 z-10'
+                : 'hover:border-gray-400 dark:hover:border-gray-500 z-0',
               drag?.widgetId === w.id && drag?.type === 'move' ? 'opacity-90' : '',
             ]"
             :style="widgetStyle(w)"
@@ -837,7 +862,7 @@ const showSettings = ref(false)
             @click.stop="selectedId = w.id"
           >
             <!-- Widget-Vorschau (echte Komponente, editorMode=true) -->
-            <div class="w-full h-full bg-gray-100 dark:bg-gray-800 pointer-events-none">
+            <div class="w-full h-full pointer-events-none">
               <component
                 :is="WidgetRegistry.get(w.type)?.component"
                 v-if="WidgetRegistry.get(w.type)"
@@ -989,6 +1014,20 @@ const showSettings = ref(false)
                 :compatible-types="selectedDef.compatibleTypes"
                 @update:model-value="setStatusDataPoint"
               />
+            </div>
+
+            <!-- Darstellung (Chrome-Variante) -->
+            <div>
+              <p class="text-xs font-semibold text-gray-400 dark:text-gray-500 uppercase tracking-wider mb-2">{{ $t('editor.appearance') }}</p>
+              <select
+                :value="(selectedWidget.config?.chrome_variant as string) ?? 'default'"
+                class="w-full bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-700 rounded px-2 py-1.5 text-sm text-gray-900 dark:text-gray-100 focus:outline-none focus:border-blue-500"
+                @change="updateConfig({ ...selectedWidget.config, chrome_variant: ($event.target as HTMLSelectElement).value === 'default' ? undefined : ($event.target as HTMLSelectElement).value })"
+              >
+                <option value="default">{{ $t('editor.chromeVariant.default') }}</option>
+                <option value="flat">{{ $t('editor.chromeVariant.flat') }}</option>
+                <option value="outline">{{ $t('editor.chromeVariant.outline') }}</option>
+              </select>
             </div>
 
             <!-- Widget-Config -->

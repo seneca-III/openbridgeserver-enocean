@@ -14,6 +14,16 @@ vi.mock('@vue-flow/core', () => ({
   }),
 }))
 
+function mountNode(data) {
+  return mount(GenericNode, {
+    props: {
+      id: 'node-1',
+      type: 'api_client',
+      data,
+    },
+  })
+}
+
 describe('GenericNode memory rendering', () => {
   it('renders memory input, reset, and output ports', () => {
     const wrapper = mount(GenericNode, {
@@ -30,5 +40,19 @@ describe('GenericNode memory rendering', () => {
     expect(wrapper.text()).toContain('Ausgang')
     expect(wrapper.find('[data-id="reset"][data-type="target"]').exists()).toBe(true)
     expect(wrapper.find('[data-id="out"][data-type="source"]').exists()).toBe(true)
+  })
+})
+
+describe('GenericNode debug band', () => {
+  it('uses the full debug title when present', () => {
+    const wrapper = mountNode({ _dbg: 'short response', _dbg_title: 'full response body' })
+
+    expect(wrapper.find('[data-testid="debug-band"]').attributes('title')).toBe('full response body')
+  })
+
+  it('falls back to the visible debug value for the title', () => {
+    const wrapper = mountNode({ _dbg: 'visible debug' })
+
+    expect(wrapper.find('[data-testid="debug-band"]').attributes('title')).toBe('visible debug')
   })
 })

@@ -121,7 +121,13 @@
     "posY": "Y",
     "widthShort": "B",
     "heightShort": "H",
-    "hintPaletteDrag": "Aus Palette ziehen → direkt platzieren"
+    "hintPaletteDrag": "Aus Palette ziehen → direkt platzieren",
+    "appearance": "Darstellung",
+    "chromeVariant": {
+      "default": "Standard (Grau-Karte)",
+      "flat": "Flat (kein Hintergrund)",
+      "outline": "Outline (nur Rahmen)"
+    }
   },
   "viewer": {
     "noVisuSelected": "Keine Visu ausgewählt"
@@ -383,12 +389,18 @@
   },
   "widgets": {
     "common": {
+      "fontSize": "Schriftgrösse Label",
+      "fontSizeLg": "L",
+      "fontSizeMd": "M",
+      "fontSizeSm": "S",
+      "fontSizeXl": "XL",
+      "fontSizeXs": "XS",
       "label": "Beschriftung",
       "noResults": "Keine Treffer",
-      "selectPage": "Seite wählen …",
-      "searchPage": "Seitenname suchen …",
-      "nodeTypePage": "Seite",
       "nodeTypeArea": "Bereich",
+      "nodeTypePage": "Seite",
+      "searchPage": "Seitenname suchen …",
+      "selectPage": "Seite wählen …",
       "type": "Typ"
     },
     "chart": {
@@ -521,6 +533,9 @@
       "streamMjpeg": "MJPEG (Motion JPEG)",
       "streamSnapshot": "JPEG Snapshot (Auto-Refresh)",
       "streamHls": "HLS (.m3u8)",
+      "labelPlaceholder": "z.B. Eingang, Garten …",
+      "configureUrl": "Kamera-URL konfigurieren",
+      "noUrlConfigured": "Keine URL konfiguriert",
       "streamUrl": "Stream-URL",
       "refreshInterval": "Aktualisierungsintervall (Sekunden)",
       "auth": "Authentifizierung",
@@ -531,15 +546,19 @@
       "password": "Passwort",
       "apiKeyParam": "Parameter-Name",
       "apiKey": "API-Key",
-      "credentialWarning": "Credentials werden in die URL eingebettet (http://user:pass@host/…). Nur für interne Netzwerke empfohlen.",
+      "credentialWarning": "Credentials werden in die URL eingebettet (http://user:pass{'@'}host/…). Nur für interne Netzwerke empfohlen.",
       "useProxy": "Via Server-Proxy laden",
+      "proxyMixedContentHint": "(Mixed-Content / HTTPS → HTTP)",
       "aspectRatio": "Seitenverhältnis",
       "aspectFree": "Frei (Widget-Grösse)",
       "aspectSquare": "1:1 (Quadrat)",
       "objectFit": "Bildanpassung",
       "fitContain": "Einpassen (contain)",
       "fitCover": "Füllen (cover)",
-      "fitFill": "Strecken (fill)"
+      "fitFill": "Strecken (fill)",
+      "streamUnavailable": "Stream nicht erreichbar",
+      "autoRetry": "Automatischer Neuversuch in 10 s",
+      "reloadNow": "Jetzt neu laden"
     },
     "licht": {
       "brightness": "Helligkeit (0–100 %)",
@@ -574,9 +593,15 @@
       "white": "Weisskanal (0–255)"
     },
     "link": {
+      "activeIndicator": "Aktive Seite markieren",
+      "activeIndicatorBorder": "Rahmen",
+      "activeIndicatorDot": "Punkt (●)",
+      "activeIndicatorLine": "Linie (unten)",
+      "activeIndicatorNone": "Keine",
       "defaultLabel": "Link",
       "labelPlaceholder": "z.B. Wohnzimmer",
       "noTarget": "Kein Ziel",
+      "showArrow": "Navigationspfeil (→) anzeigen",
       "showIcon": "Icon anzeigen",
       "preserveIconColor": "SVG-Icon-Farbe erhalten (kein Schwarz/Weiß)",
       "targetPage": "Ziel-Seite",

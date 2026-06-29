@@ -51,7 +51,7 @@
       </div>
 
       <!-- Debug value strip -->
-      <div v-if="data._dbg" class="gn-debug" data-testid="debug-band">{{ data._dbg }}</div>
+      <div v-if="data._dbg" class="gn-debug" :title="debugTitle" data-testid="debug-band">{{ data._dbg }}</div>
     </div>
 
     <!-- Output handles (RIGHT) -->
@@ -79,6 +79,23 @@ const props = defineProps({
   data: { type: Object, default: () => ({}) },
 })
 
+function parseRowList(raw) {
+  if (Array.isArray(raw)) {
+    return raw.filter(row => row && typeof row === 'object' && !Array.isArray(row))
+  }
+  if (typeof raw !== 'string') return []
+  try {
+    const parsed = JSON.parse(raw || '[]')
+    return Array.isArray(parsed)
+      ? parsed.filter(row => row && typeof row === 'object' && !Array.isArray(row))
+      : []
+  } catch (_) {
+    return []
+  }
+}
+
+const debugTitle = computed(() => props.data._dbg_title || props.data._dbg || '')
+
 // ── Node definitions ───────────────────────────────────────────────────────
 const NODE_DEFS = computed(() => ({
   const_value:  { label: 'Festwert',    color: '#475569', inputs: [],                                                                                                  outputs: [{id:'value',      label:t('logic.ports.value')}]       },
@@ -90,6 +107,8 @@ const NODE_DEFS = computed(() => ({
   memory:       { label: 'Speicher',    color: '#1d4ed8', inputs: [{id:'in',label:t('logic.ports.input')},{id:'reset',label:t('logic.ports.reset')}],                  outputs: [{id:'out',        label:t('logic.ports.output')}]      },
   compare:      { label: 'Vergleich',   color: '#1d4ed8', inputs: [{id:'in1',label:t('logic.ports.in_n',{n:1})},{id:'in2',label:t('logic.ports.in_n',{n:2})}],         outputs: [{id:'out',        label:t('logic.portLabels.resultShort')}] },
   hysteresis:   { label: 'Hysterese',   color: '#1d4ed8', inputs: [{id:'value',label:t('logic.ports.value')}],                                                         outputs: [{id:'out',        label:t('logic.ports.out')}]         },
+  decision:     { label: 'Entscheidung', color: '#1d4ed8', inputs: [{id:'value',label:t('logic.ports.value')}],                                                         outputs: [{id:'out_1',label:t('logic.nodeConfig.decision.defaultOutput', { n: 1 })},{id:'out_2',label:t('logic.nodeConfig.decision.defaultOutput', { n: 2 })}] },
+  value_mapping:{ label: 'Zuordnung',    color: '#1d4ed8', inputs: [{id:'value',label:t('logic.ports.value')}],                                                         outputs: [{id:'result',     label:t('logic.portLabels.resultShort')}] },
   math_formula: { label: 'Formel',      color: '#7c3aed', inputs: [{id:'in1',label:t('logic.ports.in_n',{n:1})},{id:'in2',label:t('logic.ports.in_n',{n:2})}],          outputs: [{id:'result',     label:t('logic.portLabels.resultShort')}] },
   math_map:     { label: 'Skalieren',   color: '#7c3aed', inputs: [{id:'value',label:t('logic.ports.value')}],                                                         outputs: [{id:'result',     label:t('logic.portLabels.resultShort')}] },
   timer_delay:  { label: 'Verzögerung', color: '#b45309', inputs: [{id:'trigger',label:t('logic.ports.trigger')}],                                                     outputs: [{id:'trigger',    label:t('logic.ports.trigger')}]     },
@@ -190,6 +209,20 @@ const def = computed(() => {
     }
     return { ...base, label, outputs }
   }
+  if (props.type === 'decision') {
+    let conditions = parseRowList(props.data?.conditions)
+    if (conditions.length === 0) {
+      conditions = [
+        { handle: 'out_1', name: t('logic.nodeConfig.decision.defaultOutput', { n: 1 }) },
+        { handle: 'out_2', name: t('logic.nodeConfig.decision.defaultOutput', { n: 2 }) },
+      ]
+    }
+    const outputs = conditions.map((entry, i) => ({
+      id:    entry?.handle || `out_${i + 1}`,
+      label: entry?.name || t('logic.nodeConfig.decision.defaultOutput', { n: i + 1 }),
+    }))
+    return { ...base, label, outputs }
+  }
   if (props.type === 'json_extractor') {
     let pathList = []
     try { pathList = JSON.parse(props.data?.json_paths || '[]') } catch (_) { pathList = [] }
@@ -230,6 +263,15 @@ const summary = computed(() => {
   if (props.type === 'compare')      return `A ${d.operator ?? '>'} B`
   if (props.type === 'hysteresis')   return `ON≥${d.threshold_on ?? 25}  OFF≤${d.threshold_off ?? 20}`
   if (props.type === 'memory')       return `${d.data_type ?? 'auto'} · ${d.initial_value ?? '—'}`
+  if (props.type === 'decision') {
+    const conditions = parseRowList(d.conditions)
+    return t('logic.summary.rules', { n: conditions.length || 2 })
+  }
+  if (props.type === 'value_mapping') {
+    const rules = parseRowList(d.rules)
+    const type = d.output_type || 'string'
+    return `${type} · ${t('logic.summary.rules', { n: rules.length || 2 })}`
+  }
   if (props.type === 'math_formula') return d.formula || 'a + b'
   if (props.type === 'math_map')     return `[${d.in_min ?? 0}‒${d.in_max ?? 100}] → [${d.out_min ?? 0}‒${d.out_max ?? 1}]`
   if (props.type === 'timer_delay')  return `${d.delay_s ?? 1} s`
