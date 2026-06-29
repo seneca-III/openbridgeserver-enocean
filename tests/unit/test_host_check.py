@@ -1417,3 +1417,75 @@ class TestReplayOrderingFixes:
         assert outputs["ac2"]["success"] is True
         mock_to_thread.assert_awaited_once()
         assert outputs["wol"]["sent"] is True
+
+    def test_wol_hc_propagates_to_downstream_node(self):
+        """wol → hc → gate: HC reachable result must be replayed to downstream nodes."""
+        nodes = [
+            node("cv", "const_value", {"value": "true", "data_type": "bool"}),
+            node("wol", "wake_on_lan", {"mac_address": "AA:BB:CC:DD:EE:FF"}),
+            node("hc", "host_check", {"host": "192.168.1.1", "timeout_s": 1, "count": 1}),
+            node("gate", "and", {"input_count": 2}),
+        ]
+        flow = _flow(
+            nodes,
+            [
+                edge("cv", "wol", "value", "trigger"),
+                edge("wol", "hc", "sent", "trigger"),
+                edge("hc", "gate", "reachable", "in1"),
+                edge("cv", "gate", "value", "in2"),
+            ],
+        )
+        manager = _make_manager()
+        graph_id = "g-wol-hc-gate"
+        manager._graphs[graph_id] = ("test", True, flow)
+        manager._node_state[graph_id] = {}
+
+        with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+            with patch("obs.logic.manager.asyncio.to_thread", new_callable=AsyncMock):
+                with patch("obs.logic.manager._ping_host", new_callable=AsyncMock, return_value=(True, 5.0)):
+                    outputs = asyncio.run(manager._execute_graph(graph_id, "test", flow, {}))
+
+        assert outputs["wol"]["sent"] is True
+        assert outputs["hc"]["reachable"] is True
+        assert outputs["gate"]["out"] is True
+
+    def test_api_hc_wol_triggers_second_hc(self):
+        """api_client→hc→wol→hc2: second HC must ping after the post-api WoL sends."""
+        nodes = [
+            node("cv", "const_value", {"value": "true", "data_type": "bool"}),
+            node("ac", "api_client", {"url": "http://93.184.216.34", "method": "GET"}),
+            node("hc1", "host_check", {"host": "192.168.1.1", "timeout_s": 1, "count": 1}),
+            node("wol", "wake_on_lan", {"mac_address": "AA:BB:CC:DD:EE:FF"}),
+            node("hc2", "host_check", {"host": "192.168.1.2", "timeout_s": 1, "count": 1}),
+        ]
+        flow = _flow(
+            nodes,
+            [
+                edge("cv", "ac", "value", "trigger"),
+                edge("ac", "hc1", "success", "trigger"),
+                edge("hc1", "wol", "reachable", "trigger"),
+                edge("wol", "hc2", "sent", "trigger"),
+            ],
+        )
+        manager = _make_manager()
+        graph_id = "g-api-hc-wol-hc"
+        manager._graphs[graph_id] = ("test", True, flow)
+        manager._node_state[graph_id] = {}
+
+        mock_client_cls = _patch_api_success()
+        try:
+            with patch("obs.api.v1.websocket.get_ws_manager", side_effect=RuntimeError("no ws")):
+                with patch(
+                    "obs.logic.manager._ping_host",
+                    new_callable=AsyncMock,
+                    side_effect=[(True, 1.0), (True, 2.0)],
+                ) as mock_ping:
+                    with patch("obs.logic.manager.asyncio.to_thread", new_callable=AsyncMock):
+                        outputs = asyncio.run(manager._execute_graph(graph_id, "test", flow, {}))
+        finally:
+            mock_client_cls.stop()
+
+        assert mock_ping.await_count == 2
+        assert outputs["hc1"]["reachable"] is True
+        assert outputs["wol"]["sent"] is True
+        assert outputs["hc2"]["reachable"] is True
