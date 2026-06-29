@@ -10,6 +10,7 @@ import asyncio
 import logging
 import time
 import uuid
+from collections import deque
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -71,7 +72,7 @@ class _BindingState:
         self.last_value: Any = object()
         self.in_flight: bool = False
         self.reset_version: int = 0
-        self.pending_event: tuple[Any, DataValueEvent] | None = None
+        self.pending_events: deque[tuple[Any, DataValueEvent]] = deque()
 
 
 def _as_number(value: Any) -> float | None:
@@ -212,7 +213,8 @@ class MessageAdapter(AdapterBase):
                 continue
             self._binding_map.setdefault(binding.datapoint_id, []).append(binding)
             active_ids.add(binding.id)
-            self._states.setdefault(binding.id, _BindingState())
+            state = self._states.setdefault(binding.id, _BindingState())
+            state.pending_events.clear()
         for binding_id in list(self._states):
             if binding_id not in active_ids:
                 self._states.pop(binding_id, None)
@@ -243,7 +245,7 @@ class MessageAdapter(AdapterBase):
         if not condition:
             state.last_condition = False
             state.reset_version += 1
-            state.pending_event = None
+            state.pending_events.clear()
             return
 
         now = time.monotonic()
@@ -269,7 +271,7 @@ class MessageAdapter(AdapterBase):
         )
         reset_version = state.reset_version
         if state.in_flight and not ignore_repetition:
-            state.pending_event = (binding, event)
+            state.pending_events.append((binding, event))
             return
         state.in_flight = True
         task = asyncio.create_task(self._send_and_record(binding, event, cfg, rendered, state, now, reset_version))
@@ -306,11 +308,16 @@ class MessageAdapter(AdapterBase):
             await self._publish_status(True, "MESSAGE sent", code="messageSent")
 
         state.in_flight = False
-        pending = state.pending_event
-        state.pending_event = None
-        if pending is not None:
+        while state.pending_events:
+            pending = state.pending_events.popleft()
             pending_binding, pending_event = pending
+            if not self._is_current_binding(pending_binding):
+                continue
             await self._handle_binding_event(pending_binding, pending_event)
+            break
+
+    def _is_current_binding(self, binding: Any) -> bool:
+        return any(current is binding for current in self._binding_map.get(binding.datapoint_id, []))
 
     async def _send_to_targets(
         self,

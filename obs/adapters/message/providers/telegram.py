@@ -49,4 +49,24 @@ class TelegramProvider:
             response = await client.post(url, json=payload)
         if response.status_code >= 400:
             return MessageSendResult("telegram", target_name, False, f"HTTP {response.status_code}")
+        ok, detail = _telegram_response_ok(response)
+        if not ok:
+            return MessageSendResult("telegram", target_name, False, detail)
         return MessageSendResult("telegram", target_name, True)
+
+
+def _telegram_response_ok(response: httpx.Response) -> tuple[bool, str]:
+    try:
+        body = response.json()
+    except Exception:
+        return True, ""
+
+    if not isinstance(body, dict) or "ok" not in body:
+        return True, ""
+    if body["ok"] is True:
+        return True, ""
+
+    description = body.get("description")
+    if description:
+        return False, str(description)
+    return False, "telegram ok=false"

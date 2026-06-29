@@ -166,6 +166,7 @@ def _message_binding(dp_id: uuid.UUID, **config):
 async def _drain_sends(adapter: MessageAdapter) -> None:
     while adapter._send_tasks:
         await asyncio.gather(*list(adapter._send_tasks))
+        await asyncio.sleep(0)
 
 
 @pytest.mark.asyncio
@@ -267,6 +268,49 @@ async def test_any_operator_sends_for_each_changed_value(bus, dummy_provider, mo
     await _drain_sends(adapter)
 
     assert dummy_provider.send.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_any_operator_queues_each_changed_value_during_in_flight_send(bus, monkeypatch):
+    dp_id = uuid.uuid4()
+    monkeypatch.setattr("obs.core.registry.get_registry", lambda: _Registry(_Dp(dp_id, unit=None)))
+    release = asyncio.Event()
+    messages: list[str] = []
+
+    class _SlowProvider(_DummyProvider):
+        provider_type = "slow-any"
+
+        def __init__(self) -> None:
+            pass
+
+        async def send(self, **kwargs):
+            messages.append(kwargs["message"])
+            await release.wait()
+            return MessageSendResult("slow-any", "default", True)
+
+    provider = _SlowProvider()
+    register_provider(provider)
+    adapter = MessageAdapter(
+        event_bus=bus,
+        config={"providers": {"slow-any": {"enabled": True, "targets": {"default": {}}}}},
+    )
+    binding = _message_binding(
+        dp_id,
+        operator="any",
+        compare_value=None,
+        message="###DP###",
+        providers=[{"provider": "slow-any", "target": "default"}],
+    )
+    await adapter.reload_bindings([binding])
+
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value="A", quality="good", source_adapter="test"))
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value="B", quality="good", source_adapter="test"))
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value="C", quality="good", source_adapter="test"))
+
+    release.set()
+    await _drain_sends(adapter)
+
+    assert messages == ["A", "B", "C"]
 
 
 @pytest.mark.asyncio
@@ -513,6 +557,44 @@ async def test_condition_reset_clears_pending_in_flight_send(bus, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_binding_reload_drops_stale_pending_in_flight_send(bus, monkeypatch):
+    dp_id = uuid.uuid4()
+    monkeypatch.setattr("obs.core.registry.get_registry", lambda: _Registry(_Dp(dp_id)))
+    release = asyncio.Event()
+    calls = 0
+
+    class _SlowProvider(_DummyProvider):
+        provider_type = "slow-reload"
+
+        def __init__(self) -> None:
+            pass
+
+        async def send(self, **kwargs):
+            nonlocal calls
+            calls += 1
+            await release.wait()
+            return MessageSendResult("slow-reload", "default", True)
+
+    provider = _SlowProvider()
+    register_provider(provider)
+    adapter = MessageAdapter(
+        event_bus=bus,
+        config={"providers": {"slow-reload": {"enabled": True, "targets": {"default": {}}}}},
+    )
+    binding = _message_binding(dp_id, providers=[{"provider": "slow-reload", "target": "default"}])
+    await adapter.reload_bindings([binding])
+
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=99, quality="good", source_adapter="test"))
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=100, quality="good", source_adapter="test"))
+    await adapter.reload_bindings([])
+
+    release.set()
+    await _drain_sends(adapter)
+
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_send_to_targets_reports_missing_disabled_and_unknown_providers(bus):
     dp_id = uuid.uuid4()
     disabled = _DummyProvider()
@@ -623,9 +705,9 @@ async def test_pushover_provider_reports_body_failure(monkeypatch):
 @pytest.mark.asyncio
 async def test_telegram_provider_posts_message(monkeypatch):
     _FakeAsyncClient.calls = []
-    _FakeAsyncClient.json_body = None
+    _FakeAsyncClient.json_body = {"ok": True}
     _FakeAsyncClient.status_code = 200
-    _FakeAsyncClient.text = "100"
+    _FakeAsyncClient.text = ""
     monkeypatch.setattr("obs.adapters.message.providers.telegram.httpx.AsyncClient", _FakeAsyncClient)
 
     result = await TelegramProvider().send(
@@ -641,6 +723,27 @@ async def test_telegram_provider_posts_message(monkeypatch):
     url, kwargs, _timeout = _FakeAsyncClient.calls[0]
     assert url == "https://api.telegram.org/botsecret/sendMessage"
     assert kwargs["json"] == {"chat_id": "123", "text": "OBS\nHello", "disable_notification": True}
+
+
+@pytest.mark.asyncio
+async def test_telegram_provider_reports_body_failure(monkeypatch):
+    _FakeAsyncClient.calls = []
+    _FakeAsyncClient.json_body = {"ok": False, "description": "Bad Request: chat not found"}
+    _FakeAsyncClient.status_code = 200
+    _FakeAsyncClient.text = ""
+    monkeypatch.setattr("obs.adapters.message.providers.telegram.httpx.AsyncClient", _FakeAsyncClient)
+
+    result = await TelegramProvider().send(
+        provider_config={"enabled": True, "bot_token": "secret", "targets": {}},
+        target_name="chat",
+        target_config={"chat_id": "123"},
+        title=None,
+        message="Hello",
+        context={},
+    )
+
+    assert result.ok is False
+    assert result.detail == "Bad Request: chat not found"
 
 
 @pytest.mark.asyncio
