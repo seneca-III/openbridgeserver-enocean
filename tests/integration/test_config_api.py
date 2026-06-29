@@ -506,6 +506,54 @@ async def test_import_message_binding_rejects_unknown_instance_target(client, au
     assert any("MESSAGE target not configured" in error for error in body["errors"])
 
 
+async def test_import_message_binding_rejects_blank_message_body(client, auth_headers):
+    dp_id = str(uuid.uuid4())
+    inst_id = str(uuid.uuid4())
+    binding_id = str(uuid.uuid4())
+    payload = {
+        "obs_version": "5",
+        "exported_at": "2024-01-01T00:00:00",
+        "datapoints": [{"id": dp_id, "name": f"MsgDP-{uuid.uuid4().hex[:6]}", "data_type": "FLOAT", "unit": None, "tags": [], "mqtt_alias": None}],
+        "bindings": [
+            {
+                "id": binding_id,
+                "datapoint_id": dp_id,
+                "adapter_type": "MESSAGE",
+                "adapter_instance_id": inst_id,
+                "direction": "SOURCE",
+                "config": {
+                    "message": "",
+                    "providers": [{"provider": "pushover", "target": "default"}],
+                },
+                "enabled": True,
+            }
+        ],
+        "adapter_instances": [
+            {
+                "id": inst_id,
+                "adapter_type": "MESSAGE",
+                "name": f"MsgInst-{uuid.uuid4().hex[:6]}",
+                "config": {
+                    "providers": {
+                        "pushover": {
+                            "enabled": True,
+                            "api_token": "app-token",
+                            "targets": {"default": {"user_key": "user-key"}},
+                        }
+                    }
+                },
+                "enabled": False,
+            }
+        ],
+    }
+    resp = await client.post("/api/v1/config/import", json=payload, headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["bindings_created"] == 0
+    assert any("message must not be empty" in error for error in body["errors"])
+
+
 # ---------------------------------------------------------------------------
 # POST /config/import  — datapoint UPDATE path (existing DP gets updated)
 # ---------------------------------------------------------------------------

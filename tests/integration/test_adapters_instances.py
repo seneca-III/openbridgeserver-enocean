@@ -37,6 +37,43 @@ async def _create_instance(client, auth_headers, name: str = "", adapter_type: s
     return resp.json()
 
 
+def _message_instance_config(target: str = "default") -> dict:
+    return {
+        "providers": {
+            "pushover": {
+                "enabled": True,
+                "api_token": "app-token",
+                "targets": {target: {"user_key": "user-key"}},
+            }
+        }
+    }
+
+
+async def _create_message_instance(client, auth_headers, config: dict | None = None) -> dict:
+    resp = await client.post(
+        "/api/v1/adapters/instances",
+        json={
+            "adapter_type": "MESSAGE",
+            "name": f"MsgInst-{uuid.uuid4().hex[:6]}",
+            "config": config or _message_instance_config(),
+            "enabled": False,
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+async def _create_dp(client, auth_headers) -> dict:
+    resp = await client.post(
+        "/api/v1/datapoints/",
+        json={"name": f"AdpMsgDP-{uuid.uuid4().hex[:8]}", "data_type": "FLOAT"},
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
 async def _create_non_admin_headers(client, auth_headers) -> tuple[str, dict]:
     username = f"adp-user-{uuid.uuid4().hex[:8]}"
     resp = await client.post(
@@ -208,6 +245,30 @@ async def test_update_instance_config(client, auth_headers):
     )
     assert resp.status_code == 200
     assert resp.json()["config"].get("offset_override") == 5
+
+
+async def test_update_message_instance_rejects_target_rename_used_by_binding(client, auth_headers):
+    inst = await _create_message_instance(client, auth_headers)
+    dp = await _create_dp(client, auth_headers)
+    create_resp = await client.post(
+        f"/api/v1/datapoints/{dp['id']}/bindings",
+        json={
+            "adapter_instance_id": inst["id"],
+            "direction": "SOURCE",
+            "config": {"providers": [{"provider": "pushover", "target": "default"}]},
+        },
+        headers=auth_headers,
+    )
+    assert create_resp.status_code == 201, create_resp.text
+
+    resp = await client.patch(
+        f"/api/v1/adapters/instances/{inst['id']}",
+        json={"config": _message_instance_config(target="renamed")},
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 422
+    assert "MESSAGE target not configured" in resp.text
 
 
 # ---------------------------------------------------------------------------

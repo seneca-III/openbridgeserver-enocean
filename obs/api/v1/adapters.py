@@ -32,6 +32,7 @@ from pydantic import BaseModel
 from obs.adapters import registry as adapter_registry
 from obs.adapters.knx.dpt_registry import DPTRegistry
 from obs.api.auth import get_admin_user, get_current_user
+from obs.api.v1.bindings import _json_config, _validate_adapter_binding
 from obs.db.database import Database, get_db
 
 router = APIRouter(tags=["adapters"])
@@ -190,6 +191,26 @@ def _instance_out(row: Any, instance: Any | None) -> AdapterInstanceOut:
     )
 
 
+async def _validate_message_config_preserves_binding_targets(
+    instance_id: str,
+    config: dict[str, Any],
+    db: Database,
+) -> None:
+    rows = await db.fetchall(
+        """SELECT direction, config, enabled FROM adapter_bindings
+           WHERE adapter_instance_id=? AND adapter_type='MESSAGE'""",
+        (instance_id,),
+    )
+    for binding_row in rows:
+        _validate_adapter_binding(
+            "MESSAGE",
+            binding_row["direction"],
+            _json_config(binding_row["config"]),
+            enabled=bool(binding_row["enabled"]),
+            instance_config=config,
+        )
+
+
 # ---------------------------------------------------------------------------
 # Instanz-Routen  (WICHTIG: vor /{adapter_type}/... registrieren!)
 # ---------------------------------------------------------------------------
@@ -303,6 +324,8 @@ async def update_instance(
                     status.HTTP_422_UNPROCESSABLE_CONTENT,
                     f"Config-Validierungsfehler: {exc}",
                 ) from exc
+        if row["adapter_type"] == "MESSAGE":
+            await _validate_message_config_preserves_binding_targets(str(instance_id), body.config, db)
         config_raw = json.dumps(body.config)
 
     now = datetime.now(UTC).isoformat()

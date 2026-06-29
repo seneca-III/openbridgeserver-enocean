@@ -258,6 +258,27 @@ async def test_create_message_binding_rejects_unknown_instance_target(client, au
     assert "MESSAGE target not configured" in resp.text
 
 
+async def test_create_message_binding_rejects_blank_message_body(client, auth_headers):
+    dp = await _create_dp(client, auth_headers)
+    inst = await _create_message_instance(client, auth_headers, config=_message_instance_config())
+
+    resp = await client.post(
+        f"/api/v1/datapoints/{dp['id']}/bindings",
+        json={
+            "adapter_instance_id": inst["id"],
+            "direction": "SOURCE",
+            "config": {
+                "message": "   ",
+                "providers": [{"provider": "pushover", "target": "default"}],
+            },
+        },
+        headers=auth_headers,
+    )
+
+    assert resp.status_code == 422
+    assert "message must not be empty" in resp.text
+
+
 async def test_create_binding_invalid_formula_returns_422(client, auth_headers):
     dp = await _create_dp(client, auth_headers)
     inst = await _create_instance(client, auth_headers)
