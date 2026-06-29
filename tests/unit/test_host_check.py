@@ -152,8 +152,9 @@ class TestPingHost:
         assert cmd[c_idx + 1] == "1"
 
     def test_count_and_timeout_clamped_to_maximums(self):
-        with _patch_subprocess(0, b"time=1.0 ms\n") as mock_exec:
-            asyncio.run(_ping_host("host", count=999, timeout_s=999))
+        with patch("sys.platform", "linux"):
+            with _patch_subprocess(0, b"time=1.0 ms\n") as mock_exec:
+                asyncio.run(_ping_host("host", count=999, timeout_s=999))
         cmd = mock_exec.call_args.args
         assert cmd[cmd.index("-c") + 1] == "10"
         assert cmd[cmd.index("-W") + 1] == "30"
