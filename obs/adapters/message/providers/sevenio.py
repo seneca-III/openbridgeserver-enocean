@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from obs.adapters.message.providers.base import MessageSendResult
 
@@ -23,11 +23,23 @@ class SevenIoConfig(BaseModel):
     sender: str | None = None
     targets: dict[str, "SevenIoTarget"] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _validate_enabled_provider(self) -> "SevenIoConfig":
+        if self.enabled and not self.api_key.strip():
+            raise ValueError("seven.io api_key is required when provider is enabled")
+        return self
+
 
 class SevenIoTarget(BaseModel):
     to: str
     channel: SevenIoChannel = SevenIoChannel.SMS
     sender: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> "SevenIoTarget":
+        if not self.to.strip():
+            raise ValueError("seven.io to is required")
+        return self
 
 
 class SevenIoProvider:

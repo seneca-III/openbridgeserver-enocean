@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from obs.adapters.message.providers.base import MessageSendResult
 
@@ -15,10 +15,22 @@ class TelegramConfig(BaseModel):
     bot_token: str = Field(default="", json_schema_extra={"format": "password"})
     targets: dict[str, "TelegramTarget"] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _validate_enabled_provider(self) -> "TelegramConfig":
+        if self.enabled and not self.bot_token.strip():
+            raise ValueError("Telegram bot_token is required when provider is enabled")
+        return self
+
 
 class TelegramTarget(BaseModel):
     chat_id: str
     disable_notification: bool = False
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> "TelegramTarget":
+        if not self.chat_id.strip():
+            raise ValueError("Telegram chat_id is required")
+        return self
 
 
 class TelegramProvider:

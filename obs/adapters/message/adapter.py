@@ -26,6 +26,7 @@ from obs.core.json import json_dumps
 logger = logging.getLogger(__name__)
 
 MessageOperator = Literal["any", "=", "==", "<", "<=", ">", ">=", "!=", "contains", "contains not", "starts with", "ends with"]
+MAX_PENDING_EVENTS_PER_BINDING = 100
 
 
 class ProviderTargetRef(BaseModel):
@@ -79,6 +80,11 @@ class _BindingState:
         self.in_flight: bool = False
         self.reset_version: int = 0
         self.pending_events: deque[tuple[Any, DataValueEvent]] = deque()
+
+    def queue_pending_event(self, binding: Any, event: DataValueEvent) -> None:
+        if len(self.pending_events) >= MAX_PENDING_EVENTS_PER_BINDING:
+            self.pending_events.popleft()
+        self.pending_events.append((binding, event))
 
 
 def _as_number(value: Any) -> float | None:
@@ -276,7 +282,7 @@ class MessageAdapter(AdapterBase):
         )
         reset_version = state.reset_version
         if state.in_flight and not ignore_repetition:
-            state.pending_events.append((binding, event))
+            state.queue_pending_event(binding, event)
             return
         state.in_flight = True
         task = asyncio.create_task(self._send_and_record(binding, event, cfg, rendered, state, reset_version))

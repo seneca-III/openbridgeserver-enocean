@@ -133,6 +133,22 @@ def test_disabled_provider_allows_incomplete_hidden_targets():
     assert cfg.providers["telegram"]["enabled"] is False
 
 
+@pytest.mark.parametrize(
+    ("provider", "config", "error"),
+    [
+        ("pushover", {"enabled": True, "api_token": "", "targets": {}}, "api_token"),
+        ("telegram", {"enabled": True, "bot_token": " ", "targets": {}}, "bot_token"),
+        ("seven.io", {"enabled": True, "api_key": "", "targets": {}}, "api_key"),
+        ("pushover", {"enabled": True, "api_token": "app", "targets": {"default": {"user_key": ""}}}, "user_key"),
+        ("telegram", {"enabled": True, "bot_token": "token", "targets": {"default": {"chat_id": " "}}}, "chat_id"),
+        ("seven.io", {"enabled": True, "api_key": "key", "targets": {"default": {"to": ""}}}, "to"),
+    ],
+)
+def test_enabled_provider_rejects_empty_credentials_and_recipients(provider, config, error):
+    with pytest.raises(ValueError, match=error):
+        MessageAdapterConfig(providers={provider: config})
+
+
 def test_enabled_binding_requires_message_target():
     with pytest.raises(ValueError, match="at least one target"):
         MessageBindingConfig(providers=[])
@@ -364,6 +380,53 @@ async def test_any_operator_continues_draining_after_suppressed_pending_duplicat
     await _drain_sends(adapter)
 
     assert messages == ["A", "B"]
+
+
+@pytest.mark.asyncio
+async def test_in_flight_pending_events_are_bounded_to_newest_values(bus, monkeypatch):
+    monkeypatch.setattr("obs.adapters.message.adapter.MAX_PENDING_EVENTS_PER_BINDING", 2)
+    dp_id = uuid.uuid4()
+    monkeypatch.setattr("obs.core.registry.get_registry", lambda: _Registry(_Dp(dp_id, unit=None)))
+    release = asyncio.Event()
+    messages: list[str] = []
+
+    class _SlowProvider(_DummyProvider):
+        provider_type = "slow-bounded"
+
+        def __init__(self) -> None:
+            pass
+
+        async def send(self, **kwargs):
+            messages.append(kwargs["message"])
+            await release.wait()
+            return MessageSendResult("slow-bounded", "default", True)
+
+    provider = _SlowProvider()
+    register_provider(provider)
+    adapter = MessageAdapter(
+        event_bus=bus,
+        config={"providers": {"slow-bounded": {"enabled": True, "targets": {"default": {}}}}},
+    )
+    binding = _message_binding(
+        dp_id,
+        operator="any",
+        compare_value=None,
+        message="###DP###",
+        providers=[{"provider": "slow-bounded", "target": "default"}],
+        send_on_change=False,
+    )
+    await adapter.reload_bindings([binding])
+
+    for value in ["A", "B", "C", "D", "E"]:
+        await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=value, quality="good", source_adapter="test"))
+
+    state = adapter._states[binding.id]
+    assert len(state.pending_events) == 2
+
+    release.set()
+    await _drain_sends(adapter)
+
+    assert messages == ["A", "D", "E"]
 
 
 @pytest.mark.asyncio

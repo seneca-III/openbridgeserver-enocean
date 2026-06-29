@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from obs.adapters.message.providers.base import MessageSendResult
 
@@ -15,11 +15,23 @@ class PushoverConfig(BaseModel):
     api_token: str = Field(default="", json_schema_extra={"format": "password"})
     targets: dict[str, "PushoverTarget"] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def _validate_enabled_provider(self) -> "PushoverConfig":
+        if self.enabled and not self.api_token.strip():
+            raise ValueError("Pushover api_token is required when provider is enabled")
+        return self
+
 
 class PushoverTarget(BaseModel):
     user_key: str = Field(default="", json_schema_extra={"format": "password"})
     device: str | None = None
     sound: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> "PushoverTarget":
+        if not self.user_key.strip():
+            raise ValueError("Pushover user_key is required")
+        return self
 
 
 class PushoverProvider:
