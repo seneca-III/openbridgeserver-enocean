@@ -1017,6 +1017,11 @@ class LogicManager:
         # Event / manual overrides take priority over registry seed
         aug_overrides.update(overrides)
 
+        api_client_ids = {node.id for node in flow.nodes if node.type == "api_client"}
+        host_check_ids = {node.id for node in flow.nodes if node.type == "host_check"}
+        operating_hour_ids = {node.id for node in flow.nodes if node.type == "operating_hours"}
+        needs_async_replay_snapshot = any(edge.source in api_client_ids or edge.source in host_check_ids for edge in flow.edges)
+
         # ── Pre-compute operating_hours values to inject as overrides ─────
         for node in flow.nodes:
             if node.type == "operating_hours":
@@ -1225,34 +1230,38 @@ class LogicManager:
             except Exception as _hc_exc:
                 logger.debug("Graph %s: heating_circuit history pre-fill failed: %s", graph_id[:8], _hc_exc)
 
-        api_client_ids = {node.id for node in flow.nodes if node.type == "api_client"}
-        host_check_ids = {node.id for node in flow.nodes if node.type == "host_check"}
-        needs_async_replay_snapshot = any(edge.source in api_client_ids or edge.source in host_check_ids for edge in flow.edges)
         executor = GraphExecutor(flow, hyst, self._app_config)
         try:
             pre_execute_hyst = copy.deepcopy(hyst) if needs_async_replay_snapshot else None
+            pre_execute_node_state = copy.deepcopy(graph_state) if needs_async_replay_snapshot else None
             outputs = executor.execute(aug_overrides)
         except Exception as exc:
             logger.error("Graph %s (%s) execution error: %s", graph_id, name, exc)
             return {}
 
+        def _apply_operating_hours_state(node_ids: set[str] | None = None, base_state: dict[str, Any] | None = None) -> None:
+            target_ids = operating_hour_ids if node_ids is None else operating_hour_ids & node_ids
+            for node in flow.nodes:
+                if node.id not in target_ids:
+                    continue
+                out = outputs.get(node.id, {})
+                if base_state is not None:
+                    graph_state[node.id] = copy.deepcopy(base_state.get(node.id, {"accumulated_hours": 0.0, "last_start": None}))
+                ns = graph_state.setdefault(node.id, {"accumulated_hours": 0.0, "last_start": None})
+                is_reset = out.get("_reset", False)
+                is_active = out.get("_active", False)
+                if is_reset:
+                    ns["accumulated_hours"] = 0.0
+                    ns["last_start"] = execute_now if is_active else None
+                elif is_active:
+                    if not ns.get("last_start"):
+                        ns["last_start"] = execute_now
+                elif ns.get("last_start"):
+                    ns["accumulated_hours"] += (execute_now - ns["last_start"]).total_seconds() / 3600
+                    ns["last_start"] = None
+
         # ── Update operating_hours state ─────────────────────────────────
-        for node in flow.nodes:
-            if node.type != "operating_hours":
-                continue
-            out = outputs.get(node.id, {})
-            ns = graph_state.setdefault(node.id, {"accumulated_hours": 0.0, "last_start": None})
-            is_reset = out.get("_reset", False)
-            is_active = out.get("_active", False)
-            if is_reset:
-                ns["accumulated_hours"] = 0.0
-                ns["last_start"] = execute_now if is_active else None
-            elif is_active:
-                if not ns.get("last_start"):
-                    ns["last_start"] = execute_now
-            elif ns.get("last_start"):
-                ns["accumulated_hours"] += (execute_now - ns["last_start"]).total_seconds() / 3600
-                ns["last_start"] = None
+        _apply_operating_hours_state()
 
         # ── Cron-reachability preamble ────────────────────────────────────
         # Shared by host_check and wake_on_lan: each cron tick is treated as a
@@ -1272,6 +1281,47 @@ class LogicManager:
                     if _ce.source == _cn and _ce.target not in cron_reachable:
                         cron_reachable.add(_ce.target)
                         _cq.append(_ce.target)
+
+        async def _run_host_check_node(node: Any, target_set: set[str], log_suffix: str = "") -> bool:
+            out = outputs.get(node.id, {})
+            hyst_hc = hyst.setdefault(node.id, {})
+            is_triggered = GraphExecutor._to_bool(out.get("_trigger"))
+            was_triggered = hyst_hc.get("hc_prev_trigger", False)
+            is_cron_triggered = node.id in cron_reachable
+            if not is_triggered:
+                hyst_hc["hc_prev_trigger"] = False
+                return False
+            if was_triggered and not is_cron_triggered:
+                outputs[node.id]["reachable"] = hyst_hc.get("hc_last_reachable", False)
+                outputs[node.id]["latency_ms"] = hyst_hc.get("hc_last_latency_ms")
+                target_set.add(node.id)
+                return True
+            host = (node.data.get("host") or "").strip()
+            if not host:
+                logger.warning("host_check: host missing on node %s", node.id[:8])
+                return False
+            try:
+                timeout_s, count = _normalise_host_check_ping_config(node.data.get("timeout_s"), node.data.get("count"))
+                reachable, latency_ms = await _ping_host(host, count, timeout_s)
+                hyst_hc["hc_prev_trigger"] = True
+                hyst_hc["hc_last_reachable"] = reachable
+                hyst_hc["hc_last_latency_ms"] = latency_ms
+                outputs[node.id]["reachable"] = reachable
+                outputs[node.id]["latency_ms"] = latency_ms
+                target_set.add(node.id)
+                logger.info(
+                    "Graph %s: host_check%s %s → reachable=%s latency=%s ms",
+                    graph_id[:8],
+                    log_suffix,
+                    host,
+                    reachable,
+                    f"{latency_ms:.1f}" if latency_ms is not None else "—",
+                )
+                return True
+            except Exception as exc:
+                logger.warning("Graph %s: host_check %s failed: %s", graph_id[:8], host, exc)
+                return False
+
         # ── Handle host_check ─────────────────────────────────────────────
         # Rising-edge trigger (same cron-exemption logic as wake_on_lan):
         # ping is sent only on the False→True transition of _trigger, or on
@@ -1282,72 +1332,51 @@ class LogicManager:
         for node in flow.nodes:
             if node.type != "host_check":
                 continue
-            out = outputs.get(node.id, {})
-            hyst_hc = hyst.setdefault(node.id, {})
-            is_triggered = GraphExecutor._to_bool(out.get("_trigger"))
-            was_triggered = hyst_hc.get("hc_prev_trigger", False)
-            is_cron_triggered = node.id in cron_reachable
-            if not is_triggered:
-                hyst_hc["hc_prev_trigger"] = False
-                continue
-            if was_triggered and not is_cron_triggered:
-                # Sustained high trigger — restore last known result so downstream
-                # nodes see the real value instead of the executor placeholder.
-                outputs[node.id]["reachable"] = hyst_hc.get("hc_last_reachable", False)
-                outputs[node.id]["latency_ms"] = hyst_hc.get("hc_last_latency_ms")
-                triggered_host_check_nodes.add(node.id)
-                continue
-            host = (node.data.get("host") or "").strip()
-            if not host:
-                logger.warning("host_check: host missing on node %s", node.id[:8])
-                continue
-            try:
-                timeout_s, count = _normalise_host_check_ping_config(node.data.get("timeout_s"), node.data.get("count"))
-                reachable, latency_ms = await _ping_host(host, count, timeout_s)
-                hyst_hc["hc_prev_trigger"] = True
-                hyst_hc["hc_last_reachable"] = reachable
-                hyst_hc["hc_last_latency_ms"] = latency_ms
-                outputs[node.id]["reachable"] = reachable
-                outputs[node.id]["latency_ms"] = latency_ms
-                triggered_host_check_nodes.add(node.id)
-                logger.info(
-                    "Graph %s: host_check %s → reachable=%s latency=%s ms",
-                    graph_id[:8],
-                    host,
-                    reachable,
-                    f"{latency_ms:.1f}" if latency_ms is not None else "—",
-                )
-            except Exception as exc:
-                logger.warning("Graph %s: host_check %s failed: %s", graph_id[:8], host, exc)
+            await _run_host_check_node(node, triggered_host_check_nodes)
 
         # ── Re-propagate host_check outputs to downstream nodes ───────────
-        if triggered_host_check_nodes:
+        pending_host_check_replay = set(triggered_host_check_nodes)
+        processed_host_check_replay: set[str] = set()
+        while pending_host_check_replay:
+            replay_sources = pending_host_check_replay - processed_host_check_replay
+            if not replay_sources:
+                break
+            processed_host_check_replay.update(replay_sources)
             hc_downstream_overrides: dict[str, dict[str, Any]] = {}
             for e in flow.edges:
-                if e.source in triggered_host_check_nodes:
+                if e.source in replay_sources:
                     src_handle = e.sourceHandle or "out"
                     tgt_handle = e.targetHandle or "in"
                     hc_downstream_overrides.setdefault(e.target, {})[tgt_handle] = GraphExecutor._get_output_value(outputs[e.source], src_handle)
-            if hc_downstream_overrides:
-                hc_merged: dict[str, dict[str, Any]] = {nid: dict(vals) for nid, vals in aug_overrides.items()}
-                for nid, vals in hc_downstream_overrides.items():
-                    hc_merged.setdefault(nid, {}).update(vals)
-                hc_hyst_snapshot = copy.deepcopy(pre_execute_hyst if pre_execute_hyst is not None else hyst)
-                hc_second_executor = GraphExecutor(flow, hc_hyst_snapshot, self._app_config)
-                hc_second_outputs = hc_second_executor.execute(hc_merged)
-                hc_descendants: set[str] = set()
-                hc_queue: list[str] = list(triggered_host_check_nodes)
-                while hc_queue:
-                    nid = hc_queue.pop()
-                    for e in flow.edges:
-                        if e.source == nid and e.target not in hc_descendants:
-                            hc_descendants.add(e.target)
-                            hc_queue.append(e.target)
-                for nid, vals in hc_second_outputs.items():
-                    if nid not in host_check_ids and nid in hc_descendants:
-                        outputs[nid] = vals
-                        if nid in hc_hyst_snapshot:
-                            hyst[nid] = hc_hyst_snapshot[nid]
+            if not hc_downstream_overrides:
+                continue
+            hc_merged: dict[str, dict[str, Any]] = {nid: dict(vals) for nid, vals in aug_overrides.items()}
+            for nid, vals in hc_downstream_overrides.items():
+                hc_merged.setdefault(nid, {}).update(vals)
+            hc_hyst_snapshot = copy.deepcopy(pre_execute_hyst if pre_execute_hyst is not None else hyst)
+            hc_second_executor = GraphExecutor(flow, hc_hyst_snapshot, self._app_config)
+            hc_second_outputs = hc_second_executor.execute(hc_merged)
+            hc_descendants: set[str] = set()
+            hc_queue: list[str] = list(replay_sources)
+            while hc_queue:
+                nid = hc_queue.pop()
+                for e in flow.edges:
+                    if e.source == nid and e.target not in hc_descendants:
+                        hc_descendants.add(e.target)
+                        hc_queue.append(e.target)
+            for nid, vals in hc_second_outputs.items():
+                if nid in hc_descendants:
+                    outputs[nid] = vals
+                    if nid not in host_check_ids and nid in hc_hyst_snapshot:
+                        hyst[nid] = hc_hyst_snapshot[nid]
+            _apply_operating_hours_state(hc_descendants, pre_execute_node_state)
+            newly_triggered_hc: set[str] = set()
+            for node in flow.nodes:
+                if node.type == "host_check" and node.id in hc_descendants and node.id not in triggered_host_check_nodes:
+                    await _run_host_check_node(node, newly_triggered_hc, " (replay)")
+            if newly_triggered_hc:
+                triggered_host_check_nodes.update(newly_triggered_hc)
+                pending_host_check_replay.update(newly_triggered_hc)
 
         # ── Handle wake_on_lan ────────────────────────────────────────────
         # Runs AFTER host_check so that graphs with host_check → WoL read
@@ -1684,74 +1713,55 @@ class LogicManager:
         for node in flow.nodes:
             if node.type != "host_check" or node.id in triggered_host_check_nodes:
                 continue
-            out = outputs.get(node.id, {})
-            hyst_hc = hyst.setdefault(node.id, {})
-            is_triggered = GraphExecutor._to_bool(out.get("_trigger"))
-            was_triggered = hyst_hc.get("hc_prev_trigger", False)
-            is_cron_triggered = node.id in cron_reachable
-            if not is_triggered:
-                hyst_hc["hc_prev_trigger"] = False
-                continue
-            if was_triggered and not is_cron_triggered:
-                outputs[node.id]["reachable"] = hyst_hc.get("hc_last_reachable", False)
-                outputs[node.id]["latency_ms"] = hyst_hc.get("hc_last_latency_ms")
-                post_api_triggered_hc.add(node.id)
+            if await _run_host_check_node(node, post_api_triggered_hc, " (post-api)"):
                 triggered_host_check_nodes.add(node.id)
-                continue
-            host = (node.data.get("host") or "").strip()
-            if not host:
-                logger.warning("host_check: host missing on node %s", node.id[:8])
-                continue
-            try:
-                timeout_s, count = _normalise_host_check_ping_config(node.data.get("timeout_s"), node.data.get("count"))
-                reachable, latency_ms = await _ping_host(host, count, timeout_s)
-                hyst_hc["hc_prev_trigger"] = True
-                hyst_hc["hc_last_reachable"] = reachable
-                hyst_hc["hc_last_latency_ms"] = latency_ms
-                outputs[node.id]["reachable"] = reachable
-                outputs[node.id]["latency_ms"] = latency_ms
-                post_api_triggered_hc.add(node.id)
-                triggered_host_check_nodes.add(node.id)
-                logger.info(
-                    "Graph %s: host_check (post-api) %s → reachable=%s latency=%s ms",
-                    graph_id[:8],
-                    host,
-                    reachable,
-                    f"{latency_ms:.1f}" if latency_ms is not None else "—",
-                )
-            except Exception as exc:
-                logger.warning("Graph %s: host_check %s failed: %s", graph_id[:8], host, exc)
 
         post_api_hc_descendants: set[str] = set()
-        if post_api_triggered_hc:
+        pending_post_api_hc_replay = set(post_api_triggered_hc)
+        processed_post_api_hc_replay: set[str] = set()
+        while pending_post_api_hc_replay:
+            replay_sources = pending_post_api_hc_replay - processed_post_api_hc_replay
+            if not replay_sources:
+                break
+            processed_post_api_hc_replay.update(replay_sources)
             pat_hc_overrides: dict[str, dict[str, Any]] = {}
             for e in flow.edges:
-                if e.source in post_api_triggered_hc:
+                if e.source in replay_sources:
                     src_handle = e.sourceHandle or "out"
                     tgt_handle = e.targetHandle or "in"
                     pat_hc_overrides.setdefault(e.target, {})[tgt_handle] = GraphExecutor._get_output_value(outputs[e.source], src_handle)
-            if pat_hc_overrides:
-                pat_base_overrides = api_replay_overrides if api_replay_overrides is not None else aug_overrides
-                pat_merged: dict[str, dict[str, Any]] = {nid: dict(vals) for nid, vals in pat_base_overrides.items()}
-                for nid, vals in pat_hc_overrides.items():
-                    pat_merged.setdefault(nid, {}).update(vals)
-                pat_hyst_snapshot = copy.deepcopy(pre_execute_hyst if pre_execute_hyst is not None else hyst)
-                pat_executor = GraphExecutor(flow, pat_hyst_snapshot, self._app_config)
-                pat_outputs = pat_executor.execute(pat_merged)
-                pat_descendants: set[str] = set()
-                pat_queue: list[str] = list(post_api_triggered_hc)
-                while pat_queue:
-                    nid = pat_queue.pop()
-                    for e in flow.edges:
-                        if e.source == nid and e.target not in pat_descendants:
-                            pat_descendants.add(e.target)
-                            pat_queue.append(e.target)
-                post_api_hc_descendants = pat_descendants
-                for nid, vals in pat_outputs.items():
-                    if nid not in host_check_ids and nid in pat_descendants:
-                        outputs[nid] = vals
-                        if nid in pat_hyst_snapshot:
-                            hyst[nid] = pat_hyst_snapshot[nid]
+            if not pat_hc_overrides:
+                continue
+            pat_base_overrides = api_replay_overrides if api_replay_overrides is not None else aug_overrides
+            pat_merged: dict[str, dict[str, Any]] = {nid: dict(vals) for nid, vals in pat_base_overrides.items()}
+            for nid, vals in pat_hc_overrides.items():
+                pat_merged.setdefault(nid, {}).update(vals)
+            pat_hyst_snapshot = copy.deepcopy(pre_execute_hyst if pre_execute_hyst is not None else hyst)
+            pat_executor = GraphExecutor(flow, pat_hyst_snapshot, self._app_config)
+            pat_outputs = pat_executor.execute(pat_merged)
+            pat_descendants: set[str] = set()
+            pat_queue: list[str] = list(replay_sources)
+            while pat_queue:
+                nid = pat_queue.pop()
+                for e in flow.edges:
+                    if e.source == nid and e.target not in pat_descendants:
+                        pat_descendants.add(e.target)
+                        pat_queue.append(e.target)
+            post_api_hc_descendants.update(pat_descendants)
+            for nid, vals in pat_outputs.items():
+                if nid in pat_descendants:
+                    outputs[nid] = vals
+                    if nid not in host_check_ids and nid in pat_hyst_snapshot:
+                        hyst[nid] = pat_hyst_snapshot[nid]
+            _apply_operating_hours_state(pat_descendants, pre_execute_node_state)
+            newly_triggered_hc: set[str] = set()
+            for node in flow.nodes:
+                if node.type == "host_check" and node.id in pat_descendants and node.id not in triggered_host_check_nodes:
+                    await _run_host_check_node(node, newly_triggered_hc, " (post-api replay)")
+            if newly_triggered_hc:
+                post_api_triggered_hc.update(newly_triggered_hc)
+                triggered_host_check_nodes.update(newly_triggered_hc)
+                pending_post_api_hc_replay.update(newly_triggered_hc)
 
         # Post-api host_check replay can make downstream WoL nodes fire after
         # the normal WoL loop has already run. Process those affected nodes once
@@ -1822,6 +1832,215 @@ class LogicManager:
                 for nid, vals in post_api_wol_outputs.items():
                     if nid not in wol_node_ids and nid in post_api_wol_descendants:
                         outputs[nid] = vals
+
+        post_api_hc_api_clients: set[str] = set()
+        if post_api_hc_descendants:
+            for node in flow.nodes:
+                if node.type != "api_client" or node.id not in post_api_hc_descendants or node.id in triggered_api_clients:
+                    continue
+                out = outputs.get(node.id, {})
+                if not GraphExecutor._to_bool(out.get("_trigger")):
+                    continue
+                variable_resolver = _make_api_client_variable_resolver(
+                    self._registry,
+                    node.data.get("variables"),
+                    execution_values_by_datapoint_id,
+                )
+                try:
+                    url = _replace_api_client_url_placeholders(
+                        node.data.get("url") or "",
+                        variable_resolver,
+                    ).strip()
+                    if not url:
+                        continue
+                except _ApiClientVariableError as exc:
+                    logger.warning("Graph %s: api_client variable error: %s", graph_id[:8], exc)
+                    outputs[node.id].update({"response": str(exc), "status": None, "success": False})
+                    post_api_hc_api_clients.add(node.id)
+                    triggered_api_clients.add(node.id)
+                    continue
+                try:
+                    request_urls, pinned_headers, request_extensions = _build_api_client_fetch_targets(url)
+                except ValueError as exc:
+                    logger.warning("Graph %s: blocked api_client target %s: %s", graph_id[:8], url, exc)
+                    outputs[node.id].update({"response": str(exc), "status": None, "success": False})
+                    post_api_hc_api_clients.add(node.id)
+                    triggered_api_clients.add(node.id)
+                    continue
+                method = (node.data.get("method", "GET") or "GET").upper()
+                content_type = node.data.get("content_type", "application/json")
+                resp_type = node.data.get("response_type", "application/json")
+                verify_ssl = node.data.get("verify_ssl", True)
+                if isinstance(verify_ssl, str):
+                    verify_ssl = verify_ssl.lower() not in ("false", "0", "no")
+                timeout_s = float(node.data.get("timeout_s", 10) or 10)
+                extra_headers: dict[str, str] = {}
+                hdr_str = (node.data.get("headers") or "").strip()
+                if hdr_str:
+                    try:
+                        extra_headers = _json.loads(hdr_str)
+                    except Exception:
+                        pass
+                hdr_file = (node.data.get("headers_secret_file") or "").strip()
+                if hdr_file:
+                    try:
+                        extra_headers = {
+                            **extra_headers,
+                            **_json.loads(_read_secret_file(hdr_file)),
+                        }
+                    except Exception:
+                        pass
+                try:
+                    extra_headers = _replace_api_client_placeholders(extra_headers, variable_resolver)
+                except _ApiClientVariableError as exc:
+                    logger.warning("Graph %s: api_client variable error: %s", graph_id[:8], exc)
+                    outputs[node.id].update({"response": str(exc), "status": None, "success": False})
+                    post_api_hc_api_clients.add(node.id)
+                    triggered_api_clients.add(node.id)
+                    continue
+                auth_type = (node.data.get("auth_type") or "none").lower()
+                auth: Any = None
+                try:
+                    if auth_type in ("basic", "digest"):
+                        username = _replace_api_client_placeholders(
+                            node.data.get("auth_username") or "",
+                            variable_resolver,
+                        ).strip()
+                        password = _replace_api_client_placeholders(
+                            node.data.get("auth_password") or "",
+                            variable_resolver,
+                        )
+                        if username:
+                            auth = httpx.BasicAuth(username, password) if auth_type == "basic" else httpx.DigestAuth(username, password)
+                    elif auth_type == "bearer":
+                        token = _replace_api_client_placeholders(
+                            node.data.get("auth_token") or "",
+                            variable_resolver,
+                        ).strip()
+                        if not token:
+                            token = _replace_api_client_placeholders(
+                                _read_secret_file(node.data.get("auth_token_file") or ""),
+                                variable_resolver,
+                            ).strip()
+                        if token:
+                            extra_headers = {
+                                **extra_headers,
+                                "Authorization": f"Bearer {token}",
+                            }
+                except _ApiClientVariableError as exc:
+                    logger.warning("Graph %s: api_client variable error: %s", graph_id[:8], exc)
+                    outputs[node.id].update({"response": str(exc), "status": None, "success": False})
+                    post_api_hc_api_clients.add(node.id)
+                    triggered_api_clients.add(node.id)
+                    continue
+                try:
+                    req_kwargs: dict[str, Any] = {
+                        "headers": extra_headers,
+                        "timeout": timeout_s,
+                    }
+                    if method in ("POST", "PUT", "PATCH"):
+                        body = _replace_api_client_placeholders(out.get("_body"), variable_resolver)
+                        if content_type == "application/json":
+                            req_kwargs["content"] = _json.dumps(body) if not isinstance(body, (str, bytes)) else body
+                            req_kwargs["headers"] = {
+                                **extra_headers,
+                                "Content-Type": "application/json",
+                            }
+                        elif content_type == "application/x-www-form-urlencoded":
+                            req_kwargs["data"] = body if isinstance(body, dict) else {"data": str(body)}
+                        else:
+                            req_kwargs["content"] = str(body or "")
+                            req_kwargs["headers"] = {
+                                **extra_headers,
+                                "Content-Type": "text/plain",
+                            }
+                    req_headers = {key: value for key, value in req_kwargs.get("headers", {}).items() if key.lower() != "host"}
+                    req_kwargs["headers"] = {**req_headers, **pinned_headers}
+                    if request_extensions:
+                        req_kwargs["extensions"] = request_extensions
+                    last_transport_error: Exception = ValueError(f"Could not fetch API target after trying {len(request_urls)} address(es)")
+                    resp: httpx.Response | Any | None = None
+                    async with httpx.AsyncClient(auth=auth, verify=verify_ssl) as client:
+                        for request_url in request_urls:
+                            try:
+                                resp = await client.request(method, request_url, **req_kwargs)
+                                break
+                            except httpx.RequestError as req_exc:
+                                last_transport_error = req_exc
+                                if method not in _API_CLIENT_RETRYABLE_METHODS:
+                                    break
+                                continue
+                    if resp is None:
+                        raise last_transport_error
+                    resp_text = resp.text
+                    if len(resp_text) > 1_000_000:
+                        resp_text = resp_text[:1_000_000]
+                    if resp_type in ("json", "application/json"):
+                        try:
+                            resp_data: Any = resp.json()
+                        except Exception:
+                            resp_data = resp_text
+                    else:
+                        resp_data = resp_text
+                    outputs[node.id].update(
+                        {
+                            "response": resp_data,
+                            "status": resp.status_code,
+                            "success": 200 <= resp.status_code < 300,
+                        },
+                    )
+                    logger.info(
+                        "Graph %s: API %s %s → %d",
+                        graph_id[:8],
+                        method,
+                        url,
+                        resp.status_code,
+                    )
+                    post_api_hc_api_clients.add(node.id)
+                    triggered_api_clients.add(node.id)
+                except Exception as exc:
+                    logger.warning("Graph %s: api_client failed: %s", graph_id[:8], exc)
+                    outputs[node.id].update({"response": str(exc), "status": None, "success": False})
+                    post_api_hc_api_clients.add(node.id)
+                    triggered_api_clients.add(node.id)
+
+        if post_api_hc_api_clients:
+            api_descendants: set[str] = set()
+            pending_sources = list(post_api_hc_api_clients)
+            while pending_sources:
+                source_id = pending_sources.pop()
+                for e in flow.edges:
+                    if e.source != source_id or e.target in api_descendants:
+                        continue
+                    api_descendants.add(e.target)
+                    pending_sources.append(e.target)
+
+            downstream_overrides: dict[str, dict[str, Any]] = {}
+            for e in flow.edges:
+                if e.source in post_api_hc_api_clients:
+                    src_handle = e.sourceHandle or "out"
+                    tgt_handle = e.targetHandle or "in"
+                    downstream_overrides.setdefault(e.target, {})[tgt_handle] = GraphExecutor._get_output_value(outputs[e.source], src_handle)
+            if downstream_overrides:
+                replay_base = api_replay_overrides if api_replay_overrides is not None else aug_overrides
+                replay_overrides = {nid: dict(vals) for nid, vals in replay_base.items()}
+                for nid, vals in downstream_overrides.items():
+                    replay_overrides.setdefault(nid, {}).update(vals)
+                for e in flow.edges:
+                    if e.target not in api_descendants or e.source in api_descendants or e.source in post_api_hc_api_clients:
+                        continue
+                    src_handle = e.sourceHandle or "out"
+                    tgt_handle = e.targetHandle or "in"
+                    replay_overrides.setdefault(e.target, {})[tgt_handle] = GraphExecutor._get_output_value(outputs.get(e.source, {}), src_handle)
+                replay_hyst = copy.deepcopy(pre_execute_hyst if pre_execute_hyst is not None else hyst)
+                api_executor = GraphExecutor(flow, replay_hyst, self._app_config)
+                api_outputs = api_executor.execute(replay_overrides)
+                for nid, vals in api_outputs.items():
+                    if nid not in api_client_ids and nid in api_descendants:
+                        outputs[nid] = vals
+                        if nid in replay_hyst:
+                            hyst[nid] = replay_hyst[nid]
+                _apply_operating_hours_state(api_descendants, pre_execute_node_state)
 
         # ── Handle notify_pushover ────────────────────────────────────────
         # Runs AFTER api_client second-pass so that graphs with api_client →
