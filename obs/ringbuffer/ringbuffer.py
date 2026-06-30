@@ -22,10 +22,13 @@ import json
 import logging
 import os
 import re
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
+from uuid import uuid4
 
 import aiosqlite
 
@@ -899,8 +902,20 @@ class RingBuffer:
         return self._storage in {"disk", "file"} and _is_sqlite_corruption(exc)
 
 
+def _is_sqlite_memory_path(database_path: str) -> bool:
+    if database_path == ":memory:":
+        return True
+    if not database_path.startswith("file:"):
+        return False
+    parsed = urlsplit(database_path)
+    if parsed.path == ":memory:":
+        return True
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    return query.get("mode", "").lower() == "memory"
+
+
 def default_ringbuffer_disk_path(database_path: str) -> str:
-    if database_path in {":memory:", "file::memory:?cache=shared"}:
+    if _is_sqlite_memory_path(database_path):
         return database_path
     path = Path(database_path)
     return str(path.with_name(f"{path.stem}_ringbuffer.db"))
@@ -908,11 +923,28 @@ def default_ringbuffer_disk_path(database_path: str) -> str:
 
 def delete_ringbuffer_storage_files(disk_path: str) -> None:
     """Remove the file-backed ringbuffer database and SQLite sidecar files."""
-    for path in (disk_path, f"{disk_path}-wal", f"{disk_path}-shm"):
+    existing_paths = [Path(path) for path in (disk_path, f"{disk_path}-wal", f"{disk_path}-shm") if Path(path).exists()]
+    renamed_paths: list[tuple[Path, Path]] = []
+    delete_suffix = f".deleting-{os.getpid()}-{uuid4().hex}"
+
+    try:
+        for path in existing_paths:
+            delete_path = path.with_name(f"{path.name}{delete_suffix}")
+            os.replace(path, delete_path)
+            renamed_paths.append((delete_path, path))
+    except Exception:
+        for delete_path, original_path in reversed(renamed_paths):
+            with suppress(Exception):
+                os.replace(delete_path, original_path)
+        raise
+
+    for delete_path, original_path in renamed_paths:
         try:
-            os.remove(path)
+            os.remove(delete_path)
         except FileNotFoundError:
             pass
+        except OSError:
+            logger.warning("Could not remove stale ringbuffer storage file %s after disabling monitor", original_path)
 
 
 def is_ringbuffer_enabled() -> bool:

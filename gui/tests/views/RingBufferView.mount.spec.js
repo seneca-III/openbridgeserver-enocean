@@ -89,6 +89,57 @@ describe('RingBufferView mounts', () => {
     expect(wrapper.find('[data-modal-open="true"]').exists()).toBe(true)
   })
 
+  it('opens the monitor config modal from the toolbar for admin users', async () => {
+    const { mountRingBufferView, flushPromises } = await import('../helpers/mountRingBufferView.js')
+    const { wrapper } = await mountRingBufferView()
+
+    expect(wrapper.find('[data-modal-open="true"]').exists()).toBe(false)
+
+    await wrapper.find('[data-testid="btn-open-monitor-config"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-modal-open="true"]').exists()).toBe(true)
+  })
+
+  it('reloads monitor entries from the toolbar refresh button', async () => {
+    const { mountRingBufferView, flushPromises } = await import('../helpers/mountRingBufferView.js')
+    const { wrapper, ringbufferApi } = await mountRingBufferView()
+
+    expect(ringbufferApi.queryV2).toHaveBeenCalledTimes(1)
+
+    await wrapper.find('[data-testid="btn-refresh-ringbuffer"]').trigger('click')
+    await flushPromises()
+
+    expect(ringbufferApi.queryV2).toHaveBeenCalledTimes(2)
+  })
+
+  it('hides monitor config actions for non-admin users', async () => {
+    const { mountRingBufferView, makeRingbufferApiMock } = await import('../helpers/mountRingBufferView.js')
+    const ringbufferApi = makeRingbufferApiMock({
+      stats: vi.fn().mockResolvedValue({
+        data: {
+          total: 0,
+          oldest_ts: null,
+          newest_ts: null,
+          storage: 'file',
+          enabled: false,
+          max_entries: 10000,
+          max_file_size_bytes: null,
+          max_age: null,
+          file_size_bytes: 0,
+          last_recovery_at: null,
+          last_recovery_file_count: 0,
+        },
+      }),
+    })
+
+    const { wrapper } = await mountRingBufferView({ ringbufferApi, isAdmin: false })
+
+    expect(wrapper.find('[data-testid="btn-open-monitor-config"]').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="ringbuffer-disabled-notice"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="ringbuffer-disabled-open-config"]').exists()).toBe(false)
+  })
+
   it('reloads the table after monitor config changes when the monitor remains enabled', async () => {
     const { mountRingBufferView, flushPromises } = await import('../helpers/mountRingBufferView.js')
     const { wrapper, ringbufferApi } = await mountRingBufferView()

@@ -11,7 +11,7 @@
       <!-- Right cluster: aligns buttons + status chip + ringbuffer stats on a
            single baseline; status badge matches the button height. -->
       <div class="flex items-center gap-2">
-        <button @click="showConfig = true" class="btn-secondary btn-sm" data-testid="btn-open-monitor-config">{{ $t('ringbuffer.configure') }}</button>
+        <button v-if="auth.isAdmin" @click="showConfig = true" class="btn-secondary btn-sm" data-testid="btn-open-monitor-config">{{ $t('ringbuffer.configure') }}</button>
         <button @click="applyFilters" class="btn-secondary btn-sm" data-testid="btn-refresh-ringbuffer">{{ $t('ringbuffer.refresh') }}</button>
         <button
           v-if="!paused"
@@ -78,6 +78,7 @@
           <p class="mt-1 text-xs text-red-700/80 dark:text-red-200/80">{{ $t('ringbuffer.monitorDisabledBody') }}</p>
         </div>
         <button
+          v-if="auth.isAdmin"
           type="button"
           class="self-start text-sm font-medium text-red-800 underline underline-offset-2 hover:text-red-950 dark:text-red-100 dark:hover:text-white sm:self-center"
           data-testid="ringbuffer-disabled-open-config"
@@ -158,6 +159,7 @@ import { useSetColors } from '@/composables/useSetColors'
 import { useLiveQueue } from '@/composables/useLiveQueue'
 import { timeFilterToPayload, entryInTimeWindow } from '@/composables/useTimeFilterPayload'
 import { matchedSetIds } from '@/composables/useClientSideMatch'
+import { useAuthStore } from '@/stores/auth'
 import { useWebSocketStore } from '@/stores/websocket'
 import Badge from '@/components/ui/Badge.vue'
 import Spinner from '@/components/ui/Spinner.vue'
@@ -172,6 +174,7 @@ const DEFAULT_QUERY_LIMIT = 500
 
 const { t } = useI18n()
 const { fmtDateTime } = useTz()
+const auth = useAuthStore()
 const wsStore = useWebSocketStore()
 const { getRowStyle, setSets, sets: topbarSetsRef } = useSetColors()
 

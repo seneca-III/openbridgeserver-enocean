@@ -74,11 +74,15 @@ export async function mountRingBufferView({
   searchApi = makeSearchApiMock(),
   hierarchyApi = makeHierarchyApiMock(),
   wsConnected = false,
+  isAdmin = true,
 } = {}) {
   // capture the live entry handler so tests can fire fake WS events
   let liveHandler = null
 
   vi.doMock('@/api/client', () => ({
+    authApi: {
+      me: vi.fn().mockResolvedValue({ data: { id: 'u1', username: 'tester', is_admin: isAdmin } }),
+    },
     ringbufferApi,
     searchApi,
     hierarchyApi,
@@ -128,6 +132,9 @@ export async function mountRingBufferView({
 
   const pinia = createPinia()
   setActivePinia(pinia)
+
+  const { useAuthStore } = await import('@/stores/auth')
+  useAuthStore().user = { id: 'u1', username: 'tester', is_admin: isAdmin }
 
   const mod = await import('@/views/RingBufferView.vue')
   const RingBufferView = mod.default
