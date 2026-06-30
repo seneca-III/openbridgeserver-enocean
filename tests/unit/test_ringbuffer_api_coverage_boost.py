@@ -362,11 +362,13 @@ async def test_configure_disable_restores_running_ringbuffer_when_disable_fails(
     monkeypatch.setattr(rb_api, "_ringbuffer_disk_path", lambda: str(rb_path))
     monkeypatch.setattr(rb_api, "_subscribe_ringbuffer", lambda restored_rb: subscribed.append(restored_rb))
     if failure == "cleanup":
+
         def _fail_delete(_path):
             raise PermissionError("locked")
 
         monkeypatch.setattr(rb_api, "delete_ringbuffer_storage_files", _fail_delete)
     else:
+
         async def _fail_persist(*_args, **_kwargs):
             raise RuntimeError("db locked")
 
