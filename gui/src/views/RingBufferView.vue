@@ -67,6 +67,28 @@
     />
 
     <div
+      v-if="monitorDisabled"
+      class="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-3 text-sm text-red-700 shadow-sm dark:text-red-200"
+      data-testid="ringbuffer-disabled-notice"
+      role="status"
+    >
+      <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <p class="font-semibold">{{ $t('ringbuffer.monitorDisabledTitle') }}</p>
+          <p class="mt-1 text-xs text-red-700/80 dark:text-red-200/80">{{ $t('ringbuffer.monitorDisabledBody') }}</p>
+        </div>
+        <button
+          type="button"
+          class="self-start text-sm font-medium text-red-800 underline underline-offset-2 hover:text-red-950 dark:text-red-100 dark:hover:text-white sm:self-center"
+          data-testid="ringbuffer-disabled-open-config"
+          @click="showConfig = true"
+        >
+          {{ $t('ringbuffer.monitorDisabledAction') }}
+        </button>
+      </div>
+    </div>
+
+    <div
       v-if="recoveryNotice"
       class="rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-700 dark:text-amber-300"
       data-testid="ringbuffer-recovery-notice"
@@ -179,6 +201,7 @@ const showExportDialog = ref(false)
 const editorTargetId = ref(null)
 const topbarChipsRef = ref(null)
 const recoveryNotice = ref('')
+const monitorDisabled = ref(false)
 let recoveryNoticeRefreshPromise = null
 let lastRecoveryNoticeRefreshAt = 0
 
@@ -327,6 +350,7 @@ async function loadFiltersets() {
 async function loadRecoveryNotice() {
   try {
     const { data } = await ringbufferApi.stats()
+    monitorDisabled.value = data?.enabled === false
     if (!data?.last_recovery_at) {
       recoveryNotice.value = ''
       return
@@ -337,6 +361,7 @@ async function loadRecoveryNotice() {
     })
   } catch {
     recoveryNotice.value = ''
+    monitorDisabled.value = false
   }
 }
 

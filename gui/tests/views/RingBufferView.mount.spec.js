@@ -55,6 +55,40 @@ describe('RingBufferView mounts', () => {
     expect(notice.text()).toContain('2026-06-03T06:00:00.000Z')
   })
 
+  it('shows a disabled monitor notice and opens the config modal from its action', async () => {
+    const { mountRingBufferView, makeRingbufferApiMock, flushPromises } = await import('../helpers/mountRingBufferView.js')
+    const ringbufferApi = makeRingbufferApiMock({
+      stats: vi.fn().mockResolvedValue({
+        data: {
+          total: 0,
+          oldest_ts: null,
+          newest_ts: null,
+          storage: 'file',
+          enabled: false,
+          max_entries: 10000,
+          max_file_size_bytes: null,
+          max_age: null,
+          file_size_bytes: 0,
+          last_recovery_at: null,
+          last_recovery_file_count: 0,
+        },
+      }),
+    })
+
+    const { wrapper } = await mountRingBufferView({ ringbufferApi })
+    const notice = wrapper.find('[data-testid="ringbuffer-disabled-notice"]')
+
+    expect(notice.exists()).toBe(true)
+    expect(notice.text()).toContain('Monitor disabled')
+    expect(notice.text()).toContain('Monitor aktivieren')
+    expect(wrapper.find('[data-modal-open="true"]').exists()).toBe(false)
+
+    await wrapper.find('[data-testid="ringbuffer-disabled-open-config"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-modal-open="true"]').exists()).toBe(true)
+  })
+
   it('refreshes the recovery notice after live entries', async () => {
     const { mountRingBufferView, makeRingbufferApiMock, flushPromises } = await import('../helpers/mountRingBufferView.js')
     const ringbufferApi = makeRingbufferApiMock({

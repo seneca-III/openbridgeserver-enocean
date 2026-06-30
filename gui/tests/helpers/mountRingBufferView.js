@@ -30,6 +30,7 @@ export function makeRingbufferApiMock(overrides = {}) {
         oldest_ts: null,
         newest_ts: null,
         storage: 'file',
+        enabled: true,
         max_entries: 10000,
         max_file_size_bytes: null,
         max_age: null,
