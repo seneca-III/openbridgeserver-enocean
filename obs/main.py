@@ -39,8 +39,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     from obs.core.write_router import init_write_router
     from obs.db.database import get_db, init_db
     from obs.history.factory import init_history_plugin
-    from obs.ringbuffer.persisted_config import load_persisted_ringbuffer_config
-    from obs.ringbuffer.ringbuffer import init_ringbuffer
 
     settings = get_settings()
 
@@ -99,16 +97,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
 
     # 5. RingBuffer — config is persisted in app_settings (see persisted_config.py).
     # Defaults apply only when nothing has been configured via the API yet.
-    rb_path = settings.database.path.replace(".db", "_ringbuffer.db")
-    rb_cfg = await load_persisted_ringbuffer_config(db)
-    rb = await init_ringbuffer(
-        storage="file",
-        max_entries=rb_cfg["max_entries"],
-        disk_path=rb_path,
-        max_file_size_bytes=rb_cfg["max_file_size_bytes"],
-        max_age=rb_cfg["max_age"],
-    )
-    bus.subscribe(DataValueEvent, rb.handle_value_event)
+    await _init_persisted_ringbuffer(db, bus, settings.database.path, DataValueEvent)
 
     # 6. History plugin
     await init_history_plugin(db)
@@ -171,9 +160,39 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     await logic_mgr.stop()
     await adapter_registry.stop_all()
     await mqtt.stop()
-    await rb.stop()
+    await _stop_optional_ringbuffer()
     await get_db().disconnect()
     logger.info("open bridge server stopped.")
+
+
+async def _init_persisted_ringbuffer(db, bus, database_path: str, data_value_event_type) -> None:
+    from obs.ringbuffer.persisted_config import load_persisted_ringbuffer_config
+    from obs.ringbuffer.ringbuffer import default_ringbuffer_disk_path, init_ringbuffer, reset_ringbuffer, set_ringbuffer_enabled
+
+    rb_path = default_ringbuffer_disk_path(database_path)
+    rb_cfg = await load_persisted_ringbuffer_config(db)
+    if not rb_cfg["enabled"]:
+        reset_ringbuffer()
+        set_ringbuffer_enabled(False)
+        return
+    set_ringbuffer_enabled(True)
+
+    rb = await init_ringbuffer(
+        storage="file",
+        max_entries=rb_cfg["max_entries"],
+        disk_path=rb_path,
+        max_file_size_bytes=rb_cfg["max_file_size_bytes"],
+        max_age=rb_cfg["max_age"],
+    )
+    bus.subscribe(data_value_event_type, rb.handle_value_event)
+
+
+async def _stop_optional_ringbuffer() -> None:
+    from obs.ringbuffer.ringbuffer import get_optional_ringbuffer
+
+    active_rb = get_optional_ringbuffer()
+    if active_rb is not None:
+        await active_rb.stop()
 
 
 def create_app() -> FastAPI:
