@@ -95,6 +95,8 @@ async def test_browse_devices_normalizes_api_payload(mock_bus):
                         "device_name": "TH Sensor",
                         "alias": "th_sensor",
                         "eep": "A5-04-01",
+                        "readable": True,
+                        "writable": False,
                         "datapoints": [{"id": "temperature"}],
                     }
                 ]
@@ -112,9 +114,47 @@ async def test_browse_devices_normalizes_api_payload(mock_bus):
             "alias": "th_sensor",
             "eep": "A5-04-01",
             "manufacturer": None,
+            "source_type": None,
+            "virtual_device_id": None,
+            "readable": True,
+            "writable": False,
             "datapoints_count": 1,
         }
     ]
+
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_browse_devices_filters_by_direction(mock_bus):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/devices"
+        return httpx.Response(
+            200,
+            json={
+                "devices": [
+                    {"id": "physical_sensor", "device_name": "Physical Sensor", "readable": True, "writable": False},
+                    {
+                        "id": "virtual_sensor",
+                        "device_name": "Virtual Sensor",
+                        "source_type": "virtual_device",
+                        "readable": False,
+                        "writable": True,
+                    },
+                ]
+            },
+        )
+
+    adapter = EnoceanMqttAdapter(mock_bus, {"base_url": "http://gateway:8001"})
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
+
+    readable = await adapter.browse_devices("SOURCE")
+    writable = await adapter.browse_devices("DEST")
+    all_devices = await adapter.browse_devices("BOTH")
+
+    assert [item["id"] for item in readable] == ["physical_sensor"]
+    assert [item["id"] for item in writable] == ["virtual_sensor"]
+    assert [item["id"] for item in all_devices] == ["physical_sensor", "virtual_sensor"]
 
     await adapter.disconnect()
 

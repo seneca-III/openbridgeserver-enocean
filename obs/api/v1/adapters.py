@@ -138,6 +138,10 @@ class EnoceanMqttDeviceOut(BaseModel):
     alias: str | None = None
     eep: str | None = None
     manufacturer: str | None = None
+    source_type: str | None = None
+    virtual_device_id: str | None = None
+    readable: bool = True
+    writable: bool = False
     datapoints_count: int = 0
 
 
@@ -716,12 +720,13 @@ async def mqtt_browse_topics(
 @router.get("/instances/{instance_id}/enocean-mqtt/devices", response_model=list[EnoceanMqttDeviceOut])
 async def enocean_mqtt_browse_devices(
     instance_id: uuid.UUID,
+    direction: str = Query("BOTH", pattern="^(SOURCE|DEST|BOTH)$"),
     _user: str = Depends(get_current_user),
     db: Database = Depends(lambda: get_db()),
 ) -> list[EnoceanMqttDeviceOut]:
     adapter, close_after = await _enocean_mqtt_adapter_for_instance(instance_id, db)
     try:
-        return [EnoceanMqttDeviceOut(**item) for item in await adapter.browse_devices()]
+        return [EnoceanMqttDeviceOut(**item) for item in await adapter.browse_devices(direction)]
     except Exception as exc:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,

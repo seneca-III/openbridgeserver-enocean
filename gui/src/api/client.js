@@ -118,7 +118,7 @@ export const adapterApi = {
     api.post(`/adapters/instances/${sourceId}/bindings/migrate`, { target_instance_id: targetInstanceId }),
   mqttBrowseTopics:   (id, timeout = 5) => api.get(`/adapters/instances/${id}/mqtt/browse`, { params: { timeout }, timeout: (timeout + 3) * 1000 }),
   mqttSamplePayload:  (id, topic, timeout = 5) => api.get(`/adapters/instances/${id}/mqtt/sample`, { params: { topic, timeout }, timeout: (timeout + 3) * 1000 }),
-  enoceanMqttBrowseDevices: (id) => api.get(`/adapters/instances/${id}/enocean-mqtt/devices`),
+  enoceanMqttBrowseDevices: (id, direction = 'BOTH') => api.get(`/adapters/instances/${id}/enocean-mqtt/devices`, { params: { direction } }),
   enoceanMqttBrowseDatapoints: (id, deviceId, direction = 'SOURCE') =>
     api.get(`/adapters/instances/${id}/enocean-mqtt/devices/${encodeURIComponent(deviceId)}/datapoints`, { params: { direction } }),
   iobrokerBrowseStates: (id, q = '', limit = 50) => api.get(`/adapters/instances/${id}/iobroker/states`, { params: { q, limit } }),

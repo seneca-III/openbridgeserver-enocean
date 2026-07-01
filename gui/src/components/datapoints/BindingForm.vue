@@ -791,7 +791,7 @@ async function browseEnoceanDevices() {
   enoceanDevices.value = []
   enoceanDatapoints.value = []
   try {
-    const { data } = await adapterApi.enoceanMqttBrowseDevices(instanceId)
+    const { data } = await adapterApi.enoceanMqttBrowseDevices(instanceId, form.direction)
     enoceanDevices.value = data
     if (data.length === 0) enoceanDevicesError.value = t('adapters.bindingForm.errors.noEnoceanDevicesFound')
   } catch (e) {
@@ -967,9 +967,16 @@ watch(selectedAdapterType, type => {
 })
 
 watch(() => form.direction, () => {
-  if (selectedAdapterType.value === 'ENOCEAN' && cfg.device_id) {
+  if (selectedAdapterType.value === 'ENOCEAN') {
+    const hadDevices = enoceanDevices.value.length > 0
+    if (hadDevices) {
+      cfg.device_id = ''
+      enoceanDevices.value = []
+      browseEnoceanDevices()
+    }
     cfg.datapoint_id = ''
-    browseEnoceanDatapoints()
+    enoceanDatapoints.value = []
+    if (!hadDevices && cfg.device_id) browseEnoceanDatapoints()
   }
 })
 

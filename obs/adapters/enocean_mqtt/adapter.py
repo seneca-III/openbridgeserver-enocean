@@ -181,13 +181,14 @@ class EnoceanMqttAdapter(AdapterBase):
     async def write(self, binding: Any, value: Any) -> None:
         logger.debug("enocean-mqtt write ignored — REST adapter is read-only (binding %s)", binding.id)
 
-    async def browse_devices(self) -> list[dict[str, Any]]:
+    async def browse_devices(self, direction: str = "BOTH") -> list[dict[str, Any]]:
         if self._client is None:
             return []
 
         response = await self._client.get("/api/v1/devices")
         response.raise_for_status()
-        return [_normalize_device(item) for item in _payload_items(response.json(), "devices")]
+        devices = [_normalize_device(item) for item in _payload_items(response.json(), "devices")]
+        return [device for device in devices if _matches_direction(device, direction)]
 
     async def browse_datapoints(self, device_id: str, direction: str = "SOURCE") -> list[dict[str, Any]]:
         if self._client is None:
@@ -233,7 +234,14 @@ def _payload_items(payload: Any, key: str) -> list[Any]:
 
 def _normalize_device(item: Any) -> dict[str, Any]:
     if not isinstance(item, dict):
-        return {"id": str(item), "device_name": str(item), "name": str(item), "datapoints_count": 0}
+        return {
+            "id": str(item),
+            "device_name": str(item),
+            "name": str(item),
+            "datapoints_count": 0,
+            "readable": True,
+            "writable": False,
+        }
 
     device_id = str(
         item.get("id")
@@ -250,6 +258,16 @@ def _normalize_device(item: Any) -> dict[str, Any]:
         or device_id
     )
     datapoints = item.get("datapoints")
+    readable = _flag(item, "readable", "read", default=_direction_allows(item, {"read", "ro", "source"}))
+    writable = _flag(item, "writable", "write", default=_direction_allows(item, {"write", "wo", "dest"}))
+    if "direction" not in item and "access" not in item and "readable" not in item and "writable" not in item:
+        if isinstance(datapoints, list):
+            normalized_datapoints = [_normalize_datapoint(datapoint, device_id=device_id) for datapoint in datapoints]
+            readable = any(datapoint["readable"] for datapoint in normalized_datapoints)
+            writable = any(datapoint["writable"] for datapoint in normalized_datapoints)
+        else:
+            readable = True
+            writable = False
     return {
         "id": device_id,
         "device_name": device_name,
@@ -257,6 +275,10 @@ def _normalize_device(item: Any) -> dict[str, Any]:
         "alias": item.get("alias"),
         "eep": item.get("eep") or item.get("profile"),
         "manufacturer": item.get("manufacturer"),
+        "source_type": item.get("source_type"),
+        "virtual_device_id": item.get("virtual_device_id"),
+        "readable": readable,
+        "writable": writable,
         "datapoints_count": len(datapoints) if isinstance(datapoints, list) else int(item.get("datapoints_count") or 0),
     }
 
