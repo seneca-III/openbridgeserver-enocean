@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import httpx
@@ -14,9 +15,26 @@ from obs.adapters.enocean_mqtt.adapter import (
 from tests.adapters.conftest import make_binding
 
 
-def test_config_normalizes_base_url():
+def test_config_defaults_to_localhost_api():
+    cfg = EnoceanMqttAdapterConfig()
+
+    assert cfg.host == "localhost"
+    assert cfg.port == 8001
+    assert cfg.base_url == "http://localhost:8001"
+
+
+def test_config_normalizes_host():
+    cfg = EnoceanMqttAdapterConfig(host=" gateway ", port=8001)
+
+    assert cfg.host == "gateway"
+    assert cfg.base_url == "http://gateway:8001"
+
+
+def test_config_migrates_legacy_base_url():
     cfg = EnoceanMqttAdapterConfig(base_url=" http://gateway:8001/ ")
 
+    assert cfg.host == "gateway"
+    assert cfg.port == 8001
     assert cfg.base_url == "http://gateway:8001"
 
 
@@ -48,7 +66,7 @@ async def test_connect_sends_bearer_token_and_marks_connected(mock_bus):
         return httpx.Response(200, json={"status": "ok"})
 
     transport = httpx.MockTransport(handler)
-    adapter = EnoceanMqttAdapter(mock_bus, {"base_url": "http://gateway:8001", "token": "secret"})
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001, "token": "secret"})
     adapter._client = httpx.AsyncClient(transport=transport, base_url="http://gateway:8001")
 
     original_client = httpx.AsyncClient
@@ -73,7 +91,7 @@ async def test_read_fetches_datapoint_value(mock_bus):
         assert request.url.path == "/api/v1/datapoints/th_sensor.temperature/value"
         return httpx.Response(200, json={"value": {"value": 22.1}})
 
-    adapter = EnoceanMqttAdapter(mock_bus, {"base_url": "http://gateway:8001"})
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
     adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
     binding = make_binding({"datapoint_id": "th_sensor.temperature"})
 
@@ -103,7 +121,7 @@ async def test_browse_devices_normalizes_api_payload(mock_bus):
             },
         )
 
-    adapter = EnoceanMqttAdapter(mock_bus, {"base_url": "http://gateway:8001"})
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
     adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
 
     assert await adapter.browse_devices() == [
@@ -145,7 +163,7 @@ async def test_browse_devices_filters_by_direction(mock_bus):
             },
         )
 
-    adapter = EnoceanMqttAdapter(mock_bus, {"base_url": "http://gateway:8001"})
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
     adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
 
     readable = await adapter.browse_devices("SOURCE")
@@ -168,35 +186,81 @@ async def test_browse_datapoints_filters_by_direction_and_maps_type(mock_bus):
             json={
                 "datapoints": [
                     {"id": "th.temperature", "name": "Temperature", "data_type": "number", "readable": True},
+                    {"id": "th.telegram_type", "name": "telegram_type", "data_type": "enum", "readable": True},
                     {"id": "th.setpoint", "name": "Setpoint", "data_type": "float", "writable": True},
                 ]
             },
         )
 
-    adapter = EnoceanMqttAdapter(mock_bus, {"base_url": "http://gateway:8001"})
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
     adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
 
     readable = await adapter.browse_datapoints("th_sensor", "SOURCE")
     writable = await adapter.browse_datapoints("th_sensor", "DEST")
     all_datapoints = await adapter.browse_datapoints("th_sensor", "BOTH")
 
-    assert [item["id"] for item in readable] == ["th.temperature"]
+    assert [item["id"] for item in readable] == ["th.temperature", "th.telegram_type"]
     assert readable[0]["data_type"] == "FLOAT"
+    assert readable[1]["data_type"] == "STRING"
     assert [item["id"] for item in writable] == ["th.setpoint"]
-    assert [item["id"] for item in all_datapoints] == ["th.temperature", "th.setpoint"]
+    assert [item["id"] for item in all_datapoints] == ["th.temperature", "th.telegram_type", "th.setpoint"]
 
     await adapter.disconnect()
 
 
 @pytest.mark.asyncio
-async def test_on_bindings_reloaded_starts_source_poll_task(mock_bus):
-    adapter = EnoceanMqttAdapter(mock_bus, {"base_url": "http://gateway:8001", "poll_interval": 1})
+async def test_on_bindings_reloaded_starts_source_stream_task(mock_bus):
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
     adapter._client = AsyncMock()
     adapter._connected = True
     binding = make_binding({"datapoint_id": "th_sensor.temperature"})
 
-    await adapter.reload_bindings([binding])
+    async def stream_loop():
+        await asyncio.Future()
 
-    assert len(adapter._poll_tasks) == 1
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(adapter, "_stream_loop", stream_loop)
+        await adapter.reload_bindings([binding])
+
+    assert adapter._stream_task is not None
+    assert adapter._datapoint_map["th_sensor.temperature"] == [binding]
 
     await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sse_datapoint_event_publishes_bound_value(mock_bus):
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    binding = make_binding({"datapoint_id": "th_sensor.temperature"})
+    adapter._datapoint_map = {"th_sensor.temperature": [binding]}
+
+    await adapter._dispatch_sse_event(
+        "datapoint",
+        [
+            (
+                '{"datapoint_id":"th_sensor.temperature",'
+                '"value":22.4,"quality":"good","unit":"°C"}'
+            )
+        ],
+    )
+
+    event = mock_bus.publish.call_args.args[0]
+
+    assert event.datapoint_id == binding.datapoint_id
+    assert event.value == 22.4
+    assert event.quality == "good"
+    assert event.source_adapter == "ENOCEAN"
+    assert event.binding_id == binding.id
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sse_ignores_unbound_datapoint(mock_bus):
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    adapter._datapoint_map = {}
+
+    await adapter._dispatch_sse_event(
+        "datapoint",
+        ['{"datapoint_id":"other.temperature","value":22.4,"quality":"good"}'],
+    )
+
+    mock_bus.publish.assert_not_called()

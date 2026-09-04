@@ -171,7 +171,7 @@
     "adapterType": "Adapter-Typ *",
     "selectType": "Typ wählen …",
     "name": "Name *",
-    "namePlaceholder": "z.B. KNX Erdgeschoss",
+    "namePlaceholder": "z. B. KNX Erdgeschoss",
     "save": "Speichern",
     "cancel": "Abbrechen",
     "delete": "Instanz löschen",
@@ -951,21 +951,21 @@
         }
       },
       "ENOCEAN": {
-        "base_url": {
-          "title": "Base URL",
-          "description": "URL der enocean-mqtt API, z.B. http://localhost:8001"
+        "host": {
+          "title": "Host",
+          "description": "Hostname oder IP-Adresse der enocean-mqtt API"
+        },
+        "port": {
+          "title": "Port",
+          "description": "enocean-mqtt API-Port (Standard: 8001)"
         },
         "token": {
           "title": "API-Token",
           "description": "Bearer-Token für /api/v1, falls in enocean-mqtt aktiviert"
         },
-        "poll_interval": {
-          "title": "Abfrageintervall (s)",
-          "description": "Wie oft gelesene Datenpunkte über die API aktualisiert werden"
-        },
         "timeout": {
           "title": "Timeout (s)",
-          "description": "HTTP-Anfrage-Timeout in Sekunden"
+          "description": "HTTP-Timeout für Verbindungstest und API-Anfragen in Sekunden"
         }
       },
       "MQTT": {
@@ -1023,6 +1023,7 @@
       "noToken": "Kein Token konfiguriert",
       "tokenInvalid": "Token ungültig",
       "wsErrorReconnecting": "WebSocket-Fehler — Neuverbindung",
+      "sseReconnecting": "SSE-Stream unterbrochen, Neuverbindung läuft",
       "couldNotConnectTo": "Verbindung zu {host}:{port} nicht möglich",
       "couldNotReconnectTo": "Neuverbindung zu {host}:{port} nicht möglich",
       "couldNotOpenPort": "{port} konnte nicht geöffnet werden",

@@ -951,21 +951,21 @@
         }
       },
       "ENOCEAN": {
-        "base_url": {
-          "title": "Base URL",
-          "description": "URL of the enocean-mqtt API, e.g. http://localhost:8001"
+        "host": {
+          "title": "Host",
+          "description": "Hostname or IP address of the enocean-mqtt API"
+        },
+        "port": {
+          "title": "Port",
+          "description": "enocean-mqtt API port (default: 8001)"
         },
         "token": {
           "title": "API token",
           "description": "Bearer token for /api/v1 when enabled in enocean-mqtt"
         },
-        "poll_interval": {
-          "title": "Poll interval (s)",
-          "description": "How often read datapoints are refreshed through the API"
-        },
         "timeout": {
           "title": "Timeout (s)",
-          "description": "HTTP request timeout in seconds"
+          "description": "HTTP timeout for connection tests and API requests in seconds"
         }
       },
       "MQTT": {
@@ -1023,6 +1023,7 @@
       "noToken": "No token configured",
       "tokenInvalid": "Token invalid",
       "wsErrorReconnecting": "WebSocket error — reconnecting",
+      "sseReconnecting": "SSE stream interrupted, reconnecting",
       "couldNotConnectTo": "Could not connect to {host}:{port}",
       "couldNotReconnectTo": "Could not reconnect to {host}:{port}",
       "couldNotOpenPort": "Could not open {port}",

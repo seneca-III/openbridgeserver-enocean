@@ -8,33 +8,58 @@ datapoint values into open bridge DataValueEvents.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 import httpx
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from obs.adapters.base import AdapterBase
 from obs.adapters.registry import register
 from obs.core.event_bus import DataValueEvent
 
 logger = logging.getLogger(__name__)
+SSE_RECONNECT_DELAY_SECONDS = 10.0
 
 
 class EnoceanMqttAdapterConfig(BaseModel):
-    base_url: str = Field(default="http://localhost:8001")
+    host: str = Field(default="localhost")
+    port: int = Field(default=8001, ge=1, le=65535)
     token: str | None = Field(default=None, json_schema_extra={"format": "password"})
-    poll_interval: float = Field(default=10.0, ge=1.0)
     timeout: float = Field(default=10.0, ge=1.0)
 
-    @field_validator("base_url")
+    @model_validator(mode="before")
     @classmethod
-    def _normalize_base_url(cls, value: str) -> str:
-        normalized = value.strip().rstrip("/")
+    def _migrate_base_url(cls, data: Any) -> Any:
+        if not isinstance(data, dict):
+            return data
+
+        base_url = data.get("base_url")
+        if not base_url:
+            return data
+
+        parsed = urlparse(str(base_url).strip())
+        migrated = dict(data)
+        if "host" not in migrated and parsed.hostname:
+            migrated["host"] = parsed.hostname
+        if "port" not in migrated and parsed.port:
+            migrated["port"] = parsed.port
+        migrated.pop("base_url", None)
+        return migrated
+
+    @field_validator("host")
+    @classmethod
+    def _normalize_host(cls, value: str) -> str:
+        normalized = value.strip()
         if not normalized:
-            raise ValueError("base_url must not be empty")
+            raise ValueError("host must not be empty")
         return normalized
+
+    @property
+    def base_url(self) -> str:
+        return f"http://{self.host}:{self.port}"
 
 
 class EnoceanMqttBindingConfig(BaseModel):
@@ -60,7 +85,8 @@ class EnoceanMqttAdapter(AdapterBase):
         super().__init__(event_bus, config, **kwargs)
         self._cfg = EnoceanMqttAdapterConfig(**(config or {}))
         self._client: httpx.AsyncClient | None = None
-        self._poll_tasks: list[asyncio.Task] = []
+        self._stream_task: asyncio.Task | None = None
+        self._datapoint_map: dict[str, list[Any]] = {}
 
     async def connect(self) -> None:
         self._cfg = EnoceanMqttAdapterConfig(**self._config)
@@ -71,7 +97,7 @@ class EnoceanMqttAdapter(AdapterBase):
         self._client = httpx.AsyncClient(
             base_url=self._cfg.base_url,
             headers=headers,
-            timeout=self._cfg.timeout,
+            timeout=httpx.Timeout(self._cfg.timeout, read=None),
         )
 
         try:
@@ -89,13 +115,14 @@ class EnoceanMqttAdapter(AdapterBase):
         logger.info("enocean-mqtt adapter connected: %s", self._cfg.base_url)
 
     async def disconnect(self) -> None:
-        for task in self._poll_tasks:
-            task.cancel()
+        if self._stream_task is not None:
+            self._stream_task.cancel()
             try:
-                await task
+                await self._stream_task
             except asyncio.CancelledError:
                 pass
-        self._poll_tasks.clear()
+            self._stream_task = None
+        self._datapoint_map.clear()
 
         if self._client is not None:
             await self._client.aclose()
@@ -104,13 +131,14 @@ class EnoceanMqttAdapter(AdapterBase):
         await self._publish_status(False, "Disconnected", code="disconnected")
 
     async def _on_bindings_reloaded(self) -> None:
-        for task in self._poll_tasks:
-            task.cancel()
+        if self._stream_task is not None:
+            self._stream_task.cancel()
             try:
-                await task
+                await self._stream_task
             except asyncio.CancelledError:
                 pass
-        self._poll_tasks.clear()
+            self._stream_task = None
+        self._datapoint_map.clear()
 
         if self._client is None or not self.connected:
             return
@@ -119,54 +147,155 @@ class EnoceanMqttAdapter(AdapterBase):
             if binding.direction not in ("SOURCE", "BOTH"):
                 continue
             try:
-                EnoceanMqttBindingConfig(**binding.config)
+                cfg = EnoceanMqttBindingConfig(**binding.config)
             except Exception:
                 logger.warning("Invalid enocean-mqtt binding config for %s — skipped", binding.id)
                 continue
-            self._poll_tasks.append(
-                asyncio.create_task(
-                    self._poll_loop(binding),
-                    name=f"enocean-mqtt-poll-{binding.id}",
-                ),
+            self._datapoint_map.setdefault(cfg.datapoint_id, []).append(binding)
+
+        if self._datapoint_map:
+            self._stream_task = asyncio.create_task(
+                self._stream_loop(),
+                name="enocean-mqtt-sse",
             )
 
-        logger.info("enocean-mqtt adapter: %d poll task(s) started", len(self._poll_tasks))
+        logger.info(
+            "enocean-mqtt adapter: %d datapoint subscription(s)",
+            len(self._datapoint_map),
+        )
 
-    async def _poll_loop(self, binding: Any) -> None:
+    async def _stream_loop(self) -> None:
         while True:
             try:
-                value = await self.read(binding)
-                if binding.value_formula:
-                    from obs.core.formula import apply_formula
-
-                    value = apply_formula(binding.value_formula, value)
-                if binding.value_map:
-                    from obs.core.transformation import apply_value_map
-
-                    value = apply_value_map(value, binding.value_map)
-                await self._bus.publish(
-                    DataValueEvent(
-                        datapoint_id=binding.datapoint_id,
-                        value=value,
-                        quality="good",
-                        source_adapter=self.adapter_type,
-                        binding_id=binding.id,
-                    ),
-                )
+                await self._consume_stream()
             except asyncio.CancelledError:
                 return
             except Exception as exc:
-                logger.warning("enocean-mqtt poll failed for binding %s: %s", binding.id, exc)
-                await self._bus.publish(
-                    DataValueEvent(
-                        datapoint_id=binding.datapoint_id,
-                        value=None,
-                        quality="bad",
-                        source_adapter=self.adapter_type,
-                        binding_id=binding.id,
-                    ),
+                logger.warning(
+                    "enocean-mqtt SSE stream failed, retrying in %.1f s: %s",
+                    SSE_RECONNECT_DELAY_SECONDS,
+                    exc,
                 )
-            await asyncio.sleep(self._cfg.poll_interval)
+                await self._publish_status(
+                    True,
+                    "SSE stream interrupted; reconnecting",
+                    severity="warning",
+                    code="sseReconnecting",
+                )
+                await self._read_bound_values_once()
+            await asyncio.sleep(SSE_RECONNECT_DELAY_SECONDS)
+
+    async def _consume_stream(self) -> None:
+        if self._client is None:
+            return
+
+        async with self._client.stream(
+            "GET",
+            "/api/v1/datapoints/stream",
+            params={"include_initial": "true"},
+        ) as response:
+            response.raise_for_status()
+            await self._publish_status(
+                True,
+                f"Connected to {self._cfg.base_url}",
+            )
+            event_name: str | None = None
+            data_lines: list[str] = []
+
+            async for line in response.aiter_lines():
+                if line.startswith(":"):
+                    continue
+                if line == "":
+                    await self._dispatch_sse_event(event_name, data_lines)
+                    event_name = None
+                    data_lines = []
+                    continue
+                field, separator, value = line.partition(":")
+                if separator and value.startswith(" "):
+                    value = value[1:]
+                if field == "event":
+                    event_name = value
+                elif field == "data":
+                    data_lines.append(value)
+
+    async def _dispatch_sse_event(
+        self,
+        event_name: str | None,
+        data_lines: list[str],
+    ) -> None:
+        if event_name != "datapoint" or not data_lines:
+            return
+
+        payload = json.loads("\n".join(data_lines))
+        datapoint_id = str(payload.get("datapoint_id") or "")
+        entries = self._datapoint_map.get(datapoint_id)
+        if not entries:
+            return
+
+        value = extract_value({"value": payload})
+        quality = "good" if payload.get("quality") == "good" else "bad"
+
+        for binding in entries:
+            await self._publish_binding_value(
+                binding,
+                value,
+                quality=quality,
+            )
+
+    async def _read_bound_values_once(self) -> None:
+        for entries in list(self._datapoint_map.values()):
+            for binding in entries:
+                try:
+                    value = await self.read(binding)
+                    await self._publish_binding_value(
+                        binding,
+                        value,
+                        quality="good",
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning(
+                        "enocean-mqtt fallback read failed for binding %s: %s",
+                        binding.id,
+                        exc,
+                    )
+                    await self._publish_binding_value(
+                        binding,
+                        None,
+                        quality="bad",
+                    )
+
+    async def _publish_binding_value(
+        self,
+        binding: Any,
+        value: Any,
+        *,
+        quality: str,
+    ) -> None:
+        try:
+            if binding.value_formula and value is not None:
+                from obs.core.formula import apply_formula
+
+                value = apply_formula(binding.value_formula, value)
+            if binding.value_map:
+                from obs.core.transformation import apply_value_map
+
+                value = apply_value_map(value, binding.value_map)
+        except Exception:
+            logger.exception("enocean-mqtt value transform failed for binding %s", binding.id)
+            quality = "bad"
+            value = None
+
+        await self._bus.publish(
+            DataValueEvent(
+                datapoint_id=binding.datapoint_id,
+                value=value,
+                quality=quality,
+                source_adapter=self.adapter_type,
+                binding_id=binding.id,
+            ),
+        )
 
     async def read(self, binding: Any) -> Any:
         if self._client is None:
@@ -349,7 +478,7 @@ def _obs_data_type(raw_type: Any) -> str:
         return "INTEGER"
     if normalized in {"float", "double", "number", "decimal"}:
         return "FLOAT"
-    if normalized in {"str", "string", "text"}:
+    if normalized in {"str", "string", "text", "enum"}:
         return "STRING"
     if normalized in {"date"}:
         return "DATE"

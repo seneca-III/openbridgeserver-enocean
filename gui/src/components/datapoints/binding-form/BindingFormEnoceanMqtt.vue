@@ -85,8 +85,7 @@
           <span v-if="dp.writable" class="text-[11px] px-1.5 py-0.5 rounded bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 shrink-0">WO</span>
           <span v-if="dp.unit" class="text-xs text-slate-500 shrink-0">{{ dp.unit }}</span>
         </div>
-        <div class="mt-0.5 flex items-center gap-2 text-xs text-slate-500">
-          <span class="font-mono truncate">{{ dp.id }}</span>
+        <div v-if="dp.role || (dp.value !== null && dp.value !== undefined)" class="mt-0.5 flex items-center gap-2 text-xs text-slate-500">
           <span v-if="dp.role" class="shrink-0">{{ dp.role }}</span>
           <span v-if="dp.value !== null && dp.value !== undefined" class="font-mono shrink-0">= {{ dp.value }}</span>
         </div>
