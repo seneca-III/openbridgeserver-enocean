@@ -69,10 +69,12 @@ describe('PythonScriptNode', () => {
     expect(w.find('.gn-label').text()).toBe('Python Script')
   })
 
-  it('shows debug value when data._dbg is set', async () => {
-    const w = await mountPy({ data: { _dbg: 'result=99' } })
+  it('shows the compact debug value when data._dbg is set', async () => {
+    const w = await mountPy({ data: { _dbg: 'result=99', _dbg_title: 'result=99, full=true' } })
     await flushPromises()
-    expect(w.text()).toContain('result=99')
+    const band = w.find('[data-testid="debug-band"]')
+    expect(band.text()).toBe('result=99')
+    expect(band.attributes('title')).toBe('result=99, full=true')
   })
 
   it('calls removeNodes on delete button click', async () => {

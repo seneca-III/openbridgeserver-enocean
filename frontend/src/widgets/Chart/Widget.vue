@@ -10,7 +10,9 @@ import {
 } from 'chart.js'
 import { history } from '@/api/client'
 import { useWebSocket } from '@/composables/useWebSocket'
+import { useFormatStore } from '@/stores/format'
 import type { DataPointValue } from '@/types'
+import type { WriteContext } from '@/api/client'
 import { aggregateBucketEndTimestamp, sortedUniqueTimestamps, weightedAverage, weightedValuesByTimestamp } from './aggregation'
 import {
   TIME_RANGE_PRESETS,
@@ -18,6 +20,7 @@ import {
   historyRequestPlanForRange,
   resolveTimeRange,
 } from './timeRangePresets'
+import { buildSeriesDefs } from './seriesDefs'
 
 Chart.register(
   LineController, LineElement, PointElement,
@@ -31,6 +34,8 @@ const props = defineProps<{
   datapointId: string | null
   value: DataPointValue | null
   editorMode: boolean
+  pageId?: string | null
+  sessionToken?: string | null
 }>()
 
 const { t } = useI18n()
@@ -53,11 +58,7 @@ watch(() => props.config.time_range, () => {
   selectedTimeRange.value = configTimeRange(props.config)
 })
 
-// 'y' = linke Achse, 'y1' = rechte Achse (Chart.js Achsen-IDs)
-interface SeriesDef { id: string; label: string; color: string; axis: 'y' | 'y1' }
 interface HistoryChartPoint { ts: string; v: unknown; u: string | null; q: string; n?: number }
-
-const COLORS = ['#3b82f6', '#ef4444', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#06b6d4', '#f97316']
 
 const canvas      = ref<HTMLCanvasElement | null>(null)
 let chart:        Chart | null = null
@@ -65,8 +66,12 @@ let wsOff:        (() => void) | null = null
 let reloadTimer:  ReturnType<typeof setTimeout> | null = null
 const seriesUnits = ref<string[]>([])
 
+// Achsen-, Tooltip- und Wertformatierung folgen dem konfigurierten
+// Regionalformat (Issue #1073); die Rohdaten bleiben locale-neutral.
+const format = useFormatStore()
+
 function fmtMs(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, {
+  return format.fmtDateTime(ms, {
     month: '2-digit', day: '2-digit',
     hour: '2-digit', minute: '2-digit',
   })
@@ -82,31 +87,12 @@ function buildBuckets(fromMs: number, toMs: number, count: number) {
   }))
 }
 
-function buildSeriesDefs(): SeriesDef[] {
-  const result: SeriesDef[] = []
-
-  const primaryColor = (props.config.primary_color as string | undefined) ?? COLORS[0]
-  const primaryAxis  = (props.config.primary_axis  as string | undefined) === 'right' ? 'y1' : 'y'
-
-  if (props.datapointId) {
-    result.push({ id: props.datapointId, label: label.value, color: primaryColor, axis: primaryAxis })
+function readContext(): WriteContext | undefined {
+  if (!props.pageId && !props.sessionToken) return undefined
+  return {
+    ...(props.pageId ? { pageId: props.pageId } : {}),
+    ...(props.sessionToken ? { sessionToken: props.sessionToken } : {}),
   }
-
-  const extra = (props.config.series as Array<{
-    dp_id?: string; label?: string; color?: string; axis?: string
-  }> | undefined) ?? []
-
-  for (const s of extra) {
-    if (!s.dp_id) continue
-    result.push({
-      id:    s.dp_id,
-      label: s.label ?? '',
-      color: s.color ?? COLORS[result.length % COLORS.length],
-      axis:  s.axis === 'right' ? 'y1' : 'y',
-    })
-  }
-
-  return result
 }
 
 function initChart() {
@@ -122,6 +108,9 @@ function initChart() {
       responsive:          true,
       maintainAspectRatio: false,
       animation:           false,
+      // Chart.js formats axis ticks with Intl.NumberFormat under this locale;
+      // without it, it would silently follow the browser language (issue #1073).
+      locale:              format.regionFormat,
       plugins: {
         legend: { display: false },
         tooltip: {
@@ -137,7 +126,7 @@ function initChart() {
               if (v == null) return ''
               const u    = seriesUnits.value[ctx.datasetIndex] ?? ''
               const name = ctx.dataset.label || ''
-              const val  = u ? `${v.toFixed(2)} ${u}` : String(v)
+              const val  = u ? `${format.fmtNumber(v, { decimals: 2 })} ${u}` : format.fmtNumber(v)
               return name ? `${name}: ${val}` : val
             },
           },
@@ -183,7 +172,7 @@ function initChart() {
 async function loadData() {
   if (props.editorMode) return
 
-  const defs = buildSeriesDefs()
+  const defs = buildSeriesDefs(props.config, props.datapointId, label.value)
   if (defs.length === 0 || !chart) return
 
   const { from: fromDate, to: toDate } = resolveTimeRange(selectedTimeRange.value)
@@ -195,15 +184,17 @@ async function loadData() {
   let units: string[]
 
   if (requestPlan.mode === 'aggregate') {
+    const context = readContext()
     const [aggregatedRows, unitRows] = await Promise.all([
-      Promise.all(defs.map(s => history.aggregate(s.id, fromIso, toIso, requestPlan.interval, requestPlan.fn))),
-      Promise.all(defs.map(s => history.query(s.id, fromIso, toIso, 1))),
+      Promise.all(defs.map(s => history.aggregate(s.id, fromIso, toIso, requestPlan.interval, requestPlan.fn, context))),
+      Promise.all(defs.map(s => history.query(s.id, fromIso, toIso, 1, context))),
     ])
     results = aggregatedRows.map(rows => rows.map(r => ({ ts: r.bucket, v: r.v, u: null, q: '', n: r.n ?? 1 })))
     units = unitRows.map(r => r[0]?.u ?? '')
   } else {
+    const context = readContext()
     results = await Promise.all(
-      defs.map(s => history.query(s.id, fromIso, toIso, requestPlan.limit)),
+      defs.map(s => history.query(s.id, fromIso, toIso, requestPlan.limit, context)),
     )
     units = results.map(r => r[0]?.u ?? '')
   }
@@ -317,7 +308,7 @@ onMounted(() => {
   wsOff = ws.onMessage((msg) => {
     if (!chart || props.editorMode) return
     if (!msg.id || msg.v === undefined) return
-    if (!buildSeriesDefs().some(d => d.id === (msg.id as string))) return
+    if (!buildSeriesDefs(props.config, props.datapointId, label.value).some(d => d.id === (msg.id as string))) return
     if (reloadTimer) clearTimeout(reloadTimer)
     reloadTimer = setTimeout(() => { reloadTimer = null; loadData() }, 2_000)
   })
@@ -333,6 +324,14 @@ watch(() => props.config, async (newCfg, oldCfg) => {
   await loadData()
 }, { deep: true })
 watch(selectedTimeRange, loadData)
+// The public display settings load asynchronously from App.vue's onMounted, which
+// Vue runs *after* this child mounted and already built its chart — so the axis
+// locale has to be refreshed once the real regional format arrives (issue #1073).
+watch(() => format.regionFormat, (regionFormat) => {
+  if (!chart) return
+  chart.options.locale = regionFormat
+  chart.update()
+})
 
 onUnmounted(() => {
   wsOff?.()

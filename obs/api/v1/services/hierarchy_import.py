@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from fastapi import HTTPException, status
 from pydantic import BaseModel
 
+from obs.api.v1.services.hierarchy_lifecycle import collect_hierarchy_tree_node_ids, delete_hierarchy_grants
 from obs.db.database import Database
 
 _GA_SCOPE_CHUNK_SIZE = 500
@@ -49,19 +50,22 @@ def _chunks(values: list[str], size: int) -> list[list[str]]:
 async def _replace_existing_ets_trees(db: Database, mode: str) -> int:
     """Delete auto-created ETS hierarchy trees for one mode, leaving manual trees untouched."""
     source = _ets_import_description(mode)
-    rows = await db.fetchall(
-        "SELECT id FROM hierarchy_trees WHERE source=?",
-        (source,),
-    )
-    tree_ids = [row["id"] for row in rows]
-    if not tree_ids:
-        return 0
+    async with db.transaction():
+        rows = await db.fetchall(
+            "SELECT id FROM hierarchy_trees WHERE source=?",
+            (source,),
+        )
+        tree_ids = [row["id"] for row in rows]
+        if not tree_ids:
+            return 0
 
-    placeholders = ",".join("?" * len(tree_ids))
-    await db.execute_and_commit(
-        f"DELETE FROM hierarchy_trees WHERE id IN ({placeholders})",
-        tree_ids,
-    )
+        node_ids = await collect_hierarchy_tree_node_ids(db, tree_ids)
+        await delete_hierarchy_grants(db, node_ids)
+        placeholders = ",".join("?" * len(tree_ids))
+        await db.execute(
+            f"DELETE FROM hierarchy_trees WHERE id IN ({placeholders})",
+            tree_ids,
+        )
     return len(tree_ids)
 
 
@@ -84,11 +88,14 @@ async def create_ets_hierarchy(db: Database, request: EtsImportRequest) -> Impor
 
     # Batch all inserts; commit once at the end for performance.
     inserts: list[tuple] = []
+    group_link_sentinels: set[tuple[str, str]] = set()
+    device_link_sentinels: set[tuple[str, str]] = set()
 
     def _q_insert(nid: str, parent_id: str | None, name: str, desc: str, order: int) -> None:
         inserts.append((nid, tree_id, parent_id, name, desc, order, None, now, now))
 
     if request.mode in ("groups", "mid", "flat"):
+        address_nodes: dict[str, str] = {}
         if request.group_addresses is not None:
             scoped_addresses = list(dict.fromkeys(request.group_addresses))
             rows = []
@@ -134,6 +141,7 @@ async def create_ets_hierarchy(db: Database, request: EtsImportRequest) -> Impor
                     _q_insert(nid, main_nodes[main_key], mid_label, "", int(mid_key))
                     mid_nodes[mid_composite] = nid
                     nodes_created += 1
+                address_nodes[str(row["address"])] = mid_nodes[mid_composite]
 
         elif request.mode == "groups":
             main_nodes = {}
@@ -159,6 +167,7 @@ async def create_ets_hierarchy(db: Database, request: EtsImportRequest) -> Impor
                 ga_name = str(row["name"]).strip() or row["address"]
                 nid = _new_id()
                 _q_insert(nid, mid_nodes[mid_composite], ga_name, str(row["description"] or ""), 0)
+                address_nodes[str(row["address"])] = nid
                 nodes_created += 1
 
         else:  # "flat"
@@ -175,7 +184,38 @@ async def create_ets_hierarchy(db: Database, request: EtsImportRequest) -> Impor
                 ga_name = str(row["name"]).strip() or row["address"]
                 nid = _new_id()
                 _q_insert(nid, main_nodes[main_key], ga_name, str(row["description"] or ""), 0)
+                address_nodes[str(row["address"])] = nid
                 nodes_created += 1
+
+        if request.auto_link:
+            datapoints_by_address: dict[str, set[str]] = {}
+            for chunk in _chunks(list(address_nodes), _GA_SCOPE_CHUNK_SIZE):
+                placeholders = ",".join("?" * len(chunk))
+                binding_rows = await db.fetchall(
+                    f"""SELECT TRIM(JSON_EXTRACT(ab.config, '$.group_address')) AS group_address,
+                               TRIM(JSON_EXTRACT(ab.config, '$.state_group_address')) AS state_group_address,
+                               ab.datapoint_id
+                        FROM adapter_bindings ab
+                        JOIN datapoints dp ON dp.id = ab.datapoint_id
+                        WHERE UPPER(ab.adapter_type) = 'KNX'
+                          AND (TRIM(JSON_EXTRACT(ab.config, '$.group_address')) IN ({placeholders})
+                               OR TRIM(JSON_EXTRACT(ab.config, '$.state_group_address')) IN ({placeholders}))
+                        GROUP BY group_address, state_group_address, ab.datapoint_id""",
+                    [*chunk, *chunk],
+                )
+                for binding in binding_rows:
+                    for field in ("group_address", "state_group_address"):
+                        value = binding[field]
+                        if value is None:
+                            continue
+                        address = str(value)
+                        if address in address_nodes:
+                            datapoints_by_address.setdefault(address, set()).add(binding["datapoint_id"])
+
+            for address, datapoint_ids in datapoints_by_address.items():
+                if len(datapoint_ids) != 1:
+                    continue
+                group_link_sentinels.add((address_nodes[address], next(iter(datapoint_ids))))
 
     elif request.mode == "buildings":
         loc_rows = await db.fetchall("SELECT id, parent_id, name, space_type, sort_order FROM knx_locations ORDER BY sort_order")
@@ -219,6 +259,29 @@ async def create_ets_hierarchy(db: Database, request: EtsImportRequest) -> Impor
                 for dp in dp_rows:
                     links_created += 1
                     inserts.append(("__link__", node_id, dp["id"]))
+
+        device_rows = await db.fetchall("SELECT space_id, device_id FROM knx_space_device_links")
+        for row in device_rows:
+            node_id = loc_to_node.get(row["space_id"])
+            if not node_id:
+                continue
+            device_link_sentinels.add((node_id, row["device_id"]))
+
+        inferred_device_rows = await db.fetchall(
+            """SELECT co.device_id, MIN(f.space_id) AS space_id
+               FROM knx_comm_objects co
+               JOIN knx_co_ga_links cgl ON cgl.comm_object_id = co.id
+               JOIN knx_function_ga_links fgl ON fgl.ga_address = cgl.ga_address
+               JOIN knx_functions f ON f.id = fgl.function_id
+               WHERE f.space_id IS NOT NULL AND f.space_id != ''
+               GROUP BY co.device_id
+               HAVING COUNT(DISTINCT f.space_id) = 1"""
+        )
+        for row in inferred_device_rows:
+            node_id = loc_to_node.get(row["space_id"])
+            if not node_id:
+                continue
+            device_link_sentinels.add((node_id, row["device_id"]))
 
     else:  # "trades"
         trade_rows = await db.fetchall("SELECT id, name, parent_id, sort_order FROM knx_trades ORDER BY sort_order")
@@ -280,6 +343,8 @@ async def create_ets_hierarchy(db: Database, request: EtsImportRequest) -> Impor
 
     node_inserts = [t for t in inserts if t[0] != "__link__"]
     link_sentinels = [t for t in inserts if t[0] == "__link__"]
+    link_sentinels.extend(("__link__", node_id, datapoint_id) for node_id, datapoint_id in group_link_sentinels)
+    links_created += len(group_link_sentinels)
 
     trees_replaced = 0
     if request.replace_existing:
@@ -288,6 +353,15 @@ async def create_ets_hierarchy(db: Database, request: EtsImportRequest) -> Impor
     await db.execute_and_commit(
         "INSERT INTO hierarchy_trees (id, name, description, source, created_at, updated_at) VALUES (?,?,?,?,?,?)",
         (tree_id, request.tree_name, _ets_import_description(request.mode), _ets_import_description(request.mode), now, now),
+    )
+    # Every tree gets an implicit, hidden root node so a Logic graph can be
+    # linked directly "to the tree" without a visible child folder (#1217
+    # follow-up) — see _migration_v54_hierarchy_tree_root_nodes.
+    await db.execute_and_commit(
+        """INSERT INTO hierarchy_nodes
+               (id, tree_id, parent_id, name, description, node_order, icon, is_tree_root, created_at, updated_at)
+           VALUES (?,?,NULL,?,'',-1,NULL,1,?,?)""",
+        (_new_id(), tree_id, request.tree_name, now, now),
     )
 
     if node_inserts:
@@ -303,6 +377,12 @@ async def create_ets_hierarchy(db: Database, request: EtsImportRequest) -> Impor
         await db.executemany(
             "INSERT OR IGNORE INTO hierarchy_datapoint_links (id, node_id, datapoint_id, created_at) VALUES (?,?,?,?)",
             link_rows,
+        )
+
+    if device_link_sentinels:
+        await db.executemany(
+            "INSERT OR IGNORE INTO hierarchy_device_links (id, node_id, device_id, created_at) VALUES (?,?,?,?)",
+            [(_new_id(), node_id, device_id, now) for node_id, device_id in device_link_sentinels],
         )
 
     await db.commit()

@@ -1,20 +1,33 @@
 {
+  "datetimeNames": {
+    "weekdays": "Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday",
+    "weekdaysShort": "Mon|Tue|Wed|Thu|Fri|Sat|Sun",
+    "weekdaysTwo": "Mo|Tu|We|Th|Fr|Sa|Su",
+    "months": "January|February|March|April|May|June|July|August|September|October|November|December",
+    "monthsShort": "Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec"
+  },
   "nav": {
     "dashboard": "Overview",
     "datapoints": "Data Points",
     "adapters": "Adapters",
+    "knxDevices": "KNX Devices",
     "history": "History",
     "ringbuffer": "Monitor",
+    "messageArchives": "Message Archives",
     "logs": "Logs",
     "logic": "Logic Engine",
     "settings": "Settings",
     "visu": "Visu"
   },
   "sidebar": {
+    "productName": "open bridge server",
+    "adapterWarningsTitle": "{label} — {count} warning(s)",
+    "visu": "Visu",
     "liveConnected": "Live connected",
     "disconnected": "Disconnected",
     "live": "Live",
-    "offline": "Offline"
+    "offline": "Offline",
+    "adapterWarningCount": "{count} warning(s)"
   },
   "login": {
     "username": "Username",
@@ -22,6 +35,22 @@
     "submit": "Sign in",
     "submitting": "Signing in …",
     "logoAlt": "open bridge server"
+  },
+  "setup": {
+    "title": "Initial setup",
+    "intro": "This installation has no administrator account yet. Create it now — the interface becomes available right after.",
+    "username": "Username",
+    "password": "Password",
+    "passwordRepeat": "Repeat password",
+    "passwordHint": "At least {n} characters.",
+    "submit": "Create account",
+    "submitting": "Creating account …",
+    "securityNote": "Do this right after installing: until the account exists, anyone who can reach the server on the network can create it.",
+    "errorUsernameRequired": "Please enter a username.",
+    "errorPasswordTooShort": "The password must be at least {n} characters long.",
+    "errorPasswordMismatch": "The two passwords do not match.",
+    "errorAlreadyDone": "Setup has already been completed. Reload the page and sign in.",
+    "errorFailed": "The account could not be created. Please try again."
   },
   "dashboard": {
     "title": "Overview",
@@ -51,7 +80,23 @@
       "noDatapoints": "No data points"
     },
     "activeWarnings": "Active warnings",
-    "toAdapters": "To adapters →"
+    "toAdapters": "To adapters →",
+    "ringbuffer": {
+      "title": "Monitor / Retention",
+      "toMonitor": "To monitor →",
+      "loadError": "Failed to load monitor status",
+      "disabledTitle": "Monitor disabled",
+      "disabledHint": "No value changes are recorded. Configure to enable.",
+      "configure": "Configure",
+      "budget": "Budget usage",
+      "budgetPeakHint": "Target, not a hard cap – peak up to ~133%",
+      "unlimited": "unlimited",
+      "segments": "Segments",
+      "segmentDetails": "Segment details",
+      "configuration": "Configuration",
+      "entries": "Entries",
+      "diskUsage": "Disk usage"
+    }
   },
   "datapoints": {
     "title": "Data Points",
@@ -97,7 +142,24 @@
       "persistValueHint": "immediately available after restart",
       "recordHistory": "History active",
       "recordHistoryHint": "store values in history DB",
-      "saveError": "Error saving"
+      "externalWriteEnabled": "Allow external write",
+      "externalWriteEnabledHint": "any MQTT client that can reach the broker can then set this value",
+      "saveError": "Error saving",
+      "unitCategories": {
+        "temperature": "Temperature",
+        "humidityAirQuality": "Humidity & air quality",
+        "pressure": "Pressure",
+        "electricity": "Electricity",
+        "light": "Light",
+        "speedAcceleration": "Speed & acceleration",
+        "angle": "Angle",
+        "volumeFlow": "Volume & flow",
+        "lengthArea": "Length & area",
+        "mass": "Mass",
+        "time": "Time",
+        "radiation": "Radiation",
+        "other": "Other"
+      }
     },
     "delete": {
       "confirm": "Really delete data point?",
@@ -119,6 +181,14 @@
     "createModal": "New data point",
     "deleteTitle": "Delete data point",
     "deleteWithBindings": "Delete '{name}' and all bindings?",
+    "duplicate": {
+      "action": "Duplicate",
+      "title": "Duplicate data point",
+      "hint": "All properties and adapter bindings are copied, except central-plant classification and external write access — both always start off on the copy. Current values and history are not copied.",
+      "defaultName": "Copy of {name}",
+      "saving": "Duplicating …",
+      "error": "The data point could not be duplicated."
+    },
     "quality": {
       "good": "Good",
       "uncertain": "Unknown",
@@ -158,6 +228,10 @@
       "bindingRead": "Read",
       "bindingWrite": "Write",
       "bindingReadWrite": "Read/Write",
+      "knxMainGa": "GA",
+      "knxStateGa": "State GA",
+      "knxUnnamedGa": "Unnamed group address",
+      "knxNoDevices": "No KNX device imported for this GA",
       "bindingDisabled": "Disabled",
       "graphDisabled": "Disabled"
     },
@@ -346,7 +420,11 @@
         "noEnoceanDatapointsFound": "No matching EnOcean datapoints found",
         "enoceanDevicesLoadFailed": "Could not load EnOcean devices",
         "enoceanDatapointsLoadFailed": "Could not load EnOcean datapoints",
-        "selectAdapterInstance": "Please select an adapter instance"
+        "selectAdapterInstance": "Please select an adapter instance",
+        "selectOnewireInstanceFirst": "Please select a 1-Wire instance first",
+        "noSensorsFound": "No sensors found",
+        "onewireScanFailed": "1-Wire sensor scan failed",
+        "onewireAliasSaveFailed": "Could not save alias"
       },
       "knxSection": "KNX binding",
       "dptLabel": "DPT *",
@@ -411,10 +489,12 @@
       "enoceanDatapointsCount": "datapoints",
       "onewireSection": "1-Wire binding",
       "onewireSensorIdLabel": "Sensor ID *",
-      "onewireSensorIdPlaceholder": "e.g. 28-000000000001",
-      "onewireSensorTypeLabel": "Sensor type",
-      "onewireSensorTypePlaceholder": "DS18B20",
-      "onewireSensorTypeHint": "Default: DS18B20",
+      "onewireSensorIdPlaceholder": "e.g. 28.4B057F0A1C10",
+      "onewirePropertyLabel": "Property",
+      "onewirePropertyPlaceholder": "temperature",
+      "onewireScanButton": "Scan",
+      "onewireAliasPlaceholder": "Label (e.g. Guest bathroom)",
+      "onewireAliasSave": "Save",
       "haSection": "Home Assistant binding",
       "haEntityIdLabel": "Entity ID *",
       "haEntityIdPlaceholder": "e.g. light.living_room, sensor.temperature",
@@ -563,7 +643,22 @@
       "ztSelectHoliday": "— select holiday —",
       "ztOutputDivider": "Output",
       "ztOutputValueLabel": "Output value",
-      "ztOutputValueHint": "e.g. 1 / 0 / true / false / 21.5 / any text",
+      "ztOutputValueHint_boolean": "Switches the value to On (true) or Off (false).",
+      "ztOutputValueHint_integer": "Whole number, e.g. 50 or 0.",
+      "ztOutputValueHint_float": "Decimal number, e.g. 21.5 or 0.",
+      "ztOutputValueHint_date": "Date in YYYY-MM-DD format, e.g. 2026-12-24.",
+      "ztOutputValueHint_time": "Time in HH:MM:SS format, e.g. 08:00:00.",
+      "ztOutputValueHint_datetime": "Date and time (ISO 8601), e.g. 2026-12-24T08:00:00.",
+      "ztOutputValueHint_text": "Taken literally — including 1, 0, on or ein.",
+      "ztOutputValueOn": "On (true)",
+      "ztOutputValueOff": "Off (false)",
+      "ztOutputValueErrorRequired": "Please enter an output value.",
+      "ztOutputValueErrorBoolean": "Not a valid yes/no value — allowed are 1/0, true/false, on/off, ein/aus.",
+      "ztOutputValueErrorInteger": "Not a valid whole number.",
+      "ztOutputValueErrorFloat": "Not a valid number.",
+      "ztOutputValueErrorDate": "Not a valid date (expected YYYY-MM-DD).",
+      "ztOutputValueErrorTime": "Not a valid time (expected HH:MM or HH:MM:SS).",
+      "ztOutputValueErrorDatetime": "Not a valid timestamp (expected YYYY-MM-DDTHH:MM:SS).",
       "anwSection": "Presence simulation — binding options",
       "anwOffsetOverrideLabel": "Override offset",
       "anwDefaultAdapter": "Default (adapter)",
@@ -587,6 +682,13 @@
       "messageTemplateLabel": "Message template",
       "targetsLabel": "Targets",
       "addTarget": "Add target",
+      "messageArchiveStrategyLabel": "Action",
+      "messageArchiveStrategyNone": "Disabled",
+      "messageArchiveStrategySendOnly": "Send only",
+      "messageArchiveStrategySendAndArchive": "Send and archive",
+      "messageArchiveStrategyArchiveOnly": "Archive only",
+      "messageArchiveLabel": "Message archive",
+      "messageArchivePlaceholder": "Select message archive",
       "messageSendOnChange": "Send only when the condition changes to fulfilled",
       "snmpHostLabel": "Device (IP/DNS) *",
       "snmpHostPlaceholder": "e.g. 192.168.1.100 or switch.local",
@@ -731,6 +833,10 @@
           "title": "Serialize reads",
           "description": "Sends Modbus requests one at a time instead of concurrently. Recommended for simple devices (heating controllers, inverters, meters) that can only handle one request at a time. Disable for capable PLCs with multi-request support."
         },
+        "shared_bus": {
+          "title": "Share bus with instances on the same IP:port",
+          "description": "Serializes I/O across ALL instances polling the same host:port (e.g. several devices behind one RS485/Modbus-TCP gateway). Prevents concurrent requests from competing instances on the same bus."
+        },
         "startup_jitter_s": {
           "title": "Startup jitter (s)",
           "description": "Maximum random delay (seconds) before the first poll of each binding. Prevents a request burst when all tasks start simultaneously. 0 = disabled."
@@ -772,6 +878,27 @@
         },
         "priv_key": {
           "title": "Privacy key (v3)"
+        },
+        "host": {
+          "title": "Host (IP/DNS)"
+        },
+        "port": {
+          "title": "UDP port"
+        },
+        "oid": {
+          "title": "OID"
+        },
+        "data_type": {
+          "title": "Data type"
+        },
+        "poll_interval": {
+          "title": "Poll interval (s)"
+        },
+        "timeout": {
+          "title": "Timeout (s)"
+        },
+        "retries": {
+          "title": "Retries"
         }
       },
       "ZEITSCHALTUHR": {
@@ -854,6 +981,66 @@
         "custom_holidays": {
           "title": "Custom holidays",
           "description": "User-defined holidays as a list of expressions. Formats: 'MM-DD[:Name]' (fixed date), 'easter+N[:Name]' / 'easter-N[:Name]' (relative to Easter Sunday), 'advent+N[:Name]' / 'advent-N[:Name]' (relative to the 1st Advent), 'last_WD_MON[:Name]' (last weekday of the month), 'N_WD_MON[:Name]' (n-th weekday). Weekday codes: MO TU WE TH FR SA SU. Month codes: JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC. Separate multiple entries with a comma or newline."
+        },
+        "timer_type": {
+          "description": "Timer type"
+        },
+        "meta_type": {
+          "description": "Metadata type (only for timer_type=meta)"
+        },
+        "weekdays": {
+          "description": "Active weekdays (0=Mon, 1=Tue, 2=Wed, 3=Thu, 4=Fri, 5=Sat, 6=Sun)"
+        },
+        "months": {
+          "description": "Active months 1-12 (empty = all; annual timer only)"
+        },
+        "day_of_month": {
+          "description": "Day of month (0 = all; annual timer only)"
+        },
+        "time_ref": {
+          "description": "Time reference"
+        },
+        "hour": {
+          "description": "Hour (only for time_ref=absolute)"
+        },
+        "minute": {
+          "description": "Minute"
+        },
+        "offset_minutes": {
+          "description": "Offset in minutes (positive/negative) relative to the time reference"
+        },
+        "solar_altitude_deg": {
+          "description": "Sun elevation angle in degrees (−18 … 90) — only for time_ref=solar_altitude. Examples: 0° = horizon, −6° = civil twilight, 30° = mid-morning"
+        },
+        "sun_direction": {
+          "description": "Direction of the sun's movement — only for time_ref=solar_altitude. rising = sun ascending (morning), setting = sun descending (afternoon/evening)"
+        },
+        "every_hour": {
+          "description": "Switch every hour at the given minute"
+        },
+        "every_minute": {
+          "description": "Switch every minute"
+        },
+        "holiday_mode": {
+          "description": "Holiday handling"
+        },
+        "vacation_mode": {
+          "description": "Vacation handling"
+        },
+        "selected_holidays": {
+          "description": "Selected holidays for timer_type=holiday (empty = all holidays)"
+        },
+        "date_window_enabled": {
+          "description": "Date window: only switch within a date range"
+        },
+        "date_window_from": {
+          "description": "Window start (MM-DD | easter±N | advent±N | holiday:Name±N)"
+        },
+        "date_window_to": {
+          "description": "Window end (MM-DD | easter±N | advent±N | holiday:Name±N)"
+        },
+        "value": {
+          "description": "Output value when switching. Allowed: 0/1, true/false, on/off, ein/aus, integer, decimal, or string"
         }
       },
       "HOME_ASSISTANT": {
@@ -999,13 +1186,21 @@
         }
       },
       "ONEWIRE": {
+        "host": {
+          "title": "Host",
+          "description": "Hostname or IP address of a running owserver process (local sidecar/service or external — this adapter doesn't start it)"
+        },
+        "port": {
+          "title": "Port",
+          "description": "owserver port (default: 4304)"
+        },
         "poll_interval": {
           "title": "Poll interval (s)",
           "description": "How often sensors are read, in seconds"
         },
-        "w1_path": {
-          "title": "1-Wire path",
-          "description": "Sysfs path to the 1-Wire bus (default: /sys/bus/w1/devices)"
+        "request_timeout": {
+          "title": "Request timeout (s)",
+          "description": "Seconds per owserver call before it is treated as an error"
         }
       }
     },
@@ -1029,8 +1224,6 @@
       "couldNotOpenPort": "Could not open {port}",
       "modbusSerialConnected": "Connected ({port} @ {baudrate} baud)",
       "modbusReconnectBackoff": "Modbus TCP reconnect backoff active",
-      "pathNotFound": "{path} not found",
-      "onewireBusAt": "1-Wire bus at {path}",
       "socketConnectFailed": "Socket.IO connection failed",
       "socketDisconnected": "Socket.IO disconnected",
       "socketUnstable": "ioBroker Socket.IO connection unstable: multiple disconnects in a short time.",
@@ -1046,6 +1239,7 @@
       "knxTunnelStable": "Tunnel pool stable again.",
       "invalidBindingsSkipped": "{count} invalid binding(s) skipped ({examples})",
       "messageProviderFailures": "MESSAGE provider failures: {count} target(s)",
+      "messageArchiveWriteFailed": "MESSAGE archive write failed",
       "messageSent": "MESSAGE sent"
     },
     "testResult": {
@@ -1142,6 +1336,7 @@
     "storageFixed": "Storage model is fixed server-side:",
     "maxDisk": "Max. disk space",
     "maxDiskPlaceholder": "e.g. 500",
+    "effectiveStorageNote": "Effective disk usage: the budget is a retention target, not a hard instantaneous cap. Without an explicit segment size it is derived as one third of the disk budget. Peak usage can then reach ~133%. Without a disk budget and without an explicit segment size there is no size-based rotation.",
     "maxRetention": "Max. retention",
     "maxRetentionPlaceholder": "e.g. 30",
     "maxEntriesPlaceholder": "e.g. 10000",
@@ -1157,6 +1352,12 @@
     "validationMinEntries": "Max. entries must be at least 100",
     "validationMinDisk": "Max. disk space must be greater than 0",
     "validationRetentionNaN": "Retention must be a valid number",
+    "validationSegmentTriggerRequired": "The segmented ring buffer requires at least one effective segment rotation limit, either explicit or derived from a matching total limit.",
+    "unboundedWarningTitle": "Total retention is unlimited",
+    "unboundedWarningBody": "No entry, disk-space, or age limit is active. Closed segments are therefore not removed automatically and the ring buffer can grow without limit.",
+    "unboundedConfirmTitle": "Allow unlimited ring buffer growth?",
+    "unboundedConfirmMessage": "Without a total limit, old segments are retained permanently. Disk usage keeps growing until the configuration changes or storage is freed externally.",
+    "unboundedConfirmLabel": "Store without limit",
     "export": {
       "csvFormat": "CSV format",
       "rfcResetTitle": "Reset delimiter, quote and escape character to RFC 4180 defaults.",
@@ -1176,7 +1377,8 @@
       "export": "Export",
       "failed": "Export failed",
       "title": "Export",
-      "fileExtHint": "File extension: {ext}."
+      "fileExtHint": "File extension: {ext}.",
+      "escapeCharPlaceholder": "(empty)"
     },
     "topbar": {
       "activeTitle": "Active — click to deactivate (for me only)",
@@ -1209,6 +1411,12 @@
       "liveFilterHint": "Live filter — includes future objects under these nodes.",
       "datapointsLabel": "Data points",
       "fixedSelectionHint": "Fixed selection.",
+      "devicesLabel": "KNX devices",
+      "devicesHint": "Filters by the group addresses of the selected devices.",
+      "expandDeviceTitle": "Use this device's data points",
+      "expandDeviceError": "Could not resolve data points for the KNX device.",
+      "expandingDevice": "Resolving data points for {device}. This can take a while for large devices.",
+      "expandingDeviceShort": "Loading",
       "tagsLabel": "Tags",
       "adapterLabel": "Adapter",
       "fulltextLabel": "Full-text search (q)",
@@ -1272,6 +1480,166 @@
       "range": "Range {from} … {to}",
       "fromShort": "From {from}",
       "toShort": "To {to}"
+    },
+    "segmentSectionTitle": "Segmented storage",
+    "segmentTotalSize": "Total size",
+    "segmentCount": "Segments",
+    "segmentActive": "Active segment",
+    "segmentOldestEvent": "Oldest event",
+    "segmentNewestEvent": "Newest event",
+    "segmentsListTitle": "Segments",
+    "segmentColId": "ID",
+    "segmentColStatus": "Status",
+    "segmentColRows": "Rows",
+    "segmentColSize": "Size",
+    "segmentColTimespan": "Timespan",
+    "segmentColIntegrity": "Integrity",
+    "segmentColRecovery": "Recovery",
+    "segmentLegacyNote": "Read-only legacy data (before upgrade)",
+    "segmentStatus": {
+      "active": "Active",
+      "closed": "Closed",
+      "legacy": "Legacy",
+      "checkpoint_pending": "Checkpoint pending",
+      "quarantined": "Isolated"
+    },
+    "integrityStatus": {
+      "ok": "OK",
+      "corrupt": "Corrupt",
+      "unknown": "Unknown"
+    },
+    "recoveryStatus": {
+      "recovered": "Recovered",
+      "quarantined": "Isolated",
+      "pending": "Pending",
+      "failed": "Failed",
+      "dirty_wal": "Dirty WAL"
+    },
+    "walCheckpointTitle": "WAL / Checkpoint",
+    "walSize": "WAL size",
+    "checkpointPending": "Checkpoint pending",
+    "lastCheckpoint": "Last checkpoint",
+    "checkpointBusyNotice": "The checkpoint was busy {n} time(s) and was deferred.",
+    "retentionOverBudget": "Retention over budget: there is more data than the retention limits allow.",
+    "retentionOverBudgetReason": "Retention over budget: {reason}",
+    "storageOnNetworkDrive": "Storage is located on a network drive. This can lead to data loss or locking — local storage is recommended.",
+    "segmentMaxAge": "Segment rotation by age",
+    "segmentMaxAgeHint": "Enable or disable an explicit value. Without one, an active total age retention is divided by three.",
+    "segmentMaxAgePlaceholder": "e.g. 6",
+    "segmentAdvanced": "Advanced",
+    "segmentAdvancedHint": "Each threshold can be set explicitly. When disabled, it is derived from the matching total limit or remains inactive if there is no matching limit.",
+    "segmentMaxBytes": "Segment rotation by size",
+    "segmentMaxRows": "Segment rotation by rows",
+    "segmentOptionalPlaceholder": "optional",
+    "segmentSourceExplicit": "Explicit: {value}",
+    "segmentSourceExplicitInvalid": "Explicit: enter a valid value",
+    "segmentSourceDerived": "Derived from total limit: {value}",
+    "segmentSourceDisabled": "Disabled",
+    "segmentRatioHint": "For segment-granular retention to work, each retention limit that is set (size, rows, age) must be at least three times the corresponding segment threshold.",
+    "segmentRatioError": "The segmentation is too coarse for the chosen retention: each retention limit that is set (size, rows, age) must be at least three times the corresponding segment threshold.",
+    "validationSegmentMaxAge": "The segment age must be at least 5 minutes.",
+    "validationSegmentMaxBytes": "The segment size must be greater than 0.",
+    "validationSegmentMaxRows": "The segment row count must be greater than 0.",
+    "segmentsButton": "Segments",
+    "segmentsButtonTitle": "Show segmented storage",
+    "segmentProblemsBadgeTitle": "There are segment problems — open to review.",
+    "segmentProblemBadge": "Problem",
+    "segmentProblemPrefix": "Problems:",
+    "segmentProblemCorrupt": "{n} corrupt",
+    "segmentProblemQuarantined": "{n} isolated",
+    "segmentProblemPending": "{n} recovery pending",
+    "segmentProblemDirtyWal": "{n} dirty WAL",
+    "segmentProblemCheckpointPending": "{n} checkpoint pending",
+    "retentionSignal": {
+      "budgetFloor": "Budget too small: active/isolated segments permanently exceed it. Raise the budget or reduce the segment size.",
+      "belowTarget": "Retention below target: budget only holds ~{current}, configured is ~{target}. Raise budget to ≥ {budget} for the target.",
+      "belowTargetNoBudget": "Retention below target: budget only holds ~{current}, configured is ~{target}."
+    },
+    "segmentQuarantineExplain": "Defective segment, isolated for analysis.",
+    "unitMiB": "MiB",
+    "unitGiB": "GiB",
+    "unitSeconds": "Seconds",
+    "unitMinutes": "Minutes",
+    "unitHours": "Hours",
+    "prognosis": {
+      "title": "Forecast",
+      "warming": "Forecast is still warming up (too few segments).",
+      "warmingLive": "Collecting live data — first forecast in ~{seconds} s.",
+      "provisional": "Preliminary result from {seconds} s of live data; it improves with every refresh.",
+      "idle": "No new events for {seconds} seconds.",
+      "rate": "Currently ~{rows} events/s — projected ~{mib} MiB/h.",
+      "eventRateOnly": "Currently ~{rows} events/s — storage growth is still being measured.",
+      "storageRateOnly": "Projected ~{mib} MiB/h — event rate is not available yet.",
+      "rotation": "New segment ~every {hours} h",
+      "rotationWithTrigger": "New segment ~every {hours} h — first trigger: {trigger}",
+      "rotationSizeCap": " — the size cap (~{cap} MiB) kicks in before the configured {age} h.",
+      "trigger": {
+        "age": "age",
+        "size": "size",
+        "rows": "rows"
+      },
+      "history": "Budget {budget} lasts for ~{duration}.",
+      "historyUnlimited": "Budget unlimited — history keeps growing.",
+      "historyOtherLimits": "No disk budget — other total limits may remove old segments.",
+      "unboundedGrowth": "At this rate, unlimited total retention adds about {month} in 30 days and {year} per year.",
+      "budget": "For ~{age}h segments: budget ≥ {budget} (for at least {segments} segments).",
+      "budgetRetention": "For {retention} retention: budget ≥ {budget} (at the current rate).",
+      "hours": "{n} h",
+      "days": "{n} days"
+    },
+    "migration": {
+      "bannerTitle": "Legacy data found – migration assistant",
+      "bannerBody": "History from a previous installation was found. It stays protected from retention cleanup until a decision is made.",
+      "bannerEscalated": "The storage budget is exhausted or will be reached soon – please decide about the legacy history now.",
+      "openAssistant": "Open assistant",
+      "later": "Later",
+      "title": "Migration assistant",
+      "analysisTitle": "Current state",
+      "legacySize": "Legacy history size",
+      "rowEstimate": "Rows (estimated)",
+      "timespan": "Time span",
+      "budget": "Storage budget",
+      "diskFree": "Free disk space",
+      "noBudget": "Unlimited",
+      "openConfig": "Open configuration",
+      "migrateTitle": "Migrate",
+      "migrateBody": "Copies the newest legacy data into segments up to the budget; older data beyond that is dropped. Afterwards the migration is complete (final).",
+      "diskOk": "Enough free disk space for the copy ({free} free, budget {budget}).",
+      "diskLow": "Not enough free disk space for the copy ({free} free, budget {budget}).",
+      "migrateStart": "Start migration",
+      "migrateRunning": "Migration running …",
+      "progressRows": "{copied} of {total} rows",
+      "progressDropped": "{n} rows beyond the budget dropped",
+      "migrateFailed": "Migration failed: {error}",
+      "migrateDone": "Migration finished – the newest legacy data has been taken over.",
+      "statsRefreshFailed": "Migration completed. Current segment data could not be loaded yet and will be checked again on the next refresh.",
+      "keepTitle": "Keep",
+      "keepBody": "The legacy history stays readable. The protection is lifted: once the budget is exhausted, retention may later discard the legacy history as a whole. Revocable as long as the legacy history exists.",
+      "keepEta": "The budget is expected to force reclaiming the legacy history in ~{days} days.",
+      "keepEtaNow": "The budget is already exceeded – the legacy history may be dropped as a whole at any time.",
+      "keepAction": "Keep",
+      "keepDone": "The legacy history is kept. The decision can be revised as long as the legacy history exists.",
+      "discardTitle": "Discard",
+      "discardBody": "Deletes the legacy history immediately and permanently.",
+      "discardFreed": "Space to be freed: {size}",
+      "discardAction": "Discard",
+      "discardConfirmTitle": "Permanently discard legacy history?",
+      "discardConfirmMessage": "The legacy history ({size}) will be deleted immediately and irreversibly.",
+      "discardConfirmLabel": "Discard permanently",
+      "discardDone": "The legacy history has been discarded.",
+      "loadFailed": "Could not load the migration assistant status.",
+      "actionFailed": "Action failed.",
+      "assistantButton": "Migration assistant",
+      "phase": {
+        "idle": "Idle",
+        "starting": "Starting …",
+        "precheck": "Pre-check …",
+        "copying": "Copying …",
+        "committing": "Committing …",
+        "done": "Finished",
+        "failed": "Failed"
+      },
+      "budgetLossHint": "Budget too small for a lossless takeover: the migration will drop the oldest events. To keep the full history, raise the budget to at least {recommended} first (rule of thumb: 2 × the old database; after migrating, reduce via an age limit rather than the budget if needed). Until you decide, the old history stays protected – live recording, however, is still bound by this budget. After raising the budget, migrate promptly – otherwise live recording grows into the new budget and displaces that many old events from the copy."
     }
   },
   "logs": {
@@ -1303,26 +1671,43 @@
     "openSheet": "Open logic sheet",
     "renameGraph": "Rename graph",
     "duplicateGraph": "Duplicate graph",
+    "duplicateNameSuffix": " (Copy)",
     "exportJson": "Export graph as JSON",
     "importJson": "Import graph from JSON",
     "searchNodes": "Search nodes — e.g. room, heating …",
     "searchNodesPalette": "Search nodes …",
     "negateOutput": "Negate output",
     "debugMode": "Debug mode: shows values after execution",
+    "snapToGrid": "Snap",
+    "snapToGridTitle": "Snap function blocks to the grid",
+    "gridVisible": "Grid",
+    "gridShowTitle": "Show the canvas grid",
+    "gridHideTitle": "Hide the canvas grid",
+    "gridSize": "Grid size",
     "deleteBlock": "Delete block",
     "deleteNode": "Delete branch",
     "init": "Init",
+    "blockName": {
+      "label": "Block name",
+      "editTitle": "{name} — double-click to rename",
+      "panelHint": "Custom name for this block. Leave empty for the block type's default title.",
+      "typeAndId": "{type} · {id}"
+    },
     "nodeTypes": {
       "divide": "Divide",
       "const_value": "Constant",
+      "comment": "Comment",
       "and": "AND",
       "or": "OR",
       "not": "NOT",
       "xor": "XOR",
       "gate": "Gate",
       "memory": "Memory",
+      "change_filter": "Change filter",
+      "edge_detect": "Edge detection",
       "compare": "Comparison",
       "hysteresis": "Hysteresis",
+      "merge": "Merge",
       "decision": "Decision",
       "value_mapping": "Mapping",
       "datapoint_read": "Read Object",
@@ -1334,18 +1719,24 @@
       "statistics": "Statistics",
       "avg_multi": "Average",
       "string_concat": "Concatenate",
+      "string_replace": "Search/Replace",
       "heating_circuit": "Summer/Winter (DIN)",
       "min_max_tracker": "Min/Max Tracker",
       "consumption_counter": "Energy counter",
       "timer_delay": "Delay",
       "timer_pulse": "Pulse",
+      "value_sequence": "Sequence",
       "timer_cron": "Trigger",
+      "datetime": "Date/Time",
       "operating_hours": "Op. Hours",
+      "sensor_watchdog": "Sensor Watchdog",
       "python_script": "Python Script",
       "ai_logic": "AI Logic",
       "astro_sun": "Astro Sun",
       "notify_pushover": "Pushover",
       "notify_sms": "SMS (seven.io)",
+      "notify_message": "Notification",
+      "message_archive": "Message Archive",
       "wake_on_lan": "Wake on LAN",
       "host_check": "Host Check",
       "json_extractor": "JSON Extractor",
@@ -1359,7 +1750,7 @@
     "newGraphBtn": "+ New",
     "run": "Run",
     "graphDisabledSuffix": " (disabled)",
-    "runTitle": "Run graph",
+    "runTitle": "Check permissions and run graph",
     "runDisabledTitle": "Graph is disabled — cannot run",
     "toggleActive": "✓ Active",
     "toggleDisabled": "⊘ Disabled",
@@ -1369,8 +1760,30 @@
     "deactivated": "Graph deactivated",
     "errorToggle": "Error changing status",
     "debugBtn": "Debug",
+    "debugInspector": {
+      "inputs": "Inputs",
+      "outputs": "Outputs",
+      "incoming": "Incoming value",
+      "effective": "Effective value",
+      "override": "Temporary override",
+      "overridePlaceholder": "JSON or text; empty means no override",
+      "overridden": "Overridden",
+      "clearAll": "Clear all overrides",
+      "copyAll": "Copy payload",
+      "copy": "Copy",
+      "copied": "Copied!",
+      "noValues": "No inputs",
+      "noExecution": "Run the sheet to inspect outputs.",
+      "timestamp": "Executed",
+      "duration": "Duration",
+      "overrideExecution": "This execution used temporary input overrides."
+    },
     "rename": "Rename",
     "duplicate": "Duplicate",
+    "copySelection": "Copy",
+    "copySelectionTitle": "Copy selected blocks",
+    "pasteSelection": "Paste",
+    "pasteSelectionTitle": "Paste copied blocks",
     "export": "Export",
     "import": "Import",
     "emptyHint": "Select a logic sheet or create a new one",
@@ -1381,15 +1794,37 @@
     "create": "Create",
     "saved": "Graph saved",
     "errorSave": "Error saving graph",
+    "errorLoad": "Error loading graph",
     "runResult": "Graph executed — {count} nodes evaluated",
+    "preflightTitle": "Check graph execution",
+    "preflightDescription": "Review the graph and all external effects before execution.",
+    "preflightError": "Could not check the required permissions.",
+    "preflightGraph": "Activate graph {id}",
+    "preflightGraphState": "Graph is enabled",
+    "preflightCapability": "Capability: {capability}",
+    "preflightDatapoint": "Data point {id}",
+    "preflightNodes": "Used by nodes: {nodes}",
+    "preflightReasons": {
+      "explicit_deny": "An explicit deny applies.",
+      "missing_allow": "The required grant is missing.",
+      "graph_disabled": "The graph is disabled and cannot run.",
+      "undeclared_capability": "This side effect has no declared capability and is denied by default."
+    },
     "runResultWithWarnings": "Graph executed — {count} nodes checked, {warnings} warnings",
     "nodeError": "⚠ Error",
     "graphValidationCycle": "Cycle detected: {count} node(s) need a Memory node as tick boundary.",
     "graphValidationConnectBlocked": "Connection not created: cycle detected ({count} node(s)). Use a Memory node for feedback.",
     "graphValidationSaveBlocked": "Save blocked: cycle detected ({count} node(s)). Use a Memory node for feedback.",
     "graphValidationNodeError": "Cycle detected; direct feedback needs a Memory node.",
+    "graphValidationDuplicateHandle": "Duplicate connection detected: {count} input(s) have more than one connection. Use a Merge node to combine several sources.",
+    "graphValidationConnectBlockedDuplicateHandle": "Connection not created: this input already has a connection. Use a Merge node to combine several sources.",
+    "graphValidationSaveBlockedDuplicateHandle": "Save blocked: {count} input(s) have more than one connection. Use a Merge node to combine several sources.",
+    "graphValidationNodeErrorDuplicateHandle": "Duplicate connection detected; only one connection per input is allowed. Use a Merge node.",
     "duplicated": "Graph duplicated as “{name}”",
     "errorDuplicate": "Error duplicating graph",
+    "copiedNodes": "{count} block(s) copied",
+    "copySelectionEmpty": "No blocks selected",
+    "pastedNodes": "{count} block(s) pasted",
     "errorExport": "Error exporting graph",
     "renamed": "Graph renamed",
     "errorRename": "Error renaming graph",
@@ -1397,6 +1832,8 @@
     "imported": "Graph “{name}” imported",
     "errorImport": "Invalid or corrupt export file",
     "newGraphPlaceholder": "e.g. Living Room Lights",
+    "hierarchyNodes": "Hierarchy nodes",
+    "hierarchyNodesHint": "Optional — assign to one or more Logic hierarchy nodes right away. Left empty, the sheet stays unassigned as before.",
     "notSelected": "— not selected —",
     "filterBadge": "Filter / transformation active",
     "negatePort": "Negate {id}",
@@ -1421,6 +1858,8 @@
       "value": "Value",
       "trigger": "Trigger",
       "changed": "Changed",
+      "rising": "Trigger rising",
+      "falling": "Trigger falling",
       "object": "Object",
       "result": "Result",
       "enable": "Enable",
@@ -1428,10 +1867,17 @@
       "output": "Output",
       "out": "Out",
       "in_n": "IN {n}",
+      "in_n_changed": "IN {n} Changed",
+      "out_n": "OUT {n}",
       "data": "Data",
+      "text": "Text",
       "body": "Body",
       "done": "Done",
+      "running": "Running",
+      "cancelled": "Cancelled",
+      "condition": "Condition",
       "sent": "Sent",
+      "stored": "Stored",
       "active": "Active",
       "reset": "Reset",
       "message": "Message",
@@ -1443,12 +1889,20 @@
       "count": "N",
       "min": "Min",
       "max": "Max",
-      "avg": "∅"
+      "avg": "∅",
+      "date": "Date",
+      "time": "Time",
+      "custom": "Custom"
     },
     "summary": {
       "inputs": "{n} Inputs",
       "parts": "{n} Parts",
       "rules": "{n} Rules",
+      "replaceModes": {
+        "plain": "Plain",
+        "regex": "RegEx"
+      },
+      "sequence": "{n} steps · {mode}",
       "hold": "→ hold",
       "filters": "{n} Filters",
       "negateEnable": "¬Enable",
@@ -1465,6 +1919,19 @@
       "ariaLabel": "Unknown block type"
     },
     "nodeConfig": {
+      "datetime": {
+        "custom_format": "Custom format",
+        "tokens": "Tokens: H/HH hour, m/mm minute, s/ss second, d/dd day, EE = Mo, EEE = Mon, EEEE = Monday, M/MM/MMM/MMMM month, yy/yyyy year. Names follow the selected language."
+      },
+      "comment": {
+        "text": "Text",
+        "textPlaceholder": "Note text…",
+        "empty": "Empty comment — edit in the panel"
+      },
+      "panelTabs": {
+        "settings": "Settings",
+        "debug": "Debug values"
+      },
       "tabs": {
         "connection": "Connection",
         "transform": "Transformation",
@@ -1632,6 +2099,37 @@
         "staticHint": "Connected inputs override static text. Empty fields produce an empty substring.",
         "inputPlaceholder": "Input {n} …"
       },
+      "stringReplace": {
+        "rules": "Rules",
+        "moveUp": "Move rule up",
+        "moveDown": "Move rule down",
+        "orderHint": "Rules are applied one after another from top to bottom — each rule works on the result of the previous one.",
+        "modes": {
+          "plain": "Search text (plain)",
+          "regex": "Regular expression (RegEx)"
+        },
+        "searchLabel": "Search for",
+        "searchPlaceholder": "e.g. old",
+        "patternLabel": "RegEx pattern",
+        "patternPlaceholder": "e.g. (\\d+)",
+        "replaceLabel": "Replace with",
+        "replacePlaceholder": "empty = remove match",
+        "groupHint": "Group references such as \\1 or \\g<name> are supported.",
+        "replaceAll": "Replace all occurrences"
+      },
+      "sensorWatchdog": {
+        "inputs": "Monitored Inputs",
+        "add": "+ Input",
+        "remove": "Remove input",
+        "removeShort": "−",
+        "labelPlaceholder": "Display name",
+        "timeoutLabel": "Timeout (seconds)",
+        "faultValueLabel": "Fault Value",
+        "faultValuePlaceholder": "Replacement value",
+        "repeatLabel": "Repeat (seconds)",
+        "repeatPlaceholder": "0 = no repeat",
+        "repeatHint": "Fires the fault trigger again at this interval while the input keeps being stale. 0 = only once on the initial fault."
+      },
       "rules": {
         "add": "+ Rule",
         "remove": "Remove rule",
@@ -1690,7 +2188,9 @@
         "valueN": "Value {n}",
         "outputsCount": "Outputs ({n})",
         "labelPlaceholder": "Label",
-        "pathExample": "e.g. data.temperature"
+        "pathExample": "e.g. data.temperature",
+        "previewPruned": "Preview pruned: the document exceeds the preview size, arrays and long strings were shortened. Per-output live values may differ from the actual result.",
+        "pathListTruncated": "Path list limited to {n} entries — type further paths directly."
       },
       "substr": {
         "modeLabel": "Mode",
@@ -1725,6 +2225,8 @@
         "urlLabel": "iCal URL",
         "refreshLabel": "Refresh interval (minutes)",
         "refreshHint": "Calendar is reloaded at most every N minutes.",
+        "maxPayloadSizeLabel": "Maximum calendar size (MiB)",
+        "maxPayloadSizeHint": "Downloads exceeding this value are aborted (1–50 MiB).",
         "rawInfo": "The RAW output always delivers the raw iCal text. Filters can be added for extended analysis.",
         "filtersSection": "Filters / Instances",
         "addFilter": "+ Add filter",
@@ -1748,12 +2250,16 @@
         "descriptionPlaceholder": "e.g. organic bin",
         "url": "iCal URL",
         "refresh_interval_min": "Refresh interval (minutes)",
+        "max_payload_size_mb": "Maximum calendar size (MiB)",
         "filter_count": "Filter count",
         "filters": "Filters (JSON)"
       },
       "invalidJson": "Invalid JSON: {msg}",
       "common": {
-        "optional": "(optional)"
+        "optional": "(optional)",
+        "boolTrue": "True",
+        "boolFalse": "False",
+        "unsetEnum": "Not set"
       },
       "const_value": {
         "value": "Value",
@@ -1777,6 +2283,36 @@
       "memory": {
         "initial_value": "Initial value",
         "data_type": "Data type",
+        "persist_state": "Restore state on restart"
+      },
+      "merge": {
+        "input_count": "Input count",
+        "persist_state": "Restore state on restart"
+      },
+      "change_filter": {
+        "persist_state": "Restore state on restart"
+      },
+      "edge_detect": {
+        "on_rising": "Rising edge",
+        "on_risingOptions": {
+          "value": "Trigger + value",
+          "trigger": "Trigger only",
+          "off": "Off"
+        },
+        "value_rising": "Value on rising edge",
+        "on_falling": "Falling edge",
+        "on_fallingOptions": {
+          "value": "Trigger + value",
+          "trigger": "Trigger only",
+          "off": "Off"
+        },
+        "value_falling": "Value on falling edge",
+        "data_type": "Data type",
+        "data_typeOptions": {
+          "bool": "Boolean",
+          "number": "Number",
+          "string": "Text"
+        },
         "persist_state": "Restore state on restart"
       },
       "hysteresis": {
@@ -1846,6 +2382,28 @@
       "timer_pulse": {
         "duration_s": "Duration (s)"
       },
+      "value_sequence": {
+        "run_mode": "Run mode",
+        "repeat_count": "Repeat count",
+        "restart_policy": "On new trigger",
+        "cancel_when_condition_false": "Cancel when condition becomes false",
+        "add": "Add step",
+        "blink": "Blink preset",
+        "step": "Step {n}",
+        "duplicate": "Duplicate",
+        "object": "Object (empty = pause)",
+        "value": "Value",
+        "modes": {
+          "once": "Once",
+          "repeat_count": "Repeat a fixed count",
+          "while_condition": "Repeat while condition is true"
+        },
+        "policies": {
+          "ignore": "Ignore",
+          "restart": "Restart",
+          "queue": "Queue"
+        }
+      },
       "timer_cron": {
         "cron": "Cron expression"
       },
@@ -1874,6 +2432,28 @@
         "to": "Recipient (+41…)",
         "sender": "Sender (max 11 chars)",
         "message": "Message (fallback)"
+      },
+      "notification": {
+        "adapter": "Message/notification adapter",
+        "selectAdapter": "Select adapter",
+        "targets": "Targets",
+        "noTargets": "No active, configured targets available.",
+        "title": "Title",
+        "fallback": "Message (fallback)",
+        "placeholders": "The logic block has no datapoint context; MESSAGE placeholders are sent unchanged.",
+        "priority": "Priority",
+        "legacy": "Legacy block. Please use the Notification block for new notifications."
+      },
+      "messageArchive": {
+        "archive": "Message archive",
+        "selectArchive": "Select message archive",
+        "missingArchive": "Message archive not found",
+        "type": "Message type",
+        "severity": "Severity",
+        "title": "Title (fallback)",
+        "titlePlaceholder": "Optional, can be overridden via input",
+        "message": "Message (fallback)",
+        "messagePlaceholder": "Used when no message input is connected"
       },
       "host_check": {
         "host": "Host / IP address",
@@ -1916,13 +2496,13 @@
         "response_type": "Response Content-Type",
         "verify_ssl": "Verify SSL certificate",
         "headers": "Headers (JSON object, optional)",
-        "headers_secret_file": "Headers from secret file (optional)",
+        "headers_value_file": "Headers from file (optional)",
         "timeout_s": "Timeout (s)",
         "auth_type": "Authentication",
         "auth_username": "Username (Basic/Digest)",
         "auth_password": "Password (Basic/Digest)",
         "auth_token": "Bearer token",
-        "auth_token_file": "Bearer token from secret file"
+        "auth_value_file": "Bearer token from file"
       },
       "math_formula": {
         "formula": "Formula",
@@ -1933,7 +2513,8 @@
         "in_max": "Input max",
         "out_min": "Output min",
         "out_max": "Output max"
-      }
+      },
+      "resizeHandle": "Drag to resize panel"
     },
     "portLabels": {
       "heizmode": "Heating mode",
@@ -1945,6 +2526,7 @@
       "sunset": "Sunset",
       "isDay": "Daytime",
       "urlTitle": "URL title",
+      "title": "Title",
       "imageUrl": "Image URL",
       "avgNow": "∅ now",
       "avg1m": "∅ 1 min",
@@ -1980,18 +2562,25 @@
       "icalTomorrow": "Tomorrow",
       "icalToday": "Today",
       "reachable": "Reachable",
-      "latencyMs": "Latency (ms)"
+      "latencyMs": "Latency (ms)",
+      "faultText": "Fault Text",
+      "faultTrigger": "Fault Trigger"
     },
     "nodeDescriptions": {
+      "datetime": "Outputs the current date and time in the configured timezone and format.",
       "const_value": "Outputs a fixed value — number, bool or text. Useful as threshold or reference.",
+      "comment": "Free-form multi-line note placed directly on the canvas for documentation. Purely visual — has no effect on execution.",
       "and": "Output is true when ALL inputs are true. Inputs (2–30) and output can be individually negated.",
       "or": "Output is true when AT LEAST ONE input is true. Inputs (2–30) and output can be individually negated.",
       "not": "Inverts the input",
       "xor": "Output is true when EXACTLY ONE input is true. Inputs (2–30) and output can be individually negated.",
       "gate": "Signal gate: passes the input when enable=true, blocks otherwise. Behavior when closed: hold the last value (retain) or output a default value.",
       "memory": "Outputs the stored value from the previous logic run and stores the current input value for the next run. Explicit tick boundary for controlled feedback.",
+      "change_filter": "Outputs the input value and sets the changed trigger only when it differs from the last received value. Repeated identical values are suppressed.",
+      "edge_detect": "Evaluates the input as a boolean and reacts to the transition: a rising edge (false → true) outputs the rising value and sets the rising trigger, a falling edge (true → false) outputs the falling value and sets the falling trigger. Without an edge nothing is sent on the output.",
       "compare": "Compares two values (>, <, =, >=, <=, !=)",
       "hysteresis": "Switches ON when threshold is exceeded, OFF only when it falls below",
+      "merge": "Bundles several independent value sources into one shared output: whichever source last delivered a new value is passed through (Edomi-style terminal/junction).",
       "decision": "Checks one input value against multiple independent conditions. Each output returns TRUE or FALSE independently; multiple outputs can be TRUE at the same time.",
       "value_mapping": "Checks an ordered rule list and returns the value from the first matching rule. An optional default value is returned when no rule matches.",
       "datapoint_read": "Outputs the current value of a DataPoint. Triggers on value change.",
@@ -2003,17 +2592,22 @@
       "statistics": "Continuously calculates Min/Max/Average over all received values. Reset input resets the statistics.",
       "avg_multi": "Calculates the average of 2–20 inputs (current) and moving averages over time windows: 1 min, 1 h, 1 day, 7/14/30/180/365 days. Each new value is stored with a timestamp. Time window values are retained after restart (configurable).",
       "string_concat": "Concatenates 2–20 texts into one result. Each input can be dynamically connected or statically preset. A connected input takes precedence over the static text.",
+      "string_replace": "Replaces matches in a text. Several rules are applied one after another, in the given order, to the intermediate result. Per rule: plain search text or regular expression (RegEx, group references such as \\1 in the replace field), case sensitivity, and all or only the first occurrence.",
       "heating_circuit": "Summer/winter switching according to DIN (Mannheim method). Input: outdoor temperature. Measurement times (first crossing): T1 = value from 07:00, T2 = from 14:00, T3 = from 21:00. Works even if the sensor does not hit the measurement hours exactly. Each slot is recorded only once per day. Daily average: T_avg = (T1 + T2 + 2×T3) / 4. Monthly average: moving average of the last 31 daily averages. Heating mode ON when T_avg < threshold, OFF when T_avg ≥ threshold + hysteresis. Missing slots are filled from history on startup. State is retained across restarts.",
       "min_max_tracker": "Tracks minimum and maximum over time periods (daily, weekly, monthly, yearly, absolute). Period values are automatically reset at day/week/month/year boundaries.",
       "consumption_counter": "Calculates consumption values (daily, weekly, monthly, yearly) from a continuously incrementing counter value. Also stores the previous period's consumption for comparisons.",
       "timer_delay": "Delays a signal by N seconds",
       "timer_pulse": "Outputs a pulse for N seconds",
+      "value_sequence": "Writes configured values and pauses in sequence without blocking logic execution.",
       "timer_cron": "Fires automatically on a cron schedule (minute hour day month weekday).",
       "operating_hours": "Counts operating hours while 'Active' is true. Reset clears the counter.",
+      "sensor_watchdog": "Monitors up to 10 inputs for missing new values. Once an input has gone longer than its configured timeout without a new value, its output switches to the configured fault value and a fault text plus trigger are emitted. Runs autonomously via an internal scheduler.",
       "python_script": "Executes a Python script. Available: inputs dict → return value",
       "astro_sun": "Calculates sunrise and sunset based on latitude/longitude. Requires: pip install astral",
+      "notify_message": "Sends a notification through the configured targets of a Message/notification adapter.",
       "notify_pushover": "Sends a push notification via the Pushover API (api.pushover.net). Triggered automatically when a message arrives at the input.",
       "notify_sms": "Sends an SMS via the seven.io gateway (gateway.seven.io). Triggered automatically when a message arrives at the input.",
+      "message_archive": "Writes a message to a message archive. Triggered automatically when a message arrives at the input or when the trigger is true.",
       "wake_on_lan": "Sends a Wake-on-LAN magic packet to a device via UDP broadcast. Triggered when the trigger input is true.",
       "host_check": "Pings a host and outputs the reachability status (true/false) and latency in milliseconds. Runs on the rising edge of the trigger input. Recommended: connect to a Timer/Cron node for periodic polling.",
       "json_extractor": "Parses a JSON string and extracts one or more values by key paths (dot notation, e.g. sensors.temperature). Multiple outputs configurable via + in the config panel.",
@@ -2021,7 +2615,39 @@
       "substring_extractor": "Extracts text from a string using substring operations or regular expressions. Modes: left_of / right_of (first or last occurrence), between (two markers), cut (position + length), regex (Python re syntax, capture groups selectable).",
       "ical": "Loads an iCal/ICS file from a URL and evaluates events. The RAW output delivers the raw calendar text. Each filter provides 4 outputs: Array (all events), Next date, Tomorrow (bool), Today (bool). Filters can be applied to Summary, Location and/or Description.",
       "api_client": "Sends HTTP requests (GET/POST/PUT…) to external APIs. The trigger input controls execution."
+    },
+    "graphPicker": {
+      "title": "Open Logic",
+      "breadcrumbRoot": "All Hierarchies",
+      "noTrees": "No hierarchies exist yet.",
+      "unassigned": "Unassigned logic sheets",
+      "empty": "This folder is empty.",
+      "organize": "Edit logic hierarchy",
+      "loading": "Loading …",
+      "errorLoading": "Could not load.",
+      "assign": "Assign hierarchy",
+      "assignHint": "Assign this logic sheet to one or more hierarchy positions — existing assignments are kept.",
+      "assignConfirm": "Assign",
+      "assignError": "Could not assign the hierarchy position.",
+      "currentGraph": "currently open",
+      "removeHere": "Remove from hierarchy",
+      "removeHereTitle": "Removes the logic sheet only from this hierarchy position. If this was its last position, the logic sheet reappears at the top under \"Unassigned\".",
+      "deleteHereTitle": "This logic sheet has no hierarchy assignment — deleting it here removes it irreversibly.",
+      "deleteTitle": "Deletes this logic graph irreversibly, including all of its hierarchy assignments.",
+      "deleteConfirm": "The logic graph \"{name}\" will be deleted irreversibly.",
+      "showAll": "List of all logic sheets",
+      "noGraphs": "No logic sheets exist yet.",
+      "links": "Links",
+      "linksModalTitle": "Hierarchy links: {name}",
+      "linksEmpty": "This logic sheet is not currently assigned to any hierarchy position."
     }
+  },
+  "authzPreflight": {
+    "allowed": "Allowed",
+    "denied": "Denied",
+    "ready": "All required permissions are available.",
+    "blocked": "This action is blocked by missing permissions.",
+    "noRequirements": "No additional permissions are required."
   },
   "settings": {
     "title": "Settings",
@@ -2045,6 +2671,9 @@
       "title": "General settings",
       "timezone": "Timezone",
       "timezoneHint": "All timestamps in the system are shown in this timezone.",
+      "dateFormat": "Default date format",
+      "timeFormat": "Default time format",
+      "formatHint": "Tokens: d/dd, EE/EEE/EEEE, M/MM/MMM/MMMM, yy/yyyy; time uses H/HH, m/mm, s/ss.",
       "timezonePlaceholder": "Search … e.g. Zurich, Berlin, UTC",
       "noResults": "No results",
       "save": "Save",
@@ -2058,7 +2687,13 @@
       "themeLightDesc": "Light appearance",
       "themeDark": "Dark",
       "themeDarkDesc": "Dark appearance",
-      "tzSaved": "Timezone set to «{tz}»"
+      "tzSaved": "Timezone set to «{tz}»",
+      "regionFormat": "Regional format",
+      "regionFormatHint": "Controls number, currency and date formats. Independent of the language — German in Switzerland formats differently from German in Germany.",
+      "regionFormatAuto": "Automatic (from language: {format} · {sample})",
+      "currency": "Currency",
+      "currencyAuto": "Automatic (from regional format: {currency})",
+      "formatPreview": "Preview"
     },
     "security": {
       "title": "URL target allowlist",
@@ -2188,14 +2823,33 @@
     "users": {
       "deleteUser": "Delete user",
       "deleteUserConfirm": "Delete user '{name}'?",
+      "deleteImpact": "Review the complete impact before deleting this user:",
+      "deletePages": "{n} Visu pages will be transferred",
+      "deleteGraphs": "{n} Logic graphs will be transferred",
+      "deleteFiltersets": "{n} RingBuffer filter sets will be transferred",
+      "deleteKeys": "{n} API keys will be revoked immediately",
+      "deleteReferences": "{n} access references will be removed",
+      "successor": "Successor for owned artifacts",
+      "selectSuccessor": "Select a successor",
+      "deleteKeyWarning": "API keys are never transferred. Their former holder may still know the secret, so they will be revoked.",
       "count": "{n} Users",
+      "empty": "No users",
       "addButton": "+ User",
       "colUsername": "Username",
       "colAdmin": "Admin",
       "colMqtt": "MQTT",
       "colCreated": "Created",
+      "currentAccount": "You",
+      "roleAdmin": "Admin",
+      "roleUser": "User",
+      "status": "Status",
+      "statusCurrent": "Current account",
+      "statusReady": "Ready",
+      "statusWarning": "MQTT without password",
       "mqttActive": "Active",
       "mqttOff": "Off",
+      "mqttPasswordSetShort": "Password set",
+      "mqttPasswordMissing": "Password missing",
       "mqttSetTitle": "Set MQTT Password",
       "mqttDisableTitle": "Disable MQTT",
       "createTitle": "New User",
@@ -2206,7 +2860,114 @@
       "mqttFor": "User: {username}",
       "newMqttPassword": "New MQTT Password",
       "mqttPasswordSet": "MQTT password set",
-      "create": "Create"
+      "create": "Create",
+      "rights": {
+        "openButton": "Edit rights",
+        "summary": "{roles} · {n} areas",
+        "summaryNone": "No assigned areas",
+        "title": "Rights for {username}",
+        "progress": "Rights editor progress",
+        "steps": {
+          "role": "Role",
+          "scopes": "Areas",
+          "preview": "Preview",
+          "confirm": "Confirm"
+        },
+        "roleTitle": "Select role",
+        "roleHint": "Each role starts with its saved direct assignments; new roles begin without areas or additional capabilities.",
+        "mixedRoleWarning": "This user currently has different roles across assignments. Other roles remain unchanged when areas are added or removed.",
+        "bulkRoleTitle": "Reassign all retained existing areas",
+        "bulkRoleHint": "Explicitly apply the selected role to every existing area that remains selected.",
+        "roles": {
+          "guest": {
+            "label": "Guest",
+            "description": "Read access only."
+          },
+          "resident": {
+            "label": "Resident",
+            "description": "Read, write and activate access."
+          },
+          "operator": {
+            "label": "Operator",
+            "description": "Full operational access, including generation."
+          },
+          "owner": {
+            "label": "Owner",
+            "description": "All actions in the selected areas."
+          }
+        },
+        "scopeTitle": "Select hierarchy areas",
+        "scopeHint": "Choose whether the role is inherited, explicitly allowed or explicitly denied for each area.",
+        "scopeStateLabel": "Access state for {scope}",
+        "scopeStates": {
+          "inherit": "Inherited",
+          "allow": "Allow",
+          "deny": "Deny"
+        },
+        "scopeStateCounts": "{allow} allow · {deny} deny",
+        "scopeSearchPlaceholder": "Filter areas …",
+        "scopeSearchNoMatch": "No matching areas found.",
+        "noScopes": "No hierarchy areas are available.",
+        "unknownScope": "This saved area is no longer present in the hierarchy list.",
+        "deniedScopePreserved": "A direct deny assignment exists for this area and is preserved; an allow assignment cannot be added here.",
+        "orphanedScopeBlock": "{n} selected assignments no longer resolve to a hierarchy area. Remove them explicitly or cancel; saving is blocked while they remain selected.",
+        "newScopeRoleRequired": "Select a role before adding new hierarchy areas.",
+        "selectedScopes": "{n} areas selected",
+        "logicCreateTitle": "Create logic graphs",
+        "logicCreateHint": "Allows this user to create, import and duplicate logic graphs.",
+        "capabilityUnavailableForRole": "Not available for the {role} role.",
+        "nonStandardLogicGrantPreserved": "An existing non-standard assignment is preserved as an advanced grant and cannot be changed here.",
+        "logicCreateDenied": "A direct deny assignment for creating logic graphs is preserved and cannot be overridden here.",
+        "logicCreateCentralControl": "Also create logic graphs for central plants",
+        "centralControl": "Central plant control",
+        "centralControlEnabled": "Central control enabled",
+        "centralControlDisabled": "Central control disabled",
+        "centralControlSummary": "Central plant control by area",
+        "previewTitle": "Effective permissions",
+        "previewHint": "Review the calculated decision and its reason for every action before saving.",
+        "emptyPreview": "There are no editable or advanced assignment targets to check. No remote preview is needed.",
+        "refreshPreview": "Refresh preview",
+        "allowed": "Allowed",
+        "denied": "Denied",
+        "actions": {
+          "read": "Read",
+          "write": "Write",
+          "activate": "Activate",
+          "generate": "Generate"
+        },
+        "reasons": {
+          "admin": "Allowed by administrator bridge.",
+          "allowed": "Allowed by matching role assignment.",
+          "direct_datapoint_grant": "Allowed by direct datapoint assignment.",
+          "explicit_deny": "Denied by an explicit deny assignment.",
+          "central_control_required": "Denied because central plant control is not enabled for this area.",
+          "missing_allow": "Denied because no matching allow assignment applies.",
+          "no_targets": "Denied because the target could not be resolved."
+        },
+        "confirmTitle": "Confirm changes",
+        "confirmHint": "Saving replaces the editable assignments atomically.",
+        "enabled": "Enabled",
+        "disabled": "Disabled",
+        "selectedRole": "Role",
+        "roleHandling": "Role handling",
+        "roleSummaryBulk": "All selected areas are reassigned to {role}.",
+        "roleSummaryNew": "Existing area roles remain unchanged; new areas use {role}.",
+        "roleSummaryCurrent": "Direct assignments for the {role} role are edited; other roles remain unchanged.",
+        "existingRolesPreserved": "Existing roles preserved",
+        "selectedAreas": "Areas",
+        "advancedPreserved": "{n} advanced assignments are preserved unchanged.",
+        "advancedTitle": "Advanced assignments",
+        "advancedDescription": "{effect} · {role} · {nodeType} · {nodeId}",
+        "advancedTarget": "{nodeType} · {nodeId}",
+        "removeAdvanced": "Remove",
+        "back": "Back",
+        "next": "Next",
+        "save": "Save rights",
+        "loadError": "Rights could not be loaded.",
+        "previewError": "The effective preview could not be loaded.",
+        "saveError": "Rights could not be saved.",
+        "concurrentChange": "The assignments changed after the editor was opened. Reload the editor and review the latest state before saving."
+      }
     },
     "apikeys": {
       "keyName": "API key name",
@@ -2220,7 +2981,28 @@
       "nameLabel": "Description / Name",
       "namePlaceholder": "e.g. Home Assistant",
       "create": "Create",
-      "modalTitle": "API Key Name"
+      "modalTitle": "API Key Name",
+      "capabilities": {
+        "open": "Configure capabilities",
+        "title": "API key configuration capabilities",
+        "target": "Target API key: {name}",
+        "warning": "These permissions allow the selected API key to change configuration. Existing target permissions, denies and read-only restrictions still apply.",
+        "confirm": "I confirm the complete capability replacement for {name}.",
+        "save": "Replace capabilities",
+        "loadError": "Capabilities could not be loaded.",
+        "saveError": "Capabilities could not be saved.",
+        "concurrentChange": "Capabilities changed after this dialog was opened. Reload and review the current state.",
+        "effects": {
+          "visu.page_config.write": {
+            "title": "Write Visu page configuration",
+            "description": "Allows saving configuration for an otherwise writable Visu page only."
+          },
+          "datapoint.metadata.write": {
+            "title": "Write data point metadata",
+            "description": "Allows changing metadata for data points covered by the key's write grants; runtime values remain separate."
+          }
+        }
+      }
     },
     "password": {
       "title": "Change Password",
@@ -2247,11 +3029,19 @@
       "dbImportWarning2": "History data will be replaced by the content of the uploaded file",
       "dbImportWarning3": "Adapters and Logic Engine will be restarted after restore",
       "dbImportWarning4": "Data not included in the backup will be lost",
+      "messageArchiveDbExportTitle": "Back up message archive (download)",
+      "messageArchiveDbExportDesc": "Save the separate SQLite database of the message archives as a file.",
+      "messageArchiveDbExportButton": "Download message archive SQLite",
+      "messageArchiveDbImportTitle": "Restore message archive (upload)",
+      "messageArchiveDbImportDesc": "Upload and apply a SQLite database file for message archives.",
+      "messageArchiveDbImportWarning": "⚠ Warning — this action overwrites all current message archives!",
+      "messageArchiveDbImportWarning1": "All current message archives and messages will be replaced",
+      "messageArchiveDbImportWarning2": "The OBS configuration database remains unchanged",
       "autobackupTitle": "Autobackup",
       "autobackupDesc": "Daily automatic JSON backup of all configuration data (adapters, objects, logic module, Visu, icons, etc.). Backups are stored locally in the data directory.",
       "autobackupEnable": "Enable Autobackup",
       "autobackupTime": "Time of daily backup",
-      "autobackupUhr": "",
+      "autobackupUhr": "O'clock",
       "autobackupRetention": "Number of backups to keep (days)",
       "retentionDay": "day",
       "retentionDays": "days",
@@ -2314,7 +3104,9 @@
       "error_NO_GROUP_ADDRESSES": "No group addresses found. Please export the correct ETS project.",
       "error_PARSE_ERROR": "Error parsing the .knxproj file.",
       "dbImportResultOk": "Database restore OK: {message} ({adapters} adapters restarted). Please reload the page.",
-      "dbImportFailed": "Database restore failed"
+      "dbImportFailed": "Database restore failed",
+      "messageArchiveDbImportResultOk": "Message archive restore OK: {message}",
+      "messageArchiveDbImportFailed": "Message archive restore failed"
     },
     "history": {
       "dbTitle": "History DB",
@@ -2459,6 +3251,49 @@
       }
     }
   },
+  "knxDevices": {
+    "title": "KNX Devices",
+    "subtitle": "{count} imported devices",
+    "refresh": "Refresh",
+    "reload": "Reload",
+    "snapshotHint": "Snapshot from the last imported KNX project.",
+    "importProject": "Import KNX project",
+    "searchPlaceholder": "PA, name, manufacturer, order number …",
+    "deviceSelectPlaceholder": "Search KNX device …",
+    "noDeviceMatches": "No KNX devices found",
+    "manufacturerPlaceholder": "Manufacturer",
+    "orderNumberPlaceholder": "Order number",
+    "hierarchyFilterPlaceholder": "Filter by hierarchy …",
+    "hierarchyAssignPlaceholder": "Assign hierarchy nodes …",
+    "hierarchyAssignments": "Hierarchy assignment",
+    "noHierarchyLinks": "No assignment",
+    "assignmentError": "Could not save hierarchy assignment.",
+    "empty": "No KNX devices imported.",
+    "loadError": "Could not load KNX devices.",
+    "detailError": "Could not load KNX device.",
+    "errorStateHint": "Devices could not be displayed. Please refresh again.",
+    "selectHint": "Select a device to inspect communication objects and group addresses.",
+    "commObjectsTitle": "Communication objects ({count})",
+    "noCommObjects": "No communication objects available.",
+    "noGaLinks": "No group address",
+    "boundDatapoints": "Bound datapoints",
+    "noBoundDatapoints": "No datapoints bound for this GA.",
+    "bindingRead": "Read",
+    "bindingWrite": "Write",
+    "bindingReadWrite": "Read/Write",
+    "bindingDisabled": "Disabled",
+    "pageLabel": "Page {page} of {pages}",
+    "previous": "Previous",
+    "next": "Next",
+    "table": {
+      "pa": "PA",
+      "name": "Name",
+      "manufacturer": "Manufacturer",
+      "orderNumber": "Order number",
+      "hierarchies": "Hierarchies",
+      "appRef": "Application"
+    }
+  },
   "common": {
     "save": "Save",
     "saving": "Saving …",
@@ -2474,6 +3309,8 @@
     "success": "Success",
     "details": "Details",
     "remove": "Remove",
+    "clear": "Clear",
+    "selected": "Selected",
     "enabled": "Enabled",
     "active": "Active",
     "inactive": "Inactive",
@@ -2534,7 +3371,7 @@
     "noFileSelected": "No file selected"
   },
   "hierarchy": {
-    "title": "Device structure",
+    "title": "Hierarchies",
     "deleteNode": "Delete branch",
     "newHierarchy": "New hierarchy",
     "importFromEts": "Import from ETS",
@@ -2604,9 +3441,88 @@
       "trades": "Trades",
       "mid": "Middle groups",
       "flat": "Flat (GA only)"
-    }
+    },
+    "addChildNode": "Add child node",
+    "moveUp": "Move up",
+    "moveDown": "Move down",
+    "renameNode": "Rename"
   },
   "topbar": {
     "logout": "Sign out"
+  },
+  "messageArchives": {
+    "title": "Message Archives",
+    "subtitle": "Administrative management of the separate archive database",
+    "newArchive": "New Archive",
+    "archives": "Archives",
+    "noArchives": "No archives available",
+    "loadError": "Failed to load message archives",
+    "selectArchive": "Select or create an archive.",
+    "dbPath": "Archive DB",
+    "integrityCheck": "Integrity Check",
+    "integrityResult": "Integrity check",
+    "exportJsonl": "Export JSONL",
+    "exportCsv": "Export CSV",
+    "clear": "Clear",
+    "refresh": "Refresh",
+    "entries": "entries",
+    "noEntries": "No messages found",
+    "confirmClear": "Permanently delete {count} entries from this archive?",
+    "confirmDelete": "Permanently delete archive and {count} entries?",
+    "form": {
+      "id": "Archive ID",
+      "name": "Name",
+      "description": "Description",
+      "defaultType": "Default message type",
+      "defaultTypeNone": "No default",
+      "defaultTypeCustom": "Custom …",
+      "defaultTypeCustomPlaceholder": "e.g. maintenance",
+      "defaultTypeHint": "Optional default for new entries, e.g. system, security or notification.",
+      "color": "Color",
+      "maxEntries": "Maximum entries",
+      "maxAgeDays": "Maximum age (days)"
+    },
+    "filters": {
+      "search": "Search title or text …",
+      "allSeverities": "All severities",
+      "allStatuses": "All statuses",
+      "allTypes": "All types"
+    },
+    "table": {
+      "time": "Time",
+      "message": "Message",
+      "type": "Type",
+      "severity": "Severity",
+      "status": "Status",
+      "source": "Source"
+    },
+    "types": {
+      "system": "System",
+      "security": "Security",
+      "notification": "Notification",
+      "automation": "Automation",
+      "adapter": "Adapter",
+      "diagnostic": "Diagnostic"
+    },
+    "severities": {
+      "info": "Info",
+      "success": "Success",
+      "warning": "Warning",
+      "error": "Error",
+      "critical": "Critical"
+    },
+    "statuses": {
+      "new": "New",
+      "open": "Open",
+      "acknowledged": "Acknowledged",
+      "closed": "Closed"
+    }
+  },
+  "help": {
+    "title": "Help",
+    "openLabel": "Open help for this section",
+    "unavailable": "No help is available for this section yet.",
+    "systemUnavailable": "Help content is currently unavailable on this server.",
+    "openInNewTab": "Open in new tab"
   }
 }

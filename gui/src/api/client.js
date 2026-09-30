@@ -3,6 +3,7 @@
  * All calls go through /api/v1 — in dev proxied via Vite, in prod served by FastAPI.
  */
 import axios from 'axios'
+import { notifyAuthTokenRefreshed } from '@/utils/authEvents'
 
 const api = axios.create({
   baseURL: '/api/v1',
@@ -21,6 +22,13 @@ api.interceptors.response.use(
   res => res,
   async err => {
     const original = err.config
+    // The installation has no owner (any more): the backend answers nothing but
+    // its setup page, so there is no point retrying or redirecting to /login.
+    // A full page load rebuilds the cached setup state on the way.
+    if (err.response?.status === 503 && err.response?.data?.setup_required) {
+      if (window.location.pathname !== '/setup') window.location.href = '/setup'
+      return Promise.reject(err)
+    }
     if (err.response?.status === 401 && !original._retry) {
       original._retry = true
       const refreshToken = localStorage.getItem('refresh_token')
@@ -29,6 +37,7 @@ api.interceptors.response.use(
           const { data } = await axios.post('/api/v1/auth/refresh', { refresh_token: refreshToken })
           localStorage.setItem('access_token', data.access_token)
           localStorage.setItem('refresh_token', data.refresh_token)
+          notifyAuthTokenRefreshed()
           original.headers.Authorization = `Bearer ${data.access_token}`
           return api(original)
         } catch {
@@ -79,10 +88,12 @@ export const dpApi = {
   },
   get:           (id)                           => api.get(`/datapoints/${id}`),
   create:        (data)                         => api.post('/datapoints/', data),
+  duplicate:     (id, name)                     => api.post(`/datapoints/${id}/duplicate`, { name }, { timeout: 0 }),
   update:        (id, data)                     => api.patch(`/datapoints/${id}`, data),
   delete:        (id)                           => api.delete(`/datapoints/${id}`),
   value:         (id)                           => api.get(`/datapoints/${id}/value`),
   writeValue:    (id, value)                    => api.post(`/datapoints/${id}/value`, { value }),
+  knxContext:    (id)                           => api.get(`/datapoints/${id}/knx-context`),
   tags:          ()                             => api.get('/datapoints/tags'),
   listBindings:  (id)                           => api.get(`/datapoints/${id}/bindings`),
   createBinding: (id, data)                     => api.post(`/datapoints/${id}/bindings`, data),
@@ -122,6 +133,11 @@ export const adapterApi = {
   enoceanMqttBrowseDatapoints: (id, deviceId, direction = 'SOURCE') =>
     api.get(`/adapters/instances/${id}/enocean-mqtt/devices/${encodeURIComponent(deviceId)}/datapoints`, { params: { direction } }),
   iobrokerBrowseStates: (id, q = '', limit = 50) => api.get(`/adapters/instances/${id}/iobroker/states`, { params: { q, limit } }),
+  // browse_sensors() makes one owserver call per device/alias found (each bounded by the
+  // instance's configured request_timeout, default 10s), so a bus with several devices can
+  // easily exceed the client's default 15s timeout well before the backend itself would fail.
+  onewireBrowseSensors: (id) => api.get(`/adapters/instances/${id}/onewire/browse`, { timeout: 60_000 }),
+  onewireSetAlias:      (id, romId, label) => api.patch(`/adapters/instances/${id}/onewire/aliases`, { rom_id: romId, label }),
   iobrokerImportPreview: (id, data) => api.post(`/adapters/instances/${id}/iobroker/import-preview`, data),
   iobrokerImport:        (id, data) => api.post(`/adapters/instances/${id}/iobroker/import`, data),
   getZsuHolidays:        (id, year = 0) => api.get(`/adapters/instances/${id}/holidays`, { params: year ? { year } : {} }),
@@ -148,6 +164,8 @@ export const knxprojApi = {
   listGA:  (params)   => api.get('/knxproj/group-addresses', { params }),
   listDevices: (params) => api.get('/knxproj/devices', { params }),
   getDevice: (pa)      => api.get(`/knxproj/devices/${encodeURIComponent(pa)}`),
+  getDeviceDatapoints: (pa) => api.get(`/knxproj/devices/${encodeURIComponent(pa)}/datapoints`),
+  setDeviceHierarchyLinks: (pa, data) => api.put(`/knxproj/devices/${encodeURIComponent(pa)}/hierarchy-links`, data),
   listGaDevices: (ga, params) => api.get(`/knxproj/group-addresses/${encodeURIComponent(ga)}/devices`, { params }),
   clearGA: ()         => api.delete('/knxproj/group-addresses'),
 }
@@ -173,6 +191,20 @@ export const hierarchyApi = {
   createLink:   (data)          => api.post('/hierarchy/links', data),
   deleteLink:   (nodeId, dpId)  => api.delete('/hierarchy/links', { params: { node_id: nodeId, datapoint_id: dpId } }),
 
+  // Logic-graph links (#1217) — purely organizational, no authz inheritance
+  getNodeLogicGraphs:   (nodeId)     => api.get(`/hierarchy/nodes/${nodeId}/logic-graphs`),
+  getLogicGraphNodes:   (graphId)    => api.get(`/hierarchy/logic-graphs/${graphId}/nodes`),
+  createLogicGraphLink: (data)       => api.post('/hierarchy/logic-graph-links', data),
+  deleteLogicGraphLink: (nodeId, graphId) => api.delete('/hierarchy/logic-graph-links', { params: { node_id: nodeId, graph_id: graphId } }),
+  // By link_id rather than node_id+graph_id — used by the "open graph" picker
+  // (GraphPickerModal), which already has link_id per row from browse() and
+  // would otherwise have to resolve the node_id of whichever level it is
+  // currently showing (a tree's own root included).
+  deleteLogicGraphLinkById: (linkId) => api.delete(`/hierarchy/logic-graph-links/${linkId}`),
+
+  // Drill-down navigation for the Logic editor's "open" popup (#1217)
+  browse: (params = {}) => api.get('/hierarchy/browse', { params }),
+
   // Node search (for DP detail view)
   searchNodes:   (q = '', limit = 30) => api.get('/hierarchy/nodes/search', { params: { q, limit } }),
 
@@ -191,6 +223,7 @@ export const systemApi = {
 export const settingsApi = {
   get:    ()     => api.get('/system/settings'),
   update: (data) => api.put('/system/settings', data),
+  displaySettings: () => api.get('/system/display-settings'),
 }
 
 // ── History Settings ───────────────────────────────────────────────────────
@@ -253,6 +286,27 @@ export const ringbufferApi = {
   countExportRows: (body)           => api.post('/ringbuffer/filtersets/export/count', body),
   getExportSettings: ()             => api.get('/ringbuffer/export/settings'),
   putExportSettings: (body)         => api.put('/ringbuffer/export/settings', body),
+  // #966 — Migrations-Assistent für den Legacy-Altbestand (admin-only)
+  migrationStatus:   ()             => api.get('/ringbuffer/migration'),
+  migrationDecision: (decision)     => api.post('/ringbuffer/migration/decision', { decision }),
+  migrationStart:    ()             => api.post('/ringbuffer/migration/start'),
+}
+
+// ── Message Archives ─────────────────────────────────────────────────────
+export const messageArchivesApi = {
+  list: () => api.get('/message-archives'),
+  create: (body) => api.post('/message-archives', body),
+  update: (id, body) => api.patch(`/message-archives/${id}`, body),
+  delete: (id, confirm = false) => api.delete(`/message-archives/${id}`, { params: { confirm } }),
+  clear: (id, confirm = false) => api.post(`/message-archives/${id}/clear`, null, { params: { confirm } }),
+  integrityCheck: () => api.post('/message-archives/integrity-check'),
+  entries: (params) => api.get('/message-archives/entries', { params }),
+  export: (id, format = 'jsonl') => api.get(`/message-archives/${id}/export`, { params: { format }, responseType: 'blob' }),
+  exportDb: () => api.get('/message-archives/export/db', { responseType: 'blob' }),
+  importDb: (file) => {
+    const fd = new FormData(); fd.append('file', file)
+    return api.post('/message-archives/import/db', fd, { headers: { 'Content-Type': 'multipart/form-data' } })
+  },
 }
 
 // ── Config Import/Export ──────────────────────────────────────────────────
@@ -312,8 +366,35 @@ export const logicApi = {
   saveGraph:        (id, data)   => api.put(`/logic/graphs/${id}`, data),
   patchGraph:       (id, data)   => api.patch(`/logic/graphs/${id}`, data),
   deleteGraph:      (id)         => api.delete(`/logic/graphs/${id}`),
-  runGraph:         (id)         => api.post(`/logic/graphs/${id}/run`),
-  duplicateGraph:   (id)         => api.post(`/logic/graphs/${id}/duplicate`),
+  runGraph:         (id, data = {}) => api.post(`/logic/graphs/${id}/run`, data),
+  duplicateGraph:   (id, name)   => api.post(`/logic/graphs/${id}/duplicate`, name ? { name } : {}),
   exportGraph:      (id)         => api.get(`/logic/graphs/${id}/export`),
   datapointUsages:  (dpId)       => api.get(`/logic/datapoint/${dpId}/usages`),
+}
+
+// ── Help site (#896) ─────────────────────────────────────────────────────
+// Served by FastAPI at /help, outside /api/v1 — no JWT needed (static, public
+// content) — so this bypasses the scoped `api` instance and its auth
+// interceptors, same as the raw axios.post(...) used for token refresh above.
+export const helpApi = {
+  index: () => axios.get('/help/help-index.json'),
+}
+
+// ── First-run setup (#1229) ──────────────────────────────────────────────
+// Plain axios, not the `api` instance: these run before any token exists, and
+// the 401 interceptor's redirect to /login would fight the setup guard.
+//
+// Bare axios has no timeout, unlike the `api` instance above. The router guard
+// awaits the status call before it resolves *any* route, so a request that is
+// accepted but never answered — a stalled proxy, a half-open connection —
+// would leave the app on a blank page for good. A short bound sends the user
+// on to the normal login flow instead; the claim itself gets the same 15s the
+// authenticated instance uses.
+const SETUP_STATUS_TIMEOUT_MS = 8000
+const SETUP_CLAIM_TIMEOUT_MS = 15000
+
+export const setupApi = {
+  status:      ()                   => axios.get('/api/v1/setup/status', { timeout: SETUP_STATUS_TIMEOUT_MS }),
+  createOwner: (username, password) =>
+                                       axios.post('/api/v1/setup/owner', { username, password }, { timeout: SETUP_CLAIM_TIMEOUT_MS }),
 }

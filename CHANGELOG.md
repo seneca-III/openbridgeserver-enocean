@@ -34,6 +34,26 @@ Alle wesentlichen Änderungen an open bridge server werden hier festgehalten.
 - Fehler behoben: Der Trigger-Block löste angeschlossene Blöcke nicht aus, weil das interne Trigger-Signal nie weitergegeben wurde
 - Umbenannt: „CronTrigger" → **„Trigger"** (kürzer und verständlicher)
 
+**Logik-Editor — Ausrichtungshilfe beim Verschieben von Blöcken (#1118)**
+- Beim Ziehen eines Funktionsblocks wird ein Fadenkreuz eingeblendet: eine horizontale und eine vertikale Leiste, genau so dick wie der gezogene Block selbst
+- Die Leisten erstrecken sich über die komplette sichtbare Zeichenfläche, sodass sich Kanten auch mit weiter entfernten Blöcken ausrichten lassen
+- Halbtransparent — darunterliegende Blöcke bleiben sichtbar
+- Rein visuelle Hilfe unabhängig vom Raster-Snapping; funktioniert auch bei deaktiviertem Raster
+
+**Logik-Editor — Klemme-Block zum Zusammenführen mehrerer Quellen (#1117)**
+- Neuer Block **„Klemme"** bündelt 2–30 unabhängige Wertquellen auf einen gemeinsamen Ausgang: wer zuletzt einen neuen Wert liefert, wird durchgereicht (Edomi-Klemme)
+- Ersetzt das Verdrahten mehrerer Quellen auf denselben Eingang eines anderen Blocks — das unterstützt der Ausführungsmotor nicht (nur die zuletzt verdrahtete Verbindung wäre je aktiv)
+
+**Logik-Editor — Mehrfachverbindungen auf einen Eingang werden erkannt (#1116)**
+- Fehler behoben: Mehrere Verbindungen auf denselben Eingang eines Blocks liessen sich anstandslos herstellen, aber nur die zuletzt gezogene Verbindung war tatsächlich aktiv — die übrigen waren stille, dauerhaft tote Drähte ohne jede Warnung
+- Neue Prüfung blockiert das Herstellen einer zweiten Verbindung auf denselben Eingang, blockiert das Speichern eines Graphen mit einer solchen Verbindung und markiert bereits gespeicherte betroffene Graphen mit einer Warnung
+- Für das Zusammenführen mehrerer Quellen jetzt die neue Klemme-Node verwenden
+
+**Logik-Editor — Änderungsfilter-Block (#1087)**
+- Neuer Block **„Änderungsfilter"** (Edomi-artiges SendByChange): gibt den Eingangswert unverändert am Ausgang aus und setzt den `changed`-Trigger nur in dem Tick, in dem sich der Wert vom zuletzt empfangenen unterscheidet
+- Wiederholt gleiche Werte lösen keine erneute Aktion aus — `changed` lässt sich wie bei DP Lesen als Trigger-Eingang in nachgelagerte Blöcke (DP Schreiben, Benachrichtigung, Sequenz, …) verdrahten
+- Zustand wird wie beim Speicher-Block generisch persistiert (`Zustand nach Neustart wiederherstellen`)
+
 **Einstellungen — Zeitzone**
 - Neue Zeitzone-Auswahl unter Einstellungen → Allgemein
 - Alle Zeitangaben in der Oberfläche werden in der gewählten Zeitzone dargestellt: Verlauf, Änderungsprotokoll, History-Suche, Astro-Block
@@ -42,6 +62,13 @@ Alle wesentlichen Änderungen an open bridge server werden hier festgehalten.
 
 **Einstellungen — KNX-Projektdatei**
 - Der Bereich „KNX Projekt importieren" wurde vom Tab „Sicherung" in den Tab **Allgemein** verschoben
+
+**KNX — Geräteverwaltung (#911)**
+- Neue Admin-Seite **KNX-Geräte** für importierte Geräte aus KNX-Projektdateien, erreichbar über die Seitenleiste direkt unter „Objekte"
+- Die Geräteansicht zeigt Gerätedetails, verknüpfte Gruppenadressen und Hierarchie-Zuordnungen; Filter berücksichtigen auch untergeordnete Hierarchie-Knoten
+- Der KNX-Projektimport übernimmt Geräte-Zuordnungen aus ETS-Orten und verknüpft importierte Geräte mit der Gebäudehierarchie
+- Im Monitor/RingBuffer kann jetzt nach KNX-Geräten gesucht und gefiltert werden; das Aufklappen eines Geräts löst dessen Gruppenadressen in konkrete Datenpunkt-Bindings auf
+- Die Geräteansicht enthält einen direkten Einstieg zum KNX-Projektimport in den Einstellungen
 
 **7 neue Blocktypen im Logik-Editor**
 
@@ -68,6 +95,20 @@ Alle wesentlichen Änderungen an open bridge server werden hier festgehalten.
 ---
 
 ### Fehlerbehebungen
+
+**Ersteinrichtung im Browser (#1229)**
+- Eine Installation ohne Eigentümer startet nicht mehr durch, sondern läuft im **Einrichtungsmodus**: Der Server startet normal und beantwortet ausschliesslich die Einrichtungsseite unter `/setup` sowie deren zwei Endpunkte (`GET /api/v1/setup/status`, `POST /api/v1/setup/owner`). Kein Login, keine API, keine Visu, kein WebSocket — bis Benutzername und Passwort des Administrators im Browser gesetzt sind. Danach ist die Installation ohne Neustart nutzbar.
+- Gilt für Docker und LXC gleichermassen. Der bisherige Weg über `obs-admin auth first-owner` bleibt erhalten, für Installationen, die nie über das Netzwerk beansprucht werden dürfen.
+- Bisher brach der Start mit `RuntimeError: No OBS owner is configured` ab und verlangte Shell-Zugriff auf den Container bzw. LXC-Gast.
+
+**Docker — Erstinstallation (#1229)**
+- Der Container erzeugt beim ersten Start ein zufälliges JWT-Secret pro Instanz und legt es im Daten-Volume ab (`/data/secrets/jwt-secret`) — dasselbe Prinzip wie `obs-first-boot.service` im LXC-Template. Bisher lief jede Compose-Installation dauerhaft auf dem Platzhalter `changeme` aus `docker-compose.yml`. Ein selbst gesetztes Secret (Env-Variable, Legacy-Variable `OPENTWS_SECURITY__JWT_SECRET` oder gemountete `config.yaml`) wird nie überschrieben.
+- Ein fehlgeschlagener Startup beendet den Prozess jetzt mit Exit-Code 3, statt den Container dauerhaft als „Up (unhealthy)" ohne Listener stehen zu lassen: uvicorn meldet den Fehler mit `sys.exit(3)` innerhalb von `serve()`, und die Nicht-Daemon-Threads der bereits geöffneten SQLite-Verbindungen hielten den Interpreter danach am Leben.
+- Beide READMEs haben einen Docker-Compose-Schnellstart inklusive Portainer-Variante.
+
+**Zeitzonen — Verbrauchszähler und History-Chart (#975, #909)**
+- Verbrauchszähler setzen Tages-, Wochen-, Monats- und Jahreswerte jetzt in der konfigurierten App-Zeitzone zurück, statt in der Zeitzone des Serverprozesses.
+- SQLite-Aggregations-Buckets werden als eindeutige UTC-Zeitstempel mit `Z` ausgegeben; das History-Chart interpretiert auch bereits vorhandene zeitlosen Buckets weiterhin als UTC.
 
 **Wertzuordnung — N-Werte und Modbus-Fliesskommazahlen (#208)**
 - Die Wertzuordnung (value_map) unterstützt jetzt beliebig viele Einträge — z.B. `{"0": "Aus", "1": "Init", "2": "Aktiv", ..., "10": "Standby"}` (bisher war nur 2-Wert-Logik dokumentiert)

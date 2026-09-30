@@ -10,6 +10,7 @@ from obs.logic.manager import (
     _build_cookie_header,
     _build_ical_fetch_target,
     _build_ical_fetch_targets,
+    _ical_payload_limit_bytes,
     _is_public_http_url,
     _preserve_same_origin_credentials,
     _read_limited_response_body,
@@ -186,6 +187,27 @@ def test_logical_cookie_deletion_via_max_age_removes_cookie() -> None:
     assert _build_cookie_header(store, "https://example.com/feed.ics") == ""
 
 
+def test_logical_cookie_store_skips_unparseable_set_cookie_header() -> None:
+    """A Set-Cookie header that http.cookies.SimpleCookie rejects (e.g. an
+    illegal key character) must be skipped rather than raising CookieError,
+    while a well-formed header in the same batch still gets stored."""
+    store: dict[tuple[str, str, str, bool], tuple[str, bool]] = {}
+    _store_response_cookies(
+        store,
+        ["broken@key=value; Path=/", "sid=abc; Path=/"],
+        "https://example.com/login",
+    )
+    assert _build_cookie_header(store, "https://example.com/feed.ics") == "sid=abc"
+
+
+def test_logical_cookie_store_ignores_unparseable_expires_date() -> None:
+    """A cookie with a malformed Expires attribute must not raise — it's kept
+    (delete_cookie stays False) since the invalid expiry can't be evaluated."""
+    store: dict[tuple[str, str, str, bool], tuple[str, bool]] = {}
+    _store_response_cookies(store, ["sid=abc; Path=/; Expires=not-a-valid-date"], "https://example.com/login")
+    assert _build_cookie_header(store, "https://example.com/feed.ics") == "sid=abc"
+
+
 def test_read_limited_response_body_raises_on_large_response() -> None:
     class _FakeResponse:
         async def aiter_bytes(self):
@@ -194,3 +216,21 @@ def test_read_limited_response_body_raises_on_large_response() -> None:
 
     with pytest.raises(ValueError, match="iCal response too large"):
         asyncio.run(_read_limited_response_body(_FakeResponse(), 10))
+
+
+@pytest.mark.parametrize(
+    ("node_data", "expected_mb"),
+    [
+        ({}, 2),
+        ({"max_payload_size_mb": 8}, 8),
+        ({"max_payload_size_mb": 0}, 1),
+        ({"max_payload_size_mb": 100}, 50),
+        ({"max_payload_size_mb": "invalid"}, 2),
+        ({"max_payload_size_mb": None}, 2),
+        ({"max_payload_size_mb": True}, 2),
+        ({"max_payload_size_mb": float("inf")}, 2),
+        ({"max_payload_size_mb": float("-inf")}, 2),
+    ],
+)
+def test_ical_payload_limit_bytes_is_configurable_and_bounded(node_data, expected_mb) -> None:
+    assert _ical_payload_limit_bytes(node_data) == expected_mb * 1_048_576

@@ -29,7 +29,7 @@ import random
 import time
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from obs.adapters.base import AdapterBase
 from obs.adapters.modbus_base import (
@@ -49,6 +49,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
+# Shared I/O semaphores keyed by (host, port). Instances polling the same
+# Modbus endpoint (several devices behind one RS485/Modbus-TCP gateway) share a
+# lock so their requests never overlap on the single serial bus.
+_SHARED_BUS_SEMS: dict[tuple[str, int], asyncio.Semaphore] = {}
+
+
+def _shared_bus_sem(host: str, port: int) -> asyncio.Semaphore:
+    key = (host, port)
+    sem = _SHARED_BUS_SEMS.get(key)
+    if sem is None:
+        sem = asyncio.Semaphore(1)
+        _SHARED_BUS_SEMS[key] = sem
+    return sem
+
+
 class ModbusTcpAdapterConfig(BaseModel):
     host: str = "192.168.1.1"
     port: int = 502
@@ -57,6 +72,15 @@ class ModbusTcpAdapterConfig(BaseModel):
         default=True,
         title="Reads serialisieren",
         description="Sendet Modbus-Requests nacheinander statt gleichzeitig. Empfohlen fuer einfache Geraete (Heizungsregler, Wechselrichter, Zaehler), die nur einen Request gleichzeitig verarbeiten koennen. Deaktivieren bei leistungsstarken PLCs mit Multi-Request-Unterstuetzung.",
+    )
+    shared_bus: bool = Field(
+        default=False,
+        title="Bus mit Instanzen gleicher IP:Port teilen",
+        description=(
+            "Serialisiert I/O ueber ALLE Instanzen, die denselben Host:Port pollen "
+            "(z.B. mehrere Geraete hinter einem RS485/Modbus-TCP-Gateway). "
+            "Verhindert gleichzeitige Requests konkurrierender Instanzen am selben Bus."
+        ),
     )
     startup_jitter_s: float = Field(
         default=30.0,
@@ -128,7 +152,10 @@ class ModbusTcpAdapter(AdapterBase):
 
         # Configure I/O serialization: Semaphore(1) = one operation at a time (safe
         # for embedded devices); None = no-op via nullcontext (for capable PLCs).
-        self._io_sem = asyncio.Semaphore(1) if cfg.serialize_reads else None
+        if cfg.shared_bus:
+            self._io_sem = _shared_bus_sem(cfg.host, cfg.port)
+        else:
+            self._io_sem = asyncio.Semaphore(1) if cfg.serialize_reads else None
         logger.debug(
             "Modbus TCP: serialize_reads=%s startup_jitter_s=%.1f",
             cfg.serialize_reads,
@@ -203,7 +230,7 @@ class ModbusTcpAdapter(AdapterBase):
                     try:
                         self._client.close()
                     except Exception:
-                        pass
+                        logger.exception("Modbus TCP: closing previous client failed")
                     try:
                         self._client = self._new_client()
                         await self._client.connect()
@@ -226,7 +253,7 @@ class ModbusTcpAdapter(AdapterBase):
                             logger.warning("Modbus TCP: reconnect after reload left client disconnected")
                     except Exception as exc:
                         await self._publish_status(False, str(exc))
-                        logger.warning("Modbus TCP: reconnect after reload failed: %s", exc)
+                        logger.exception("Modbus TCP: reconnect after reload failed")
 
             # Jitter is only useful on the very first load (spreading out the initial
             # burst after an adapter restart). Subsequent reloads triggered by binding
@@ -254,7 +281,7 @@ class ModbusTcpAdapter(AdapterBase):
     async def _poll_loop(self, binding: Any, *, apply_jitter: bool = True) -> None:
         try:
             bc = ModbusBindingConfig(**binding.config)
-        except Exception:
+        except (ValidationError, TypeError):
             logger.warning("Invalid Modbus TCP binding config %s — skipped", binding.id)
             return
 
@@ -311,7 +338,7 @@ class ModbusTcpAdapter(AdapterBase):
                                     bc.poll_interval,
                                 )
                                 await self._publish_disconnected_if_needed(str(exc))
-                                logger.warning("Modbus TCP: reconnect failed (binding %s): %s", binding.id, exc)
+                                logger.exception("Modbus TCP: reconnect failed (binding %s)", binding.id)
                                 reconnect_failed = True
 
                 if reconnect_failed:
@@ -351,8 +378,8 @@ class ModbusTcpAdapter(AdapterBase):
                 )
             except asyncio.CancelledError:
                 return
-            except Exception as exc:
-                logger.warning("Modbus TCP poll error (binding %s): %s", binding.id, exc)
+            except Exception:
+                logger.exception("Modbus TCP poll error (binding %s)", binding.id)
                 await self._bus.publish(
                     DataValueEvent(
                         datapoint_id=binding.datapoint_id,
@@ -441,9 +468,8 @@ class ModbusTcpAdapter(AdapterBase):
                 yield self._client if self._client_ready() else None
             return
 
-        async with self._io_sem:
-            async with self._inflight_modbus_call():
-                yield self._client if self._client_ready() else None
+        async with self._io_sem, self._inflight_modbus_call():
+            yield self._client if self._client_ready() else None
 
     def _client_ready(self) -> bool:
         return bool(not self._stopping and self._client and self._client.connected)
@@ -455,7 +481,7 @@ class ModbusTcpAdapter(AdapterBase):
                 continue
             try:
                 intervals.append(ModbusBindingConfig(**binding.config).poll_interval)
-            except Exception:
+            except (ValidationError, TypeError):
                 continue
         return max(0.0, min(intervals))
 

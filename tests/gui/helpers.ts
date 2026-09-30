@@ -32,8 +32,8 @@ export const BASE_URL = process.env.BASE_URL ?? `http://localhost:${OBS_HTTP_HOS
 // or non-standard setups.
 export const INTERNAL_BASE_URL = process.env.INTERNAL_BASE_URL ?? 'http://localhost:8080'
 
-const E2E_USER = process.env.E2E_USER ?? 'admin'
-const E2E_PASS = process.env.E2E_PASS ?? 'admin'
+const E2E_USER = process.env.E2E_USER
+const E2E_PASS = process.env.E2E_PASS
 
 // Resolved once per worker process.
 let _cachedToken: string | null = null
@@ -61,6 +61,7 @@ export async function getToken(): Promise<string> {
   // Prefer the token saved by auth.setup.ts (no network call, no rate-limit risk)
   _cachedToken = _readTokenFromStorageState()
   if (_cachedToken) return _cachedToken
+  if (!E2E_USER || !E2E_PASS) throw new Error('Set E2E_USER and E2E_PASS to an explicitly bootstrapped test owner')
   // Fallback: fresh login (e.g. isolated run without auth setup)
   const res = await fetch(`${BASE_URL}/api/v1/auth/login`, {
     method: 'POST',
@@ -231,6 +232,41 @@ export async function apiUploadIcon(name: string, svgContent: string): Promise<v
 /** Delete one or more icons from the icon library by name (without .svg extension). */
 export async function apiDeleteIcons(names: string[]): Promise<void> {
   await apiDeleteWithBody('/api/v1/icons/', { names })
+}
+
+/**
+ * Open a Logic graph by id in the Logic editor via the graph-picker popup
+ * (#1217 — replaced the old `<select data-testid="select-graph">` dropdown
+ * with a "open graph" button + a drill-down folder browser). Assumes the
+ * graph is unlinked from any hierarchy, which holds for every graph these
+ * E2E tests create through the API — it is therefore only reachable via the
+ * "Nicht zugeordnete Logiken" pseudo-folder.
+ *
+ * #1233 follow-up: if a graph is *already* open in the editor when the
+ * picker is opened, it now auto-navigates straight to that graph's own
+ * hierarchy position instead of resetting to the root level — for these
+ * always-unassigned E2E graphs, that lands directly inside "Nicht
+ * zugeordnete Logiken", skipping the root folder view entirely. So the very
+ * first `openLogicGraph()` call in a test (no graph open yet) still needs
+ * the root-level "Nicht zugeordnete Logiken" folder click, but a later call while
+ * another graph is already open does not — the folder button plain isn't
+ * on screen to click. Wait for whichever of the two states shows up and
+ * only click the folder if it's actually there.
+ *
+ * Waits for the modal's backdrop to fully disappear before returning — its
+ * 150ms leave transition (`Modal.vue`) otherwise still overlays the canvas
+ * for a moment after `pick()` sets the modal closed, which is invisible to
+ * a plain click but can swallow a caller's immediately-following pointer
+ * gesture (e.g. a Shift-drag box-select) if it starts inside that window.
+ */
+export async function openLogicGraph(page: Page, graphId: string): Promise<void> {
+  await page.click('[data-testid="btn-open-graph-picker"]')
+  await page.waitForSelector('[data-testid="picker-unassigned"], [data-testid="crumb-unassigned"]')
+  if (await page.locator('[data-testid="picker-unassigned"]').count()) {
+    await page.click('[data-testid="picker-unassigned"]')
+  }
+  await page.click(`[data-testid="picker-graph-${graphId}"]`)
+  await expect(page.locator('[data-testid="graph-picker-breadcrumb"]')).toBeHidden()
 }
 
 export async function apiDeleteWithBody(path: string, body: unknown): Promise<unknown> {

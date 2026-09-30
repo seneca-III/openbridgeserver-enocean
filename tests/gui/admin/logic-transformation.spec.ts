@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { apiPost, apiPut, apiDelete } from '../helpers'
+import { apiPost, apiPut, apiDelete, openLogicGraph } from '../helpers'
 
 /**
  * E2E tests for issue #287:
@@ -31,7 +31,7 @@ async function createGraphAndOpenNode(
 
   await page.goto('/logic')
   await page.waitForLoadState('networkidle')
-  await page.selectOption('[data-testid="select-graph"]', graph.id)
+  await openLogicGraph(page, graph.id)
   await page.waitForTimeout(1_000)
 
   // Click the node to open config panel
@@ -179,16 +179,17 @@ test('Logic-Graph: value_map auf datapoint_read wird bei Ausführung angewendet'
   try {
     await page.goto('/logic')
     await page.waitForLoadState('networkidle')
-    await page.selectOption('[data-testid="select-graph"]', graph.id)
+    await openLogicGraph(page, graph.id)
     await page.waitForTimeout(1_000)
 
     await page.click('[data-testid="btn-debug"]')
     await page.click('[data-testid="btn-run"]')
     await page.waitForTimeout(2_000)
 
-    // The debug band on the datapoint_read node should appear (graph ran without error)
-    const debugBand = page.locator('[data-testid="debug-band"]').first()
-    await expect(debugBand).toBeVisible({ timeout: 8_000 })
+    await page.locator('.vue-flow__node[data-id="r1"]').click()
+    const inspector = page.locator('[data-testid="debug-inspector"]')
+    await expect(inspector).toBeVisible({ timeout: 8_000 })
+    await expect(inspector).toContainText('An')
   } finally {
     await apiDelete(`/api/v1/logic/graphs/${graph.id}`)
     await apiDelete(`/api/v1/datapoints/${dp.id}`)

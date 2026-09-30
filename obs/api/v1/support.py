@@ -20,16 +20,19 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi import status as http_status
 from pydantic import BaseModel, Field
 
 from obs import __version__
 from obs.adapters import registry as adapter_registry
+from obs.api.audit import AuditLogWriter, AuditOutcome, build_audit_context
 from obs.api.auth import get_admin_user
 from obs.config import get_settings
 from obs.db.database import Database, get_db
 from obs.log_buffer import get_log_buffer, set_log_buffer_level
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["support"])
 
@@ -248,13 +251,17 @@ async def get_debug_log_status(
 @router.post("/debug-log", response_model=DebugLogStatusOut)
 async def enable_debug_log(
     body: DebugLogRequest,
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
+    db: Database = Depends(get_db),
 ) -> DebugLogStatusOut:
     """Temporarily enable verbose logging for support diagnostics."""
     global _debug_restore_level, _debug_restore_task, _debug_temporary_level, _debug_until
 
     level = body.level.upper()
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
     if level not in _VALID_LOG_LEVELS:
+        await writer.write_contract("POST", "/api/v1/support/debug-log", outcome=AuditOutcome.FAILED)
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"level must be one of: {', '.join(sorted(_VALID_LOG_LEVELS))}",
@@ -273,15 +280,20 @@ async def enable_debug_log(
     _debug_temporary_level = level
     set_log_buffer_level(level)
     _debug_restore_task = asyncio.create_task(_restore_debug_later(body.duration_seconds))
+    await writer.write_contract("POST", "/api/v1/support/debug-log", resource_id="global")
     return _debug_status(level=level)
 
 
 @router.delete("/debug-log", response_model=DebugLogStatusOut)
 async def disable_debug_log(
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
+    db: Database = Depends(get_db),
 ) -> DebugLogStatusOut:
     """Disable a temporary support debug window immediately."""
     await _restore_debug_now()
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
+    await writer.write_contract("DELETE", "/api/v1/support/debug-log", resource_id="global")
     return _debug_status()
 
 
@@ -347,6 +359,30 @@ def _support_categories() -> list[SupportCategoryOut]:
     ]
 
 
+def _sqlite_file_sizes(path: str | None) -> dict[str, int]:
+    """Physical on-disk sizes of a SQLite DB and its ``-wal``/``-shm`` sidecar files.
+
+    Reports each file separately so support packages can spot a WAL file growing out of
+    proportion to the DB (the failure mode behind issue #908). Returns zeros for
+    in-memory databases or when a file is absent/unreadable.
+    """
+    from obs.ringbuffer.ringbuffer import _is_sqlite_memory_path, _sqlite_filesystem_path
+
+    sizes = {"db_bytes": 0, "wal_bytes": 0, "shm_bytes": 0, "total_bytes": 0}
+    if not path or _is_sqlite_memory_path(path):
+        return sizes
+    # Normalize SQLite file URIs (e.g. file:/data/obs.db?mode=rwc) to a filesystem path
+    # so the -wal/-shm sidecars are stat'd correctly rather than as literal URI strings.
+    fs_path = _sqlite_filesystem_path(path)
+    for key, suffix in (("db_bytes", ""), ("wal_bytes", "-wal"), ("shm_bytes", "-shm")):
+        try:
+            sizes[key] = os.path.getsize(f"{fs_path}{suffix}")
+        except OSError:
+            sizes[key] = 0
+    sizes["total_bytes"] = sizes["db_bytes"] + sizes["wal_bytes"] + sizes["shm_bytes"]
+    return sizes
+
+
 def _build_installation_info() -> dict[str, Any]:
     settings = get_settings()
     return sanitize_support_data(
@@ -354,7 +390,11 @@ def _build_installation_info() -> dict[str, Any]:
             "installation_type": _detect_installation_type(),
             "obs_version": __version__,
             "config_source": _basename_only(os.environ.get("OBS_CONFIG") or "config.yaml"),
-            "database": {"path": _basename_only(settings.database.path), "history_plugin": settings.database.history_plugin},
+            "database": {
+                "path": _basename_only(settings.database.path),
+                "history_plugin": settings.database.history_plugin,
+                "files": _sqlite_file_sizes(settings.database.path),
+            },
         },
     )
 
@@ -449,6 +489,7 @@ async def _build_history_info(db: Database) -> dict[str, Any]:
     try:
         table_stats = await _history_table_stats(db)
     except Exception as exc:
+        logger.exception("History table stats unavailable")
         table_stats = {"available": False, "reason": _support_unavailable_reason(exc)}
     runtime_plugin = None
     try:
@@ -477,10 +518,20 @@ async def _build_monitor_info(db: Database) -> dict[str, Any]:
         ringbuffer = get_optional_ringbuffer()
         if not is_ringbuffer_enabled() or ringbuffer is None:
             stats = await _disabled_stats(db)
+            if ringbuffer is not None:
+                disk_files = ringbuffer.disk_file_sizes()
+            else:
+                # No live instance: stat the default ringbuffer path derived from the DB
+                # path so a leftover obs_ringbuffer.db/-wal still consuming disk while the
+                # monitor is disabled is surfaced rather than reported as zero (#908).
+                from obs.ringbuffer.ringbuffer import default_ringbuffer_disk_path
+
+                disk_files = _sqlite_file_sizes(default_ringbuffer_disk_path(get_settings().database.path))
             return sanitize_support_data(
                 {
                     "available": True,
                     "stats": stats.model_dump(),
+                    "storage_files": disk_files,
                     "recent_sample_size": 0,
                     "recent_source_adapter_counts": {},
                     "recent_quality_counts": {},
@@ -488,7 +539,9 @@ async def _build_monitor_info(db: Database) -> dict[str, Any]:
             )
         stats = await ringbuffer.stats()
         recent_entries = await ringbuffer.query(limit=200)
+        storage_files = ringbuffer.disk_file_sizes()
     except Exception as exc:
+        logger.exception("Monitor/ring-buffer info unavailable")
         return {"available": False, "reason": _support_unavailable_reason(exc)}
 
     source_counts: dict[str, int] = {}
@@ -501,6 +554,7 @@ async def _build_monitor_info(db: Database) -> dict[str, Any]:
         {
             "available": True,
             "stats": stats,
+            "storage_files": storage_files,
             "recent_sample_size": len(recent_entries),
             "recent_source_adapter_counts": source_counts,
             "recent_quality_counts": quality_counts,
@@ -533,6 +587,7 @@ async def _ringbuffer_tps(window_seconds: int = 60) -> tuple[bool, dict[str, flo
         since = _iso(datetime.now(UTC) - timedelta(seconds=window_seconds))
         entries = await get_ringbuffer().query(from_ts=since or "", limit=10000)
     except Exception:
+        logger.exception("Ring-buffer TPS query unavailable")
         return False, {}, {}
 
     instance_counts: dict[str, int] = {}

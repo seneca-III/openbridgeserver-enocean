@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from datetime import UTC, datetime
+from typing import ClassVar, Self
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -14,6 +15,9 @@ from obs.adapters.message.adapter import (
     MessageAdapter,
     MessageAdapterConfig,
     MessageBindingConfig,
+    _datetime_settings,
+    _lookup_datapoint,
+    _values_equal,
     evaluate_condition,
     render_message,
 )
@@ -23,6 +27,7 @@ from obs.adapters.message.providers.registry import register_provider
 from obs.adapters.message.providers.sevenio import SevenIoProvider
 from obs.adapters.message.providers.telegram import TelegramProvider
 from obs.core.event_bus import DataValueEvent
+from obs.message_archive import EntryQuery, MessageArchiveService, MessageArchiveStore
 from tests.adapters.conftest import make_binding
 
 
@@ -68,7 +73,7 @@ class _FakeResponse:
 
 
 class _FakeAsyncClient:
-    calls: list[tuple[str, dict, float | None]] = []
+    calls: ClassVar[list[tuple[str, dict, float | None]]] = []
     json_body = None
     status_code = 200
     text = "100"
@@ -76,7 +81,7 @@ class _FakeAsyncClient:
     def __init__(self, timeout: float | None = None) -> None:
         self.timeout = timeout
 
-    async def __aenter__(self) -> "_FakeAsyncClient":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
@@ -111,6 +116,26 @@ def test_evaluate_condition(value, operator, compare_value, expected):
     assert evaluate_condition(value, operator, compare_value) is expected
 
 
+def test_values_equal_treats_comparison_error_as_unequal():
+    class _RaisingEq:
+        def __eq__(self, other):
+            raise RuntimeError("comparison exploded")
+
+        def __hash__(self):
+            return id(self)
+
+    assert _values_equal(_RaisingEq(), _RaisingEq()) is False
+
+
+def test_lookup_datapoint_returns_none_when_registry_not_initialized(monkeypatch):
+    def _raise_not_initialized():
+        raise RuntimeError("registry not initialized")
+
+    monkeypatch.setattr("obs.core.registry.get_registry", _raise_not_initialized)
+
+    assert _lookup_datapoint(uuid.uuid4()) is None
+
+
 def test_render_message_replaces_value_unit_and_metadata():
     dp_id = uuid.uuid4()
     ts = datetime(2026, 6, 28, 12, 0, tzinfo=UTC)
@@ -124,7 +149,132 @@ def test_render_message_replaces_value_unit_and_metadata():
         ts=ts,
     )
 
-    assert rendered == f"Temperatur {dp_id} 29.4 °C 2026-06-28T12:00:00+00:00"
+    # ###DP### is human-readable text: the German default regional format renders
+    # the decimal separator as a comma (issue #1073).
+    assert rendered == f"Temperatur {dp_id} 29,4 °C 2026-06-28T12:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("region_format", "language", "expected"),
+    [
+        ("auto", "de", "1.234,5"),
+        ("auto", "en", "1,234.5"),
+        ("de-CH", "de", "1'234.5"),
+        ("en-US", "de", "1,234.5"),
+    ],
+)
+def test_render_message_number_uses_configured_regional_format(region_format, language, expected):
+    rendered = render_message(
+        "###DP###",
+        value=1234.5,
+        unit=None,
+        name="Sensor",
+        datapoint_id=uuid.uuid4(),
+        ts=datetime(2026, 6, 28, 12, 0, tzinfo=UTC),
+        language=language,
+        region_format=region_format,
+    )
+
+    assert rendered == expected
+
+
+def test_render_message_keeps_non_numeric_values_locale_neutral():
+    rendered = render_message(
+        "###DP###",
+        value={"a": 1.5},
+        unit=None,
+        name="Sensor",
+        datapoint_id=uuid.uuid4(),
+        ts=datetime(2026, 6, 28, 12, 0, tzinfo=UTC),
+        region_format="de-DE",
+    )
+
+    assert rendered == '{"a": 1.5}'
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (float("inf"), "Infinity"),
+        (float("-inf"), "-Infinity"),
+        (float("nan"), "NaN"),
+    ],
+)
+def test_render_message_keeps_non_finite_numbers_as_json(value, expected):
+    """Infinities and NaN have no regional form — and must not raise (#1073)."""
+    rendered = render_message(
+        "###DP###",
+        value=value,
+        unit=None,
+        name="Sensor",
+        datapoint_id=uuid.uuid4(),
+        ts=datetime(2026, 6, 28, 12, 0, tzinfo=UTC),
+        region_format="de-DE",
+    )
+
+    assert rendered == expected
+
+
+def test_render_message_handles_integers_beyond_the_float_range():
+    """math.isfinite() would raise OverflowError on a valid Python int (#1073)."""
+    rendered = render_message(
+        "###DP###",
+        value=10**309,
+        unit=None,
+        name="Sensor",
+        datapoint_id=uuid.uuid4(),
+        ts=datetime(2026, 6, 28, 12, 0, tzinfo=UTC),
+        region_format="en-US",
+    )
+
+    assert rendered == "1" + "," + ",".join(["000"] * 103)
+
+
+def test_render_message_formats_very_large_numbers_without_raising():
+    rendered = render_message(
+        "###DP###",
+        value=1e30,
+        unit=None,
+        name="Sensor",
+        datapoint_id=uuid.uuid4(),
+        ts=datetime(2026, 6, 28, 12, 0, tzinfo=UTC),
+        region_format="de-DE",
+    )
+
+    assert rendered == "1." + ".".join(["000"] * 10)
+
+
+def test_render_message_keeps_booleans_as_json():
+    rendered = render_message(
+        "###DP###",
+        value=True,
+        unit=None,
+        name="Sensor",
+        datapoint_id=uuid.uuid4(),
+        ts=datetime(2026, 6, 28, 12, 0, tzinfo=UTC),
+        region_format="de-DE",
+    )
+
+    assert rendered == "true"
+
+
+def test_render_message_formats_date_and_time_without_changing_timestamp():
+    dp_id = uuid.uuid4()
+    ts = datetime(2026, 6, 8, 2, 4, 5, tzinfo=UTC)
+
+    rendered = render_message(
+        "###DATE### ###TIME### ###TS###",
+        value=1,
+        unit=None,
+        name="Sensor",
+        datapoint_id=dp_id,
+        ts=ts,
+        date_format="EEEE, MMMM d, yyyy",
+        time_format="H:m:s",
+        language="en",
+    )
+
+    assert rendered == "Monday, June 8, 2026 2:4:5 2026-06-08T02:04:05+00:00"
 
 
 def test_render_message_does_not_reprocess_inserted_placeholder_text():
@@ -178,6 +328,16 @@ def test_enabled_binding_requires_message_target():
     cfg = MessageBindingConfig(enabled=False, providers=[])
 
     assert cfg.enabled is False
+
+
+def test_archive_only_binding_requires_archive_but_no_provider_target():
+    with pytest.raises(ValueError, match="archive_id"):
+        MessageBindingConfig(providers=[], archive_strategy="archive_only")
+
+    cfg = MessageBindingConfig(providers=[], archive_strategy="archive_only", archive_id="notifications")
+
+    assert cfg.archive_strategy == "archive_only"
+    assert cfg.archive_id == "notifications"
 
 
 def test_binding_rejects_blank_message_body():
@@ -268,8 +428,103 @@ async def test_datapoint_update_sends_message_to_provider(bus, dummy_provider, m
     dummy_provider.send.assert_awaited_once()
     kwargs = dummy_provider.send.await_args.kwargs
     assert kwargs["title"] == "OBS Alarm"
-    assert kwargs["message"] == "Temperatur kritisch: 29.4 °C"
+    assert kwargs["message"] == "Temperatur kritisch: 29,4 °C"  # German default regional format
     assert kwargs["target_name"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_direct_notification_uses_shared_provider_path_for_all_targets(bus, dummy_provider):
+    adapter = MessageAdapter(
+        event_bus=bus,
+        config={"providers": {"dummy": {"enabled": True, "targets": {"first": {}, "second": {}}}}},
+    )
+
+    results = await adapter.send_notification(
+        message="Alarm",
+        title="OBS",
+        providers=[
+            {"provider": "dummy", "target": "first"},
+            {"provider": "dummy", "target": "second"},
+        ],
+    )
+
+    assert [result.ok for result in results] == [True, True]
+    assert [call.kwargs["target_name"] for call in dummy_provider.send.await_args_list] == ["first", "second"]
+    assert all(call.kwargs["message"] == "Alarm" for call in dummy_provider.send.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_date_and_time_placeholders_use_event_timestamp(bus, dummy_provider, monkeypatch):
+    dp_id = uuid.uuid4()
+    monkeypatch.setattr("obs.core.registry.get_registry", lambda: _Registry(_Dp(dp_id)))
+    monkeypatch.setattr(
+        "obs.adapters.message.adapter._datetime_settings",
+        AsyncMock(return_value={"timezone": "Europe/Zurich", "date_format": "yyyy-MM-dd", "time_format": "HH:mm:ss", "language": "de"}),
+    )
+    adapter = MessageAdapter(
+        event_bus=bus,
+        config={"providers": {"dummy": {"enabled": True, "targets": {"default": {}}}}},
+    )
+    binding = _message_binding(dp_id, message="###DATE### ###TIME### ###TS###")
+    await adapter.reload_bindings([binding])
+    event_ts = datetime(2026, 1, 2, 23, 4, 5, tzinfo=UTC)
+
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=29.4, quality="good", source_adapter="test", ts=event_ts))
+    await _drain_sends(adapter)
+
+    assert dummy_provider.send.await_args.kwargs["message"] == "2026-01-03 00:04:05 2026-01-02T23:04:05+00:00"
+
+
+@pytest.mark.asyncio
+async def test_datetime_settings_use_defaults_before_database_initialization(monkeypatch):
+    monkeypatch.setattr("obs.adapters.message.adapter.get_db", MagicMock(side_effect=RuntimeError))
+
+    settings = await _datetime_settings()
+
+    assert settings == {
+        "timezone": "Europe/Zurich",
+        "date_format": "dd.MM.yyyy",
+        "time_format": "HH:mm:ss",
+        "language": "de",
+        "region_format": "auto",
+        "currency": "auto",
+    }
+
+
+@pytest.mark.asyncio
+async def test_datetime_settings_merge_database_values(monkeypatch):
+    db = MagicMock()
+    db.fetchall = AsyncMock(return_value=[{"key": "timezone", "value": "UTC"}, {"key": "language", "value": "en"}])
+    monkeypatch.setattr("obs.adapters.message.adapter.get_db", lambda: db)
+
+    settings = await _datetime_settings()
+
+    assert settings["timezone"] == "UTC"
+    assert settings["language"] == "en"
+    assert settings["date_format"] == "dd.MM.yyyy"
+
+
+@pytest.mark.asyncio
+async def test_date_and_time_placeholders_fall_back_to_event_timezone_for_invalid_setting(bus, dummy_provider, monkeypatch):
+    dp_id = uuid.uuid4()
+    monkeypatch.setattr("obs.core.registry.get_registry", lambda: _Registry(_Dp(dp_id)))
+    monkeypatch.setattr(
+        "obs.adapters.message.adapter._datetime_settings",
+        AsyncMock(return_value={"timezone": "invalid", "date_format": "yyyy-MM-dd", "time_format": "HH:mm:ss", "language": "de"}),
+    )
+    adapter = MessageAdapter(
+        event_bus=bus,
+        config={"providers": {"dummy": {"enabled": True, "targets": {"default": {}}}}},
+    )
+    binding = _message_binding(dp_id, message="###DATE### ###TIME###")
+    await adapter.reload_bindings([binding])
+
+    await adapter._on_value_event(
+        DataValueEvent(datapoint_id=dp_id, value=29.4, quality="good", source_adapter="test", ts=datetime(2026, 1, 2, 23, 4, 5, tzinfo=UTC))
+    )
+    await _drain_sends(adapter)
+
+    assert dummy_provider.send.await_args.kwargs["message"] == "2026-01-02 23:04:05"
 
 
 @pytest.mark.asyncio
@@ -589,6 +844,125 @@ async def test_write_path_sends_message_to_provider(bus, dummy_provider, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_archive_only_binding_writes_message_archive(bus, dummy_provider, monkeypatch, tmp_path):
+    dp_id = uuid.uuid4()
+    monkeypatch.setattr("obs.core.registry.get_registry", lambda: _Registry(_Dp(dp_id)))
+    store = MessageArchiveStore(str(tmp_path / "messages.sqlite3"))
+    await store.connect()
+    monkeypatch.setattr("obs.message_archive.get_message_archive_service", lambda: MessageArchiveService(store))
+    adapter = MessageAdapter(event_bus=bus, config={"providers": {}})
+    binding = _message_binding(
+        dp_id,
+        providers=[],
+        archive_strategy="archive_only",
+        archive_id="notifications",
+    )
+    await adapter.reload_bindings([binding])
+
+    try:
+        await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=31, quality="good", source_adapter="test"))
+        await _drain_sends(adapter)
+
+        dummy_provider.send.assert_not_awaited()
+        result = await store.query_entries(EntryQuery(archive_ids=["notifications"], username="admin"))
+        assert result["total"] == 1
+        entry = result["items"][0]
+        assert entry["type"] == "notification"
+        assert entry["title"] == "OBS Alarm"
+        assert entry["message"] == "Temperatur kritisch: 31 °C"
+        assert entry["payload"]["delivery_status"] == "archived"
+        assert "target" not in entry["payload"]
+    finally:
+        await store.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_archive_only_binding_does_not_mark_failed_archive_write_as_sent(bus, dummy_provider, monkeypatch):
+    dp_id = uuid.uuid4()
+    monkeypatch.setattr("obs.core.registry.get_registry", lambda: _Registry(_Dp(dp_id)))
+
+    class _FailingArchiveService:
+        async def record(self, *_args, **_kwargs):
+            raise RuntimeError("archive down")
+
+    monkeypatch.setattr("obs.message_archive.get_message_archive_service", lambda: _FailingArchiveService())
+    adapter = MessageAdapter(event_bus=bus, config={"providers": {}})
+    binding = _message_binding(
+        dp_id,
+        providers=[],
+        archive_strategy="archive_only",
+        archive_id="notifications",
+    )
+    await adapter.reload_bindings([binding])
+
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=31, quality="good", source_adapter="test"))
+    await _drain_sends(adapter)
+
+    state = adapter._states[binding.id]
+    assert state.last_sent_monotonic is None
+    assert state.last_condition is False
+    dummy_provider.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_none_archive_strategy_consumes_successful_event(bus, dummy_provider, monkeypatch):
+    dp_id = uuid.uuid4()
+    monkeypatch.setattr("obs.core.registry.get_registry", lambda: _Registry(_Dp(dp_id)))
+    adapter = MessageAdapter(event_bus=bus, config={"providers": {}})
+    binding = _message_binding(dp_id, providers=[], archive_strategy="none")
+    await adapter.reload_bindings([binding])
+
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=31, quality="good", source_adapter="test"))
+    await _drain_sends(adapter)
+
+    state = adapter._states[binding.id]
+    assert state.last_sent_monotonic is not None
+    assert state.last_condition is True
+    assert state.last_value == 31
+    dummy_provider.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_send_and_archive_binding_preserves_throttle_when_archive_write_fails(bus, dummy_provider, monkeypatch):
+    dp_id = uuid.uuid4()
+    monkeypatch.setattr("obs.core.registry.get_registry", lambda: _Registry(_Dp(dp_id)))
+
+    class _FailingArchiveService:
+        async def record(self, *_args, **_kwargs):
+            raise RuntimeError("archive down")
+
+    monkeypatch.setattr("obs.message_archive.get_message_archive_service", lambda: _FailingArchiveService())
+    adapter = MessageAdapter(
+        event_bus=bus,
+        config={"providers": {"dummy": {"enabled": True, "targets": {"default": {}}}}},
+    )
+    statuses: list[dict] = []
+
+    async def capture_status(connected, detail="", severity="ok", *, code=None, params=None):
+        statuses.append({"connected": connected, "detail": detail, "severity": severity, "code": code, "params": params})
+
+    adapter._publish_status = capture_status
+    binding = _message_binding(
+        dp_id,
+        archive_strategy="send_and_archive",
+        archive_id="notifications",
+    )
+    await adapter.reload_bindings([binding])
+
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=31, quality="good", source_adapter="test"))
+    await _drain_sends(adapter)
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=31, quality="good", source_adapter="test"))
+    await _drain_sends(adapter)
+
+    state = adapter._states[binding.id]
+    assert state.last_sent_monotonic is not None
+    assert state.last_condition is True
+    dummy_provider.send.assert_awaited_once()
+    assert statuses[-1]["code"] == "messageArchiveWriteFailed"
+    assert all(status["code"] != "messageSent" for status in statuses)
+
+
+@pytest.mark.asyncio
 async def test_bad_quality_event_is_ignored(bus, dummy_provider):
     dp_id = uuid.uuid4()
     adapter = MessageAdapter(
@@ -600,6 +974,24 @@ async def test_bad_quality_event_is_ignored(bus, dummy_provider):
 
     await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=99, quality="bad", source_adapter="test"))
 
+    dummy_provider.send.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_invalid_binding_config_is_skipped_on_reload(bus, dummy_provider):
+    """A binding whose config fails MessageBindingConfig validation must be skipped, not raise."""
+    dp_id = uuid.uuid4()
+    adapter = MessageAdapter(
+        event_bus=bus,
+        config={"providers": {"dummy": {"enabled": True, "targets": {"default": {}}}}},
+    )
+    binding = _message_binding(dp_id, message="   ")  # blank message -> ValidationError
+
+    await adapter.reload_bindings([binding])
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=99, quality="good", source_adapter="test"))
+    await _drain_sends(adapter)
+
+    assert binding.id not in adapter._states
     dummy_provider.send.assert_not_awaited()
 
 
@@ -1042,6 +1434,27 @@ async def test_pushover_provider_reports_body_failure(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_pushover_provider_treats_non_json_success_body_as_ok(monkeypatch):
+    """A 2xx response whose body isn't valid JSON must still be treated as success."""
+    _FakeAsyncClient.calls = []
+    _FakeAsyncClient.json_body = None  # _FakeResponse.json() raises ValueError
+    _FakeAsyncClient.status_code = 200
+    _FakeAsyncClient.text = "not json"
+    monkeypatch.setattr("obs.adapters.message.providers.pushover.httpx.AsyncClient", _FakeAsyncClient)
+
+    result = await PushoverProvider().send(
+        provider_config={"enabled": True, "api_token": "app", "targets": {}},
+        target_name="phone",
+        target_config={"user_key": "user"},
+        title=None,
+        message="Body",
+        context={},
+    )
+
+    assert result.ok is True
+
+
+@pytest.mark.asyncio
 async def test_pushover_provider_rejects_priority_two_before_posting(monkeypatch):
     _FakeAsyncClient.calls = []
     _FakeAsyncClient.json_body = {"status": 1}
@@ -1105,6 +1518,27 @@ async def test_telegram_provider_reports_body_failure(monkeypatch):
 
     assert result.ok is False
     assert result.detail == "Bad Request: chat not found"
+
+
+@pytest.mark.asyncio
+async def test_telegram_provider_treats_non_json_success_body_as_ok(monkeypatch):
+    """A 2xx response whose body isn't valid JSON must still be treated as success."""
+    _FakeAsyncClient.calls = []
+    _FakeAsyncClient.json_body = None  # _FakeResponse.json() raises ValueError
+    _FakeAsyncClient.status_code = 200
+    _FakeAsyncClient.text = "not json"
+    monkeypatch.setattr("obs.adapters.message.providers.telegram.httpx.AsyncClient", _FakeAsyncClient)
+
+    result = await TelegramProvider().send(
+        provider_config={"enabled": True, "bot_token": "secret", "targets": {}},
+        target_name="chat",
+        target_config={"chat_id": "123"},
+        title=None,
+        message="Hello",
+        context={},
+    )
+
+    assert result.ok is True
 
 
 @pytest.mark.asyncio
@@ -1192,3 +1626,27 @@ async def test_sevenio_provider_reports_json_success_error_code(monkeypatch):
 
     assert result.ok is False
     assert result.detail == "seven.io response success=false"
+
+
+@pytest.mark.asyncio
+async def test_initialization_event_does_not_send_message(bus, dummy_provider, monkeypatch):
+    """Save-time seeding by the logic initialization pass (issue #1031) is
+    not a value change — no notification may be sent for it."""
+    dp_id = uuid.uuid4()
+    monkeypatch.setattr("obs.core.registry.get_registry", lambda: _Registry(_Dp(dp_id)))
+    adapter = MessageAdapter(
+        event_bus=bus,
+        config={"providers": {"dummy": {"enabled": True, "targets": {"default": {"id": "x"}}}}},
+    )
+    binding = _message_binding(dp_id)
+    await adapter.reload_bindings([binding])
+
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=29.4, quality="good", source_adapter="logic", initialization=True))
+    await _drain_sends(adapter)
+
+    dummy_provider.send.assert_not_awaited()
+
+    # A real event afterwards still notifies
+    await adapter._on_value_event(DataValueEvent(datapoint_id=dp_id, value=30.1, quality="good", source_adapter="test"))
+    await _drain_sends(adapter)
+    dummy_provider.send.assert_awaited_once()

@@ -9,24 +9,39 @@ Rückwärtskompatibel: Alter Export mit adapter_configs wird beim Import erkannt
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import logging
 import os
 import sqlite3
 import tempfile
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
+from typing import Literal
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from obs.api.audit import AuditLogWriter, AuditOutcome, audit_payload_sha256, build_audit_context
 from obs.api.auth import get_admin_user
+from obs.api.v1.authz import _canonical_principal_id, _require_grant_targets
 from obs.api.v1.bindings import _json_config, _validate_adapter_binding
+from obs.api.v1.services.hierarchy_lifecycle import collect_hierarchy_tree_node_ids, delete_hierarchy_grants
 from obs.core.formula import validate_formula
 from obs.core.registry import get_registry
+from obs.datetime_format import DATETIME_SETTING_KEYS, validate_datetime_setting
 from obs.db.database import Database, get_db
+from obs.logic.capabilities import LOGIC_CAPABILITIES, LOGIC_CREATE_CAPABILITY
+from obs.logic.models import FlowData
+from obs.logic.validation import validate_timer_durations
+from obs.models.authz import AuthzPrincipalGrant
 from obs.models.datapoint import DataPoint
+from obs.regional_format import REGIONAL_SETTING_KEYS, validate_regional_setting
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["config"])
 
@@ -45,6 +60,8 @@ class ExportedDataPoint(BaseModel):
     unit: str | None
     tags: list[str]
     mqtt_alias: str | None
+    control_class: Literal["room_local", "central_plant"] = "room_local"
+    external_write_enabled: bool = False
 
 
 class ExportedBinding(BaseModel):
@@ -159,6 +176,7 @@ async def _validate_import_message_instance_configs(
                     instance_config=instance.config,
                 )
         except Exception as exc:
+            logger.exception(f"Binding validation for instance {instance_id} failed")
             invalid[instance_id] = str(exc)
     return invalid
 
@@ -169,6 +187,7 @@ class ExportedLogicGraph(BaseModel):
     description: str
     enabled: bool
     flow_data: dict
+    control_class: Literal["room_local", "central_plant"] = "room_local"
 
 
 class ExportedIcon(BaseModel):
@@ -177,6 +196,8 @@ class ExportedIcon(BaseModel):
 
 
 class ExportedVisuNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     parent_id: str | None
     name: str
@@ -184,9 +205,17 @@ class ExportedVisuNode(BaseModel):
     node_order: int
     icon: str | None
     access: str | None
-    access_pin: str | None
+    # Accepted only for backwards-compatible import of pre-V42 backups. The
+    # legacy value may be a PIN hash, so it is discarded and never exported or
+    # installed as a credential; protected pages therefore remain fail-closed.
+    access_pin: str | None = Field(default=None, exclude=True)
     page_config: str | None
     users: list[str] = []
+
+    @field_validator("access_pin", mode="before")
+    @classmethod
+    def _discard_legacy_access_pin(cls, _value: object) -> None:
+        return None
 
 
 class ExportedNavLink(BaseModel):
@@ -218,12 +247,32 @@ class ExportedHierarchyNode(BaseModel):
     description: str
     node_order: int
     icon: str | None
+    is_tree_root: bool = False
+    """The tree's hidden root node (#1217 follow-up) — round-tripped through
+    export/import so a restore doesn't turn it back into a visible folder.
+    Defaults to False for older exports that predate this field."""
 
 
 class ExportedHierarchyDpLink(BaseModel):
     id: str
     node_id: str
     datapoint_id: str
+
+
+class ExportedAuthzGrant(BaseModel):
+    principal_type: Literal["user", "api_key"]
+    principal_id: str
+    node_type: str
+    node_id: str
+    role: Literal["owner", "resident", "operator", "guest"]
+    effect: Literal["allow", "deny"] = "allow"
+    central_control: bool = False
+
+
+class ExportedApiKeyCapabilitySet(BaseModel):
+    key_id: str
+    revision: int = Field(default=0, ge=0)
+    capabilities: list[Literal["visu.page_config.write", "datapoint.metadata.write"]] = []
 
 
 class ConfigExport(BaseModel):
@@ -246,6 +295,8 @@ class ConfigExport(BaseModel):
     hierarchy_trees: list[ExportedHierarchyTree] = []
     hierarchy_nodes: list[ExportedHierarchyNode] = []
     hierarchy_dp_links: list[ExportedHierarchyDpLink] = []
+    authz_grants: list[ExportedAuthzGrant] = []
+    api_key_capability_sets: list[ExportedApiKeyCapabilitySet] = []
 
 
 class ImportResult(BaseModel):
@@ -263,6 +314,8 @@ class ImportResult(BaseModel):
     nav_links_upserted: int = 0
     app_settings_upserted: int = 0
     hierarchy_upserted: int = 0
+    authz_grants_upserted: int = 0
+    api_key_capability_sets_upserted: int = 0
     errors: list[str]
 
 
@@ -306,6 +359,8 @@ async def export_config(
             unit=dp.unit,
             tags=dp.tags,
             mqtt_alias=dp.mqtt_alias,
+            control_class=getattr(dp, "control_class", "room_local"),
+            external_write_enabled=getattr(dp, "external_write_enabled", False),
         )
         for dp in all_dps
     ]
@@ -360,6 +415,7 @@ async def export_config(
             description=r["description"] or "",
             enabled=bool(r["enabled"]),
             flow_data=json.loads(r["flow_data"]) if r["flow_data"] else {"nodes": [], "edges": []},
+            control_class=r["control_class"] if "control_class" in r.keys() else "room_local",  # noqa: SIM118 -- sqlite Row membership checks values
         )
         for r in graph_rows
     ]
@@ -378,20 +434,28 @@ async def export_config(
                     ),
                 )
             except OSError:
-                pass
+                logger.exception(f"Skipping unreadable icon {svg_file}")
     except Exception:
-        pass
+        logger.exception("Icon export failed — continuing export without icons")
 
     # FontAwesome API Key
     fa_key_row = await db.fetchone("SELECT value FROM app_settings WHERE key = 'icons.fontawesome_api_key'")
     fa_api_key = fa_key_row["value"] if fa_key_row else None
 
-    # Visu-Nodes (mit Benutzerzuordnungen)
+    # Visu nodes with central policy/grant assignments. PIN credentials are
+    # intentionally never part of JSON configuration exports.
     visu_node_rows = await db.fetchall("SELECT * FROM visu_nodes ORDER BY node_order, created_at")
-    visu_node_user_rows = await db.fetchall("SELECT node_id, username FROM visu_node_users")
+    policy_rows = await db.fetchall("SELECT node_id, access_mode FROM authz_visu_page_policies")
+    node_policies = {row["node_id"]: row["access_mode"] for row in policy_rows}
+    visu_node_user_rows = await db.fetchall(
+        """SELECT node_id, principal_id
+           FROM authz_node_roles
+           WHERE principal_type='user' AND node_type='visu_page'
+             AND role='guest' AND effect='allow'""",
+    )
     node_users: dict[str, list[str]] = {}
     for r in visu_node_user_rows:
-        node_users.setdefault(r["node_id"], []).append(r["username"])
+        node_users.setdefault(r["node_id"], []).append(r["principal_id"])
 
     visu_nodes = [
         ExportedVisuNode(
@@ -401,8 +465,7 @@ async def export_config(
             type=r["type"],
             node_order=r["node_order"],
             icon=r["icon"],
-            access=r["access"],
-            access_pin=r["access_pin"],
+            access=node_policies.get(r["id"]),
             page_config=r["page_config"],
             users=node_users.get(r["id"], []),
         )
@@ -441,12 +504,92 @@ async def export_config(
             description=r["description"],
             node_order=r["node_order"],
             icon=r["icon"],
+            is_tree_root=bool(r["is_tree_root"]),
         )
         for r in h_node_rows
     ]
 
     dp_link_rows = await db.fetchall("SELECT * FROM hierarchy_datapoint_links")
     hierarchy_dp_links = [ExportedHierarchyDpLink(id=r["id"], node_id=r["node_id"], datapoint_id=r["datapoint_id"]) for r in dp_link_rows]
+
+    logic_capabilities = sorted(LOGIC_CAPABILITIES)
+    capability_placeholders = ",".join("?" for _ in logic_capabilities)
+    grant_rows = await db.fetchall(
+        f"""SELECT principal_type, principal_id, node_type, node_id, role, effect, central_control
+            FROM authz_node_roles AS grant_row
+            WHERE (node_type='hierarchy' AND EXISTS (
+                       SELECT 1 FROM hierarchy_nodes WHERE id=grant_row.node_id
+                   ))
+               OR (node_type='datapoint' AND EXISTS (
+                       SELECT 1 FROM datapoints WHERE id=grant_row.node_id
+                   ))
+               OR (node_type='logic_graph' AND EXISTS (
+                       SELECT 1 FROM logic_graphs WHERE id=grant_row.node_id
+                   ))
+               OR (node_type='visu_page' AND EXISTS (
+                       SELECT 1 FROM visu_nodes WHERE id=grant_row.node_id
+                   ))
+               OR (node_type='ringbuffer_filterset' AND EXISTS (
+                       SELECT 1 FROM ringbuffer_filtersets WHERE id=grant_row.node_id
+                   ))
+               OR (node_type='adapter_instance' AND EXISTS (
+                       SELECT 1 FROM adapter_instances WHERE id=grant_row.node_id
+                   ))
+               OR (node_type='logic_capability' AND node_id IN ({capability_placeholders}))
+            ORDER BY principal_type, principal_id, node_type, node_id""",
+        logic_capabilities,
+    )
+    user_rows = await db.fetchall("SELECT username FROM users")
+    valid_usernames = {row["username"] for row in user_rows}
+    api_key_rows = await db.fetchall("SELECT id FROM api_keys")
+    valid_api_key_ids: set[str] = set()
+    for row in api_key_rows:
+        try:
+            valid_api_key_ids.add(_canonical_principal_id("api_key", row["id"]))
+        except HTTPException:
+            continue
+
+    valid_grant_rows = []
+    for row in grant_rows:
+        if row["principal_type"] == "user":
+            if row["principal_id"] in valid_usernames:
+                valid_grant_rows.append(row)
+            continue
+        try:
+            principal_id = _canonical_principal_id("api_key", row["principal_id"])
+        except HTTPException:
+            continue
+        if row["node_type"] == "logic_capability" and row["node_id"] == LOGIC_CREATE_CAPABILITY:
+            continue
+        if principal_id in valid_api_key_ids:
+            valid_grant_rows.append(row)
+
+    authz_grants = [
+        ExportedAuthzGrant(
+            principal_type=row["principal_type"],
+            principal_id=row["principal_id"],
+            node_type=row["node_type"],
+            node_id=row["node_id"],
+            role=row["role"],
+            effect=row["effect"],
+            central_control=bool(row["central_control"]) if "central_control" in row.keys() else False,  # noqa: SIM118 -- sqlite Row membership checks values
+        )
+        for row in valid_grant_rows
+    ]
+
+    capability_set_rows = await db.fetchall("SELECT key_id, revision FROM api_key_capability_sets ORDER BY key_id")
+    capability_rows = await db.fetchall("SELECT key_id, capability FROM api_key_capabilities ORDER BY key_id, capability")
+    capabilities_by_key: dict[str, list[str]] = {}
+    for row in capability_rows:
+        capabilities_by_key.setdefault(row["key_id"], []).append(row["capability"])
+    api_key_capability_sets = [
+        ExportedApiKeyCapabilitySet(
+            key_id=row["key_id"],
+            revision=row["revision"],
+            capabilities=capabilities_by_key.get(row["key_id"], []),
+        )
+        for row in capability_set_rows
+    ]
 
     return ConfigExport(
         obs_version=_EXPORT_VERSION,
@@ -464,6 +607,8 @@ async def export_config(
         hierarchy_trees=hierarchy_trees,
         hierarchy_nodes=hierarchy_nodes,
         hierarchy_dp_links=hierarchy_dp_links,
+        authz_grants=authz_grants,
+        api_key_capability_sets=api_key_capability_sets,
     )
 
 
@@ -480,8 +625,8 @@ async def export_db(
     if not os.path.exists(src_path):
         raise HTTPException(status_code=404, detail="Datenbankdatei nicht gefunden.")
 
-    tmp = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
-    tmp.close()
+    with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
+        pass
     try:
         src = sqlite3.connect(src_path)
         dst = sqlite3.connect(tmp.name)
@@ -502,6 +647,7 @@ async def export_db(
 
 @router.post("/import/db", status_code=status.HTTP_200_OK)
 async def import_db(
+    request: Request = None,  # type: ignore[assignment]
     file: UploadFile = File(...),
     _admin: str = Depends(get_admin_user),
     db: Database = Depends(lambda: get_db()),
@@ -514,13 +660,16 @@ async def import_db(
     from obs.config import get_settings
 
     dst_path = get_settings().database.path
+    audit_context = build_audit_context(request, _admin)
+    db_disconnected = False
+    operation_succeeded = False
 
     # Hochgeladene Datei in temporäre Datei speichern
-    tmp = tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False)
+    with tempfile.NamedTemporaryFile(suffix=".sqlite", delete=False) as tmp:
+        pass
     try:
         content = await file.read()
-        tmp.write(content)
-        tmp.close()
+        await asyncio.to_thread(Path(tmp.name).write_bytes, content)
 
         # SQLite-Magic-Header prüfen (erste 16 Bytes: "SQLite format 3\000")
         if len(content) < 16 or not content.startswith(b"SQLite format 3\x00"):
@@ -533,36 +682,40 @@ async def import_db(
 
             await adapter_registry.stop_all()
         except Exception:
-            pass
+            logger.exception("Adapter stop before DB restore failed — continuing restore anyway")
 
         try:
             from obs.logic.manager import get_logic_manager
 
             await get_logic_manager().stop()
         except Exception:
-            pass
+            logger.exception("Logic engine stop before DB restore failed — continuing restore anyway")
 
-        # Aiosqlite-Verbindung trennen
-        await db.disconnect()
+        # Keep private transactions blocked until the replacement connection
+        # and its in-memory registry snapshot are consistent again.
+        async with db.exclusive_lifecycle() as lifecycle:
+            await lifecycle.disconnect()
+            db_disconnected = True
 
-        # Restore via sqlite3.backup()
-        try:
-            src_conn = sqlite3.connect(tmp.name)
-            dst_conn = sqlite3.connect(dst_path)
-            src_conn.backup(dst_conn)
-            dst_conn.close()
-            src_conn.close()
-        except Exception as exc:
-            raise HTTPException(status_code=500, detail=f"Datenbankwiederherstellung fehlgeschlagen: {exc}") from exc
+            # Restore via sqlite3.backup()
+            try:
+                src_conn = sqlite3.connect(tmp.name)
+                dst_conn = sqlite3.connect(dst_path)
+                src_conn.backup(dst_conn)
+                dst_conn.close()
+                src_conn.close()
+            except Exception as exc:
+                raise HTTPException(status_code=500, detail=f"Datenbankwiederherstellung fehlgeschlagen: {exc}") from exc
 
-        # Verbindung wieder aufbauen (inkl. Migrationen)
-        await db.connect()
+            # Verbindung wieder aufbauen (inkl. Migrationen)
+            await lifecycle.connect()
+            db_disconnected = False
 
-        # Registry neu laden
-        reg = get_registry()
-        reg._points.clear()
-        reg._values.clear()
-        await reg.load_from_db()
+            # Registry neu laden
+            reg = get_registry()
+            reg._points.clear()
+            reg._values.clear()
+            await reg.load_from_db()
 
         # Logic Engine neu starten
         try:
@@ -571,7 +724,7 @@ async def import_db(
             logic_mgr = get_logic_manager()
             await logic_mgr.start()
         except Exception:
-            pass
+            logger.exception("Logic engine restart after DB restore failed")
 
         # Adapter neu starten
         adapters_restarted = 0
@@ -583,14 +736,26 @@ async def import_db(
             await adapter_registry.start_all(event_bus, db)
             adapters_restarted = len(adapter_registry.get_all_instances())
         except Exception:
-            pass
+            logger.exception("Adapter restart after DB restore failed")
 
+        operation_succeeded = True
+        writer = AuditLogWriter(db, audit_context)
+        await writer.write_contract("POST", "/api/v1/config/import/db", resource_id="global")
         return {"ok": True, "message": "Datenbankwiederherstellung erfolgreich.", "adapters_restarted": adapters_restarted}
 
+    except Exception:
+        if operation_succeeded:
+            raise
+        if db_disconnected:
+            await db.connect()
+            db_disconnected = False
+        writer = AuditLogWriter(db, audit_context)
+        await writer.write_contract("POST", "/api/v1/config/import/db", resource_id="global", outcome=AuditOutcome.FAILED)
+        raise
     finally:
         try:
             os.unlink(tmp.name)
-        except Exception:
+        except OSError:
             pass
 
 
@@ -599,6 +764,7 @@ async def import_config(
     body: ConfigExport,
     _user: str = Depends(get_admin_user),
     db: Database = Depends(lambda: get_db()),
+    request: Request = None,  # type: ignore[assignment]
 ) -> ImportResult:
     result = ImportResult(
         datapoints_created=0,
@@ -616,9 +782,19 @@ async def import_config(
     now = datetime.now(UTC).isoformat()
 
     # --- DataPoints ---
+    # external_write_enabled is deliberately imported as False here, regardless
+    # of what the document requests: this loop runs before bindings are
+    # imported below, so checking binding topology at this point would miss
+    # bindings the same document is about to create — a datapoint could then
+    # end up with both an enabled binding and the opt-in flag, silently
+    # violating the invariant the PATCH route enforces (Codex review). Actually
+    # enabling a requested opt-in is deferred to the post-bindings pass further
+    # down, once the full, final topology is known.
+    requested_external_write: dict[uuid.UUID, bool] = {}
     for dp_data in body.datapoints:
         try:
             dp_id = uuid.UUID(dp_data.id)
+            requested_external_write[dp_id] = bool(dp_data.external_write_enabled)
             existing = reg.get(dp_id)
             if existing:
                 from obs.models.datapoint import DataPointUpdate
@@ -631,6 +807,8 @@ async def import_config(
                         unit=dp_data.unit,
                         tags=dp_data.tags,
                         mqtt_alias=dp_data.mqtt_alias,
+                        control_class=dp_data.control_class,
+                        external_write_enabled=False,
                     ),
                 )
                 result.datapoints_updated += 1
@@ -642,11 +820,13 @@ async def import_config(
                     unit=dp_data.unit,
                     tags=dp_data.tags,
                     mqtt_alias=dp_data.mqtt_alias,
+                    control_class=dp_data.control_class,
+                    external_write_enabled=False,
                 )
                 await db.execute_and_commit(
                     """INSERT OR IGNORE INTO datapoints
-                       (id, name, data_type, unit, tags, mqtt_topic, mqtt_alias, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?,?,?)""",
+                       (id, name, data_type, unit, tags, mqtt_topic, mqtt_alias, control_class, external_write_enabled, created_at, updated_at)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         str(dp.id),
                         dp.name,
@@ -655,6 +835,8 @@ async def import_config(
                         json.dumps(dp.tags),
                         dp.mqtt_topic,
                         dp.mqtt_alias,
+                        dp.control_class,
+                        int(dp.external_write_enabled),
                         now,
                         now,
                     ),
@@ -665,6 +847,7 @@ async def import_config(
                 reg._values[dp_id] = ValueState()
                 result.datapoints_created += 1
         except Exception as exc:
+            logger.exception(f"DataPoint {dp_data.id} failed")
             result.errors.append(f"DataPoint {dp_data.id}: {exc}")
 
     # --- Adapter Instances ---
@@ -708,6 +891,7 @@ async def import_config(
             )
             result.adapter_instances_upserted += 1
         except Exception as exc:
+            logger.exception(f"AdapterInstance {ai.id} failed")
             result.errors.append(f"AdapterInstance {ai.id}: {exc}")
 
     # --- Bindings ---
@@ -790,7 +974,29 @@ async def import_config(
                 )
                 result.bindings_created += 1
         except Exception as exc:
+            logger.exception(f"Binding {b_data.id} failed")
             result.errors.append(f"Binding {b_data.id}: {exc}")
+
+    # --- External write opt-in (post-bindings) ---
+    # Deferred from the DataPoints pass above so the binding topology this
+    # checks against already includes any bindings the same import document
+    # just created — matches the invariant the PATCH route enforces (a
+    # datapoint may only opt in while genuinely bindingless).
+    if any(requested_external_write.values()):
+        from obs.api.v1.datapoints import _has_write_semantic_binding
+        from obs.models.datapoint import DataPointUpdate
+
+        for dp_id, requested in requested_external_write.items():
+            if not requested:
+                continue
+            try:
+                if await _has_write_semantic_binding(db, dp_id):
+                    result.errors.append(f"DataPoint {dp_id}: external_write_enabled ignored — datapoint has an adapter binding")
+                    continue
+                await reg.update(dp_id, DataPointUpdate(external_write_enabled=True))
+            except Exception as exc:
+                logger.exception(f"DataPoint {dp_id} external_write_enabled opt-in failed")
+                result.errors.append(f"DataPoint {dp_id}: external_write_enabled opt-in failed: {exc}")
 
     # --- KNX Group Addresses ---
     for ga in body.knx_group_addresses:
@@ -804,46 +1010,65 @@ async def import_config(
             )
             result.knx_group_addresses_upserted += 1
         except Exception as exc:
+            logger.exception(f"KNX GA {ga.address} failed")
             result.errors.append(f"KNX GA {ga.address}: {exc}")
 
     # --- Logic Graphs ---
+    imported_graph_ids: list[str] = []
     for lg in body.logic_graphs:
         try:
             row = await db.fetchone("SELECT id FROM logic_graphs WHERE id=?", (lg.id,))
+            validate_timer_durations(FlowData.model_validate(lg.flow_data))
             flow_json = json.dumps(lg.flow_data)
             if row:
                 await db.execute_and_commit(
                     """UPDATE logic_graphs
-                       SET name=?, description=?, enabled=?, flow_data=?, updated_at=?
+                       SET name=?, description=?, enabled=?, flow_data=?, control_class=?, updated_at=?
                        WHERE id=?""",
-                    (lg.name, lg.description, int(lg.enabled), flow_json, now, lg.id),
+                    (lg.name, lg.description, int(lg.enabled), flow_json, lg.control_class, now, lg.id),
                 )
                 result.logic_graphs_updated += 1
             else:
                 await db.execute_and_commit(
                     """INSERT INTO logic_graphs
-                       (id, name, description, enabled, flow_data, created_at, updated_at)
-                       VALUES (?,?,?,?,?,?,?)""",
+                       (id, name, description, enabled, flow_data, control_class, created_at, updated_at, created_by)
+                       VALUES (?,?,?,?,?,?,?,?,?)""",
                     (
                         lg.id,
                         lg.name,
                         lg.description,
                         int(lg.enabled),
                         flow_json,
+                        lg.control_class,
                         now,
                         now,
+                        _user,
                     ),
                 )
                 result.logic_graphs_created += 1
+            # Duplicate ids collapse to one row — initialize each id once
+            if lg.id not in imported_graph_ids:
+                imported_graph_ids.append(lg.id)
         except Exception as exc:
+            logger.exception(f"LogicGraph {lg.id} failed")
             result.errors.append(f"LogicGraph {lg.id}: {exc}")
 
     if body.logic_graphs:
         try:
             from obs.logic.manager import get_logic_manager
 
-            await get_logic_manager().reload()
+            manager = get_logic_manager()
+            # The imported sheet carries no node state: drop the cached graph
+            # plus all in-memory and persisted node state of the upserted
+            # graphs, so neither stale read/write-filter state nor old
+            # hysteresis/accumulator state of a reused graph id leaks into
+            # the restored sheet.
+            for graph_id in imported_graph_ids:
+                manager.invalidate_cache(graph_id)
+                await manager.reset_node_state(graph_id)
+            await manager.reload()
         except Exception as exc:
+            logger.exception("Logic manager reload failed")
             result.errors.append(f"Logic manager reload: {exc}")
 
     # Restart all adapter instances so they pick up new configs and bindings
@@ -856,6 +1081,7 @@ async def import_config(
         await adapter_registry.start_all(event_bus, db)
         result.adapters_restarted = len(adapter_registry.get_all_instances())
     except Exception as exc:
+        logger.exception("Adapter restart failed")
         result.errors.append(f"Adapter restart failed: {exc}")
 
     # --- FontAwesome API Key ---
@@ -866,6 +1092,7 @@ async def import_config(
                 ("icons.fontawesome_api_key", body.fa_api_key),
             )
         except Exception as exc:
+            logger.exception("FA API Key import failed")
             result.errors.append(f"FA API Key import failed: {exc}")
 
     # --- Icons ---
@@ -887,6 +1114,7 @@ async def import_config(
                 (icons_dir / f"{safe}.svg").write_bytes(sanitized)
                 result.icons_imported += 1
             except Exception as exc:
+                logger.exception(f"Icon '{icon.name}' failed")
                 result.errors.append(f"Icon '{icon.name}': {exc}")
 
     # --- Visu Nodes (topologisch sortiert: Eltern vor Kindern) ---
@@ -908,12 +1136,12 @@ async def import_config(
                     try:
                         await db.execute_and_commit(
                             """INSERT INTO visu_nodes
-                               (id, parent_id, name, type, node_order, icon, access, access_pin, page_config, created_at, updated_at)
-                               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                               (id, parent_id, name, type, node_order, icon, page_config, created_at, updated_at, created_by)
+                               VALUES (?,?,?,?,?,?,?,?,?,?)
                                ON CONFLICT(id) DO UPDATE
                                SET parent_id=excluded.parent_id, name=excluded.name, type=excluded.type,
-                                   node_order=excluded.node_order, icon=excluded.icon, access=excluded.access,
-                                   access_pin=excluded.access_pin, page_config=excluded.page_config, updated_at=excluded.updated_at""",
+                                   node_order=excluded.node_order, icon=excluded.icon,
+                                   page_config=excluded.page_config, updated_at=excluded.updated_at""",
                             (
                                 node.id,
                                 node.parent_id,
@@ -921,28 +1149,41 @@ async def import_config(
                                 node.type,
                                 node.node_order,
                                 node.icon,
-                                node.access,
-                                node.access_pin,
                                 node.page_config,
                                 now,
                                 now,
+                                _user if node.type == "PAGE" else None,
                             ),
                         )
                         inserted_ids.add(node.id)
                         result.visu_nodes_upserted += 1
 
-                        # Benutzerzuordnungen
-                        if node.users:
-                            await db.execute_and_commit("DELETE FROM visu_node_users WHERE node_id=?", (node.id,))
+                        await db.execute_and_commit("DELETE FROM authz_visu_page_policies WHERE node_id=?", (node.id,))
+                        if node.access is not None:
+                            await db.execute_and_commit(
+                                "INSERT INTO authz_visu_page_policies (node_id, access_mode) VALUES (?, ?)",
+                                (node.id, node.access),
+                            )
+
+                        # Central user grants replace the old per-page assignment table.
+                        await db.execute_and_commit(
+                            """DELETE FROM authz_node_roles
+                               WHERE principal_type='user' AND node_type='visu_page' AND node_id=?
+                                 AND role='guest' AND effect='allow'""",
+                            (node.id,),
+                        )
+                        if node.users and node.access == "user":
                             for username in node.users:
-                                try:
+                                user = await db.fetchone("SELECT is_admin FROM users WHERE username=?", (username,))
+                                if user and not bool(user["is_admin"]):
                                     await db.execute_and_commit(
-                                        "INSERT OR IGNORE INTO visu_node_users (node_id, username) VALUES (?,?)",
-                                        (node.id, username),
+                                        """INSERT OR IGNORE INTO authz_node_roles
+                                               (principal_type, principal_id, node_type, node_id, role, effect)
+                                           VALUES ('user', ?, 'visu_page', ?, 'guest', 'allow')""",
+                                        (username, node.id),
                                     )
-                                except Exception:
-                                    pass
                     except Exception as exc:
+                        logger.exception(f"VisuNode {node.id} failed")
                         result.errors.append(f"VisuNode {node.id}: {exc}")
                         inserted_ids.add(node.id)
                 else:
@@ -965,18 +1206,58 @@ async def import_config(
             )
             result.nav_links_upserted += 1
         except Exception as exc:
+            logger.exception(f"NavLink {nl.id} failed")
             result.errors.append(f"NavLink {nl.id}: {exc}")
 
     # --- App Settings ---
+    # Display settings are validated on the way in exactly as PUT /system/settings
+    # does: an unchecked region_format or currency from a hand-edited backup would
+    # otherwise reach the frontends, where Intl rejects it (issue #1073).
+    imported_datetime_settings: dict[str, str] = {}
     for s in body.app_settings:
         try:
+            if s.key in DATETIME_SETTING_KEYS:
+                validate_datetime_setting(s.key, s.value)
+            elif s.key in REGIONAL_SETTING_KEYS:
+                validate_regional_setting(s.key, s.value)
             await db.execute_and_commit(
                 "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?,?)",
                 (s.key, s.value),
             )
             result.app_settings_upserted += 1
+            if s.key in DATETIME_SETTING_KEYS or s.key in REGIONAL_SETTING_KEYS:
+                imported_datetime_settings[s.key] = s.value
         except Exception as exc:
+            logger.exception(f"AppSetting {s.key} failed")
             result.errors.append(f"AppSetting {s.key}: {exc}")
+
+    # Apply imported date/time settings immediately. Logic graphs may already
+    # have been reloaded above, but their executor receives this hot
+    # configuration on the next evaluation.
+    if imported_datetime_settings:
+        try:
+            from obs.logic.manager import get_logic_manager
+
+            get_logic_manager().update_app_config(imported_datetime_settings)
+        except RuntimeError:
+            pass  # Manager may not be running — non-critical
+
+    # Seed Read Object nodes of the restored graphs with the current registry
+    # values (issue #1031) — after the adapter restart, so the WriteRouter can
+    # resolve newly imported adapter instances for the published writes, and
+    # after the app-settings import, so timezone-dependent nodes evaluate
+    # with the restored configuration. Only successfully upserted graphs
+    # qualify — a failed entry reusing an existing graph id must not
+    # re-initialize the old graph. The bulk pass suppresses cascades between
+    # the restored graphs so each one initializes exactly once.
+    if imported_graph_ids:
+        try:
+            from obs.logic.manager import get_logic_manager
+
+            await get_logic_manager().initialize_graphs(imported_graph_ids)
+        except Exception as exc:
+            logger.exception("Logic graph initialization failed")
+            result.errors.append(f"Logic graph initialization: {exc}")
 
     # --- Hierarchy Trees ---
     for ht in body.hierarchy_trees:
@@ -990,6 +1271,7 @@ async def import_config(
             )
             result.hierarchy_upserted += 1
         except Exception as exc:
+            logger.exception(f"HierarchyTree {ht.id} failed")
             result.errors.append(f"HierarchyTree {ht.id}: {exc}")
 
     # --- Hierarchy Nodes (topologisch sortiert) ---
@@ -1009,22 +1291,44 @@ async def import_config(
                     try:
                         await db.execute_and_commit(
                             """INSERT INTO hierarchy_nodes
-                               (id, tree_id, parent_id, name, description, node_order, icon, created_at, updated_at)
-                               VALUES (?,?,?,?,?,?,?,?,?)
+                               (id, tree_id, parent_id, name, description, node_order, icon, is_tree_root, created_at, updated_at)
+                               VALUES (?,?,?,?,?,?,?,?,?,?)
                                ON CONFLICT(id) DO UPDATE
                                SET tree_id=excluded.tree_id, parent_id=excluded.parent_id, name=excluded.name,
                                    description=excluded.description, node_order=excluded.node_order,
-                                   icon=excluded.icon, updated_at=excluded.updated_at""",
-                            (hn.id, hn.tree_id, hn.parent_id, hn.name, hn.description, hn.node_order, hn.icon, now, now),
+                                   icon=excluded.icon, is_tree_root=excluded.is_tree_root, updated_at=excluded.updated_at""",
+                            (hn.id, hn.tree_id, hn.parent_id, hn.name, hn.description, hn.node_order, hn.icon, int(hn.is_tree_root), now, now),
                         )
                         inserted_h_ids.add(hn.id)
                         result.hierarchy_upserted += 1
                     except Exception as exc:
+                        logger.exception(f"HierarchyNode {hn.id} failed")
                         result.errors.append(f"HierarchyNode {hn.id}: {exc}")
                         inserted_h_ids.add(hn.id)
                 else:
                     next_remaining_h.append(hn)
             remaining_h = next_remaining_h
+
+    # A backup taken before #1217's tree-root-node feature (or a synthetic
+    # partial import missing hierarchy_nodes) may restore hierarchy_trees rows
+    # with no is_tree_root=1 node — backfill any still missing one, same as
+    # _migration_v54_hierarchy_tree_root_nodes. Runs after the node import
+    # loop above so a root node actually included in the import is correctly
+    # recognized here and never duplicated.
+    for ht in body.hierarchy_trees:
+        existing_root = await db.fetchone("SELECT id FROM hierarchy_nodes WHERE tree_id=? AND is_tree_root=1", (ht.id,))
+        if existing_root:
+            continue
+        try:
+            await db.execute_and_commit(
+                """INSERT INTO hierarchy_nodes
+                       (id, tree_id, parent_id, name, description, node_order, icon, is_tree_root, created_at, updated_at)
+                   VALUES (?,?,NULL,?,'',-1,NULL,1,?,?)""",
+                (str(uuid.uuid4()), ht.id, ht.name, now, now),
+            )
+        except Exception as exc:
+            logger.exception(f"HierarchyTree {ht.id} root node backfill failed")
+            result.errors.append(f"HierarchyTree {ht.id} root node: {exc}")
 
     # --- Hierarchy DataPoint Links ---
     for link in body.hierarchy_dp_links:
@@ -1036,13 +1340,98 @@ async def import_config(
             )
             result.hierarchy_upserted += 1
         except Exception as exc:
+            logger.exception(f"HierarchyDpLink {link.id} failed")
             result.errors.append(f"HierarchyDpLink {link.id}: {exc}")
 
+    # --- Central authorization grants ---
+    for grant in body.authz_grants:
+        try:
+            async with db.transaction():
+                principal_id = _canonical_principal_id(grant.principal_type, grant.principal_id)
+                principal_table = "users" if grant.principal_type == "user" else "api_keys"
+                principal_column = "username" if grant.principal_type == "user" else "id"
+                principal = await db.fetchone(
+                    f"SELECT 1 FROM {principal_table} WHERE {principal_column}=?",
+                    (principal_id,),
+                )
+                if principal is None:
+                    raise ValueError(f"principal {grant.principal_type}:{principal_id} does not exist")
+                target = AuthzPrincipalGrant(
+                    node_type=grant.node_type,
+                    node_id=grant.node_id,
+                    role=grant.role,
+                    effect=grant.effect,
+                    central_control=grant.central_control,
+                )
+                if grant.principal_type == "api_key" and grant.node_type == "logic_capability" and grant.node_id == LOGIC_CREATE_CAPABILITY:
+                    raise ValueError("Logic graph creation can only be granted to users")
+                await _require_grant_targets(db, [target])
+                await db.execute(
+                    """INSERT INTO authz_node_roles
+                           (principal_type, principal_id, node_type, node_id, role, effect, central_control)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(principal_type, principal_id, node_type, node_id) DO UPDATE
+                       SET role=excluded.role, effect=excluded.effect, central_control=excluded.central_control,
+                           updated_at=strftime('%Y-%m-%dT%H:%M:%fZ', 'now')""",
+                    (
+                        grant.principal_type,
+                        principal_id,
+                        grant.node_type,
+                        grant.node_id,
+                        grant.role,
+                        grant.effect,
+                        int(grant.central_control),
+                    ),
+                )
+            result.authz_grants_upserted += 1
+        except Exception as exc:  # noqa: BLE001 -- config import records per-item failures and continues
+            result.errors.append(f"AuthzGrant {grant.principal_type}:{grant.principal_id}/{grant.node_type}:{grant.node_id}: {exc}")
+
+    # --- API-key configuration capability sets ---
+    for capability_set in body.api_key_capability_sets:
+        try:
+            key = await db.fetchone("SELECT 1 FROM api_keys WHERE id=?", (capability_set.key_id,))
+            if key is None:
+                raise ValueError(f"API key {capability_set.key_id} does not exist")
+            async with db.transaction():
+                await db.execute("DELETE FROM api_key_capabilities WHERE key_id=?", (capability_set.key_id,))
+                await db.executemany(
+                    "INSERT INTO api_key_capabilities (key_id, capability) VALUES (?, ?)",
+                    [(capability_set.key_id, capability) for capability in capability_set.capabilities],
+                )
+                await db.execute(
+                    """INSERT INTO api_key_capability_sets (key_id, revision, updated_at)
+                       VALUES (?, ?, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+                       ON CONFLICT(key_id) DO UPDATE
+                       SET revision=excluded.revision, updated_at=excluded.updated_at""",
+                    (capability_set.key_id, capability_set.revision),
+                )
+            result.api_key_capability_sets_upserted += 1
+        except Exception as exc:  # noqa: BLE001 -- config import records per-item failures and continues
+            result.errors.append(f"ApiKeyCapabilitySet {capability_set.key_id}: {exc}")
+
+    if request is not None:
+        writer = AuditLogWriter(db, build_audit_context(request, _user))
+        outcome = AuditOutcome.FAILED if result.errors else AuditOutcome.SUCCESS
+        result_data = result.model_dump()
+        counts = {key: value for key, value in result_data.items() if key != "errors"}
+        await writer.write_contract(
+            "POST",
+            "/api/v1/config/import",
+            resource_id="global",
+            outcome=outcome,
+            details={
+                "counts": counts,
+                "error_count": len(result.errors),
+                "payload_sha256": audit_payload_sha256(counts),
+            },
+        )
     return result
 
 
 @router.delete("/reset", response_model=ResetResult, status_code=status.HTTP_200_OK)
 async def factory_reset(
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
     db: Database = Depends(lambda: get_db()),
 ) -> ResetResult:
@@ -1061,41 +1450,41 @@ async def factory_reset(
 
         await adapter_registry.stop_all()
     except Exception as exc:
+        logger.exception("Adapter stop failed")
         result.errors.append(f"Adapter stop failed: {exc}")
 
     try:
         row = await db.fetchone("SELECT COUNT(*) as n FROM logic_graphs")
         result.logic_graphs_deleted = row["n"] if row else 0
-        await db.execute_and_commit("DELETE FROM logic_graphs")
+        async with db.transaction():
+            await db.execute("DELETE FROM authz_node_roles WHERE node_type='logic_graph'")
+            await db.execute("DELETE FROM logic_graphs")
         from obs.logic.manager import get_logic_manager
 
         await get_logic_manager().reload()
     except Exception as exc:
+        logger.exception("Logic graphs reset failed")
         result.errors.append(f"Logic graphs reset failed: {exc}")
 
     try:
         row = await db.fetchone("SELECT COUNT(*) as n FROM adapter_bindings")
         result.bindings_deleted = row["n"] if row else 0
-        await db.execute_and_commit("DELETE FROM adapter_bindings")
-    except Exception as exc:
-        result.errors.append(f"Bindings reset failed: {exc}")
-
-    try:
         row = await db.fetchone("SELECT COUNT(*) as n FROM datapoints")
         result.datapoints_deleted = row["n"] if row else 0
-        await db.execute_and_commit("DELETE FROM datapoints")
+        row = await db.fetchone("SELECT COUNT(*) as n FROM adapter_instances")
+        result.adapter_instances_deleted = row["n"] if row else 0
+        async with db.transaction():
+            await db.execute("DELETE FROM adapter_bindings")
+            await db.execute("DELETE FROM authz_node_roles WHERE node_type='datapoint'")
+            await db.execute("DELETE FROM authz_node_roles WHERE node_type='adapter_instance'")
+            await db.execute("DELETE FROM adapter_instances")
+            await db.execute("DELETE FROM datapoints")
         reg = get_registry()
         reg._points.clear()
         reg._values.clear()
     except Exception as exc:
-        result.errors.append(f"DataPoints reset failed: {exc}")
-
-    try:
-        row = await db.fetchone("SELECT COUNT(*) as n FROM adapter_instances")
-        result.adapter_instances_deleted = row["n"] if row else 0
-        await db.execute_and_commit("DELETE FROM adapter_instances")
-    except Exception as exc:
-        result.errors.append(f"Adapter instances reset failed: {exc}")
+        logger.exception("DataPoints and adapters reset failed")
+        result.errors.append(f"DataPoints and adapters reset failed: {exc}")
 
     try:
         for table in ("knx_space_device_links", "knx_co_ga_links", "knx_comm_objects", "knx_devices"):
@@ -1104,14 +1493,18 @@ async def factory_reset(
         result.knx_group_addresses_deleted = row["n"] if row else 0
         await db.execute_and_commit("DELETE FROM knx_group_addresses")
     except Exception as exc:
+        logger.exception("KNX group addresses reset failed")
         result.errors.append(f"KNX group addresses reset failed: {exc}")
 
     # Visu-Nodes löschen (Kinder werden durch CASCADE automatisch gelöscht)
     try:
         row = await db.fetchone("SELECT COUNT(*) as n FROM visu_nodes")
         result.visu_nodes_deleted = row["n"] if row else 0
-        await db.execute_and_commit("DELETE FROM visu_nodes WHERE parent_id IS NULL")
+        async with db.transaction():
+            await db.execute("DELETE FROM authz_node_roles WHERE node_type='visu_page'")
+            await db.execute("DELETE FROM visu_nodes WHERE parent_id IS NULL")
     except Exception as exc:
+        logger.exception("Visu nodes reset failed")
         result.errors.append(f"Visu nodes reset failed: {exc}")
 
     # NavLinks löschen
@@ -1120,21 +1513,47 @@ async def factory_reset(
         result.nav_links_deleted = row["n"] if row else 0
         await db.execute_and_commit("DELETE FROM nav_links")
     except Exception as exc:
+        logger.exception("NavLinks reset failed")
         result.errors.append(f"NavLinks reset failed: {exc}")
 
     # Hierarchy löschen
     try:
         row = await db.fetchone("SELECT COUNT(*) as n FROM hierarchy_trees")
         result.hierarchy_deleted = row["n"] if row else 0
-        await db.execute_and_commit("DELETE FROM hierarchy_trees")
+        async with db.transaction():
+            tree_rows = await db.fetchall("SELECT id FROM hierarchy_trees")
+            tree_ids = [tree_row["id"] for tree_row in tree_rows]
+            node_ids = await collect_hierarchy_tree_node_ids(db, tree_ids)
+            await delete_hierarchy_grants(db, node_ids)
+            await db.execute("DELETE FROM authz_node_roles WHERE node_type='hierarchy'")
+            await db.execute("DELETE FROM hierarchy_trees")
     except Exception as exc:
+        logger.exception("Hierarchy reset failed")
         result.errors.append(f"Hierarchy reset failed: {exc}")
 
     # App-Settings zurücksetzen (Autobackup-Einstellungen behalten, Standard-Timezone wiederherstellen)
     try:
         await db.execute_and_commit("DELETE FROM app_settings WHERE key NOT LIKE 'autobackup.%'")
         await db.execute_and_commit("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('timezone', 'Europe/Zurich')")
+        await db.execute_and_commit("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('date_format', 'dd.MM.yyyy')")
+        await db.execute_and_commit("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('time_format', 'HH:mm:ss')")
+        await db.execute_and_commit("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('language', 'de')")
+        await db.execute_and_commit("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('region_format', 'auto')")
+        await db.execute_and_commit("INSERT OR IGNORE INTO app_settings (key, value) VALUES ('currency', 'auto')")
+        from obs.logic.manager import get_logic_manager
+
+        get_logic_manager().update_app_config(
+            {
+                "timezone": "Europe/Zurich",
+                "date_format": "dd.MM.yyyy",
+                "time_format": "HH:mm:ss",
+                "language": "de",
+                "region_format": "auto",
+                "currency": "auto",
+            }
+        )
     except Exception as exc:
+        logger.exception("App settings reset failed")
         result.errors.append(f"App settings reset failed: {exc}")
 
     # Icons (SVG-Dateien) löschen
@@ -1146,13 +1565,25 @@ async def factory_reset(
             svg_file.unlink()
             result.icons_deleted += 1
     except Exception as exc:
+        logger.exception("Icons reset failed")
         result.errors.append(f"Icons reset failed: {exc}")
 
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
+    outcome = AuditOutcome.FAILED if result.errors else AuditOutcome.SUCCESS
+    result_data = result.model_dump()
+    await writer.write_contract(
+        "DELETE",
+        "/api/v1/config/reset",
+        resource_id="global",
+        outcome=outcome,
+        details={"counts": {key: value for key, value in result_data.items() if key != "errors"}, "error_count": len(result.errors)},
+    )
     return result
 
 
 @router.delete("/reset/bindings", response_model=ClearResult, status_code=status.HTTP_200_OK)
 async def clear_bindings(
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
     db: Database = Depends(lambda: get_db()),
 ) -> ClearResult:
@@ -1168,12 +1599,23 @@ async def clear_bindings(
         await db.execute_and_commit("DELETE FROM adapter_bindings")
         await adapter_registry.start_all(get_event_bus(), db)
     except Exception as exc:
+        logger.exception("Bindings clear failed")
         result.errors.append(f"Bindings clear failed: {exc}")
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
+    outcome = AuditOutcome.FAILED if result.errors else AuditOutcome.SUCCESS
+    await writer.write_contract(
+        "DELETE",
+        "/api/v1/config/reset/bindings",
+        resource_id="global",
+        outcome=outcome,
+        details={"counts": {"deleted": result.deleted}, "error_count": len(result.errors)},
+    )
     return result
 
 
 @router.delete("/reset/datapoints", response_model=ClearResult, status_code=status.HTTP_200_OK)
 async def clear_datapoints(
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
     db: Database = Depends(lambda: get_db()),
 ) -> ClearResult:
@@ -1186,21 +1628,34 @@ async def clear_datapoints(
         await adapter_registry.stop_all()
         row = await db.fetchone("SELECT COUNT(*) as n FROM adapter_bindings")
         result.bindings_deleted = row["n"] if row else 0
-        await db.execute_and_commit("DELETE FROM adapter_bindings")
         row = await db.fetchone("SELECT COUNT(*) as n FROM datapoints")
         result.deleted = row["n"] if row else 0
-        await db.execute_and_commit("DELETE FROM datapoints")
+        async with db.transaction():
+            await db.execute("DELETE FROM adapter_bindings")
+            await db.execute("DELETE FROM authz_node_roles WHERE node_type='datapoint'")
+            await db.execute("DELETE FROM datapoints")
         reg = get_registry()
         reg._points.clear()
         reg._values.clear()
         await adapter_registry.start_all(get_event_bus(), db)
     except Exception as exc:
+        logger.exception("DataPoints clear failed")
         result.errors.append(f"DataPoints clear failed: {exc}")
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
+    outcome = AuditOutcome.FAILED if result.errors else AuditOutcome.SUCCESS
+    await writer.write_contract(
+        "DELETE",
+        "/api/v1/config/reset/datapoints",
+        resource_id="global",
+        outcome=outcome,
+        details={"counts": {"deleted": result.deleted, "bindings_deleted": result.bindings_deleted}, "error_count": len(result.errors)},
+    )
     return result
 
 
 @router.delete("/reset/logic", response_model=ClearResult, status_code=status.HTTP_200_OK)
 async def clear_logic(
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
     db: Database = Depends(lambda: get_db()),
 ) -> ClearResult:
@@ -1209,17 +1664,30 @@ async def clear_logic(
     try:
         row = await db.fetchone("SELECT COUNT(*) as n FROM logic_graphs")
         result.deleted = row["n"] if row else 0
-        await db.execute_and_commit("DELETE FROM logic_graphs")
+        async with db.transaction():
+            await db.execute("DELETE FROM authz_node_roles WHERE node_type='logic_graph'")
+            await db.execute("DELETE FROM logic_graphs")
         from obs.logic.manager import get_logic_manager
 
         await get_logic_manager().reload()
     except Exception as exc:
+        logger.exception("Logic graphs clear failed")
         result.errors.append(f"Logic graphs clear failed: {exc}")
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
+    outcome = AuditOutcome.FAILED if result.errors else AuditOutcome.SUCCESS
+    await writer.write_contract(
+        "DELETE",
+        "/api/v1/config/reset/logic",
+        resource_id="global",
+        outcome=outcome,
+        details={"counts": {"deleted": result.deleted}, "error_count": len(result.errors)},
+    )
     return result
 
 
 @router.delete("/reset/adapters", response_model=ClearResult, status_code=status.HTTP_200_OK)
 async def clear_adapters(
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
     db: Database = Depends(lambda: get_db()),
 ) -> ClearResult:
@@ -1231,10 +1699,22 @@ async def clear_adapters(
         await adapter_registry.stop_all()
         row = await db.fetchone("SELECT COUNT(*) as n FROM adapter_bindings")
         result.bindings_deleted = row["n"] if row else 0
-        await db.execute_and_commit("DELETE FROM adapter_bindings")
         row = await db.fetchone("SELECT COUNT(*) as n FROM adapter_instances")
         result.deleted = row["n"] if row else 0
-        await db.execute_and_commit("DELETE FROM adapter_instances")
+        async with db.transaction():
+            await db.execute("DELETE FROM adapter_bindings")
+            await db.execute("DELETE FROM authz_node_roles WHERE node_type='adapter_instance'")
+            await db.execute("DELETE FROM adapter_instances")
     except Exception as exc:
+        logger.exception("Adapters clear failed")
         result.errors.append(f"Adapters clear failed: {exc}")
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
+    outcome = AuditOutcome.FAILED if result.errors else AuditOutcome.SUCCESS
+    await writer.write_contract(
+        "DELETE",
+        "/api/v1/config/reset/adapters",
+        resource_id="global",
+        outcome=outcome,
+        details={"counts": {"deleted": result.deleted, "bindings_deleted": result.bindings_deleted}, "error_count": len(result.errors)},
+    )
     return result

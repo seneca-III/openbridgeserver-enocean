@@ -17,6 +17,13 @@ Endpoints:
   POST   /hierarchy/links                         → DataPoint-Knoten-Link anlegen
   DELETE /hierarchy/links                         → DataPoint-Knoten-Link entfernen
 
+  GET    /hierarchy/nodes/{node_id}/logic-graphs  → verknüpfte Logiken (#1217)
+  GET    /hierarchy/logic-graphs/{graph_id}/nodes → Knoten einer Logik (alle Bäume)
+  POST   /hierarchy/logic-graph-links             → Logik-Knoten-Link anlegen
+  DELETE /hierarchy/logic-graph-links             → Logik-Knoten-Link entfernen
+  DELETE /hierarchy/logic-graph-links/{link_id}   → Logik-Knoten-Link per ID entfernen
+  GET    /hierarchy/browse                        → Drill-down-Navigation für den Logik-Öffnen-Dialog
+
   POST   /hierarchy/import-from-ets               → Baum aus ETS-GA-Struktur erzeugen
 """
 
@@ -26,12 +33,20 @@ import uuid as uuid_mod
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 
-from obs.api.auth import get_admin_user, get_current_user
+from obs.api.audit import contract_audit, set_contract_audit_resource_id, set_contract_audit_summary
+from obs.api.auth import Principal, get_admin_user, get_current_principal
+from obs.api.authz import AuthzAction
+from obs.api.authz_service import filter_authorized_datapoints, filter_authorized_hierarchy_nodes
 from obs.api.v1.datapoints import NodePathSegment
 from obs.api.v1.services.hierarchy_import import EtsImportRequest, ImportResult, create_ets_hierarchy
+from obs.api.v1.services.hierarchy_lifecycle import (
+    collect_hierarchy_subtree_node_ids,
+    collect_hierarchy_tree_node_ids,
+    delete_hierarchy_grants,
+)
 from obs.db.database import Database, get_db
 
 router = APIRouter(tags=["hierarchy"])
@@ -62,6 +77,9 @@ class HierarchyTree(BaseModel):
     display_depth: int
     created_at: str
     updated_at: str
+    root_node_id: str
+    """The tree's hidden root node — the drop target for linking a Logic
+    graph directly to the tree with no sub-folder (#1217 follow-up)."""
 
 
 class HierarchyTreeCreate(BaseModel):
@@ -86,7 +104,7 @@ class HierarchyNode(BaseModel):
     icon: str | None
     created_at: str
     updated_at: str
-    children: list["HierarchyNode"] = []
+    children: list[HierarchyNode] = []
 
 
 class HierarchyNodeCreate(BaseModel):
@@ -136,6 +154,11 @@ class NodeRef(BaseModel):
     tree_name: str
     node_path: list[NodePathSegment] = []
     display_depth: int = 0
+    is_tree_root: bool = False
+    """True when node_id is the tree's hidden root node (#1217 follow-up) —
+    the link is "directly to the tree", not to a distinct visible folder.
+    node_name always equals tree_name and node_path is always empty in this
+    case; a consumer should render just the tree name, not both."""
 
 
 class NodeSearchResult(BaseModel):
@@ -147,9 +170,73 @@ class NodeSearchResult(BaseModel):
     path: list[str] = []  # ancestor node names (root → leaf), excluding tree_name (#433)
 
 
+class HierarchyLogicGraphLinkCreate(BaseModel):
+    node_id: str
+    graph_id: str
+
+
+class LogicGraphRef(BaseModel):
+    id: str
+    name: str
+    enabled: bool
+    link_id: str | None = None
+    """None for an unlinked graph (browse(unassigned=True)) — there is no
+    hierarchy_logic_graph_links row to reference."""
+
+
+class BrowseTreeRef(BaseModel):
+    id: str
+    name: str
+
+
+class BrowseSubfolder(BaseModel):
+    id: str
+    name: str
+    has_children: bool
+
+
+class HierarchyBrowseResult(BaseModel):
+    """Drill-down navigation for the Logic-graph picker (#1217).
+
+    Three container levels, like drives → folders → files:
+      - neither tree_id nor node_id given: ``trees`` lists every hierarchy tree,
+        and ``has_unassigned_logic_graphs`` tells the picker whether to also
+        offer the "Nicht zugeordnet" pseudo-folder (see ``unassigned=true``).
+      - tree_id given, node_id omitted: ``subfolders`` lists that tree's
+        visible top-level nodes (parent_id IS NULL, excluding the tree's own
+        hidden root node) — a tree can have several sibling top-level nodes
+        (e.g. "Beschattung" / "Licht" / "Steckdosen"). ``logic_graphs`` lists
+        graphs linked directly to the tree itself (its hidden root node),
+        so a tree can hold graphs with no sub-folder at all.
+      - tree_id and node_id given: ``subfolders`` lists node_id's children,
+        ``logic_graphs`` lists the graphs linked directly to node_id.
+      - ``unassigned=true`` (mutually exclusive with tree_id/node_id):
+        ``logic_graphs`` lists every graph with no hierarchy link at all,
+        ``trees``/``subfolders`` stay empty — always a flat leaf level.
+
+    Subfolders are always returned regardless of whether they (or their
+    descendants) contain any linked logic graph — the picker mirrors the
+    Settings → Hierarchy structure exactly rather than pruning empty branches.
+    """
+
+    trees: list[BrowseTreeRef] = []
+    subfolders: list[BrowseSubfolder] = []
+    logic_graphs: list[LogicGraphRef] = []
+    has_unassigned_logic_graphs: bool = False
+
+
 # ---------------------------------------------------------------------------
 # Row → Model helpers
 # ---------------------------------------------------------------------------
+
+
+#: Every SELECT that returns a full tree row must join in its hidden root
+#: node's id (#1217 follow-up) — _row_to_tree() requires it.
+_TREE_SELECT = """
+    SELECT ht.*, hn.id AS root_node_id
+    FROM hierarchy_trees ht
+    LEFT JOIN hierarchy_nodes hn ON hn.tree_id = ht.id AND hn.is_tree_root = 1
+"""
 
 
 def _row_to_tree(row: Any) -> HierarchyTree:
@@ -160,6 +247,7 @@ def _row_to_tree(row: Any) -> HierarchyTree:
         display_depth=row["display_depth"] if row["display_depth"] is not None else 0,
         created_at=row["created_at"],
         updated_at=row["updated_at"],
+        root_node_id=row["root_node_id"],
     )
 
 
@@ -193,6 +281,31 @@ def _build_tree(nodes: list[HierarchyNode]) -> list[HierarchyNode]:
     return roots
 
 
+def _principal_from_dependency(user: Principal | str) -> Principal:
+    if isinstance(user, Principal):
+        return user
+    # Compatibility for direct unit calls that still pass the legacy username.
+    return Principal(subject=str(user), type="user", is_admin=str(user) == "admin")
+
+
+async def _filter_readable_nodes(
+    db: Database,
+    principal: Principal,
+    nodes: list[HierarchyNode],
+) -> list[HierarchyNode]:
+    if principal.type == "user" and principal.is_admin:
+        return nodes
+    allowed_ids = set(
+        await filter_authorized_hierarchy_nodes(
+            db,
+            principal,
+            [node.id for node in nodes],
+            action=AuthzAction.READ,
+        )
+    )
+    return [node for node in nodes if node.id in allowed_ids]
+
+
 # ---------------------------------------------------------------------------
 # Tree Endpoints
 # ---------------------------------------------------------------------------
@@ -200,30 +313,66 @@ def _build_tree(nodes: list[HierarchyNode]) -> list[HierarchyNode]:
 
 @router.get("/trees", response_model=list[HierarchyTree])
 async def list_trees(
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> list[HierarchyTree]:
-    rows = await db.fetchall("SELECT * FROM hierarchy_trees ORDER BY name")
-    return [_row_to_tree(r) for r in rows]
+    rows = await db.fetchall(_TREE_SELECT + " ORDER BY ht.name")
+    principal = _principal_from_dependency(_user)
+    if principal.type == "user" and principal.is_admin:
+        return [_row_to_tree(r) for r in rows]
+
+    node_rows = await db.fetchall("SELECT id, tree_id FROM hierarchy_nodes")
+    allowed_node_ids = set(
+        await filter_authorized_hierarchy_nodes(
+            db,
+            principal,
+            [row["id"] for row in node_rows],
+            action=AuthzAction.READ,
+        )
+    )
+    allowed_tree_ids = {row["tree_id"] for row in node_rows if row["id"] in allowed_node_ids}
+    return [_row_to_tree(r) for r in rows if r["id"] in allowed_tree_ids]
 
 
-@router.post("/trees", response_model=HierarchyTree, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/trees",
+    response_model=HierarchyTree,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/hierarchy/trees"))],
+)
 async def create_tree(
     body: HierarchyTreeCreate,
     _user: str = Depends(get_admin_user),
     db: Database = Depends(get_db),
+    request: Request = None,
 ) -> HierarchyTree:
     now = _now()
     tid = _new_id()
-    await db.execute_and_commit(
-        "INSERT INTO hierarchy_trees (id, name, description, display_depth, created_at, updated_at) VALUES (?,?,?,?,?,?)",
-        (tid, body.name, body.description, body.display_depth, now, now),
-    )
-    row = await db.fetchone("SELECT * FROM hierarchy_trees WHERE id=?", (tid,))
+    if request is not None:
+        set_contract_audit_resource_id(request, tid)
+    async with db.transaction():
+        await db.execute(
+            "INSERT INTO hierarchy_trees (id, name, description, display_depth, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            (tid, body.name, body.description, body.display_depth, now, now),
+        )
+        # Every tree gets an implicit, hidden root node so a Logic graph can be
+        # linked directly "to the tree" without first creating a visible child
+        # folder (#1217 follow-up) — see _migration_v54_hierarchy_tree_root_nodes.
+        await db.execute(
+            """INSERT INTO hierarchy_nodes
+                   (id, tree_id, parent_id, name, description, node_order, icon, is_tree_root, created_at, updated_at)
+               VALUES (?,?,NULL,?,'',-1,NULL,1,?,?)""",
+            (_new_id(), tid, body.name, now, now),
+        )
+    row = await db.fetchone(_TREE_SELECT + " WHERE ht.id=?", (tid,))
     return _row_to_tree(row)
 
 
-@router.put("/trees/{tree_id}", response_model=HierarchyTree)
+@router.put(
+    "/trees/{tree_id}",
+    response_model=HierarchyTree,
+    dependencies=[Depends(contract_audit("PUT", "/api/v1/hierarchy/trees/{tree_id}"))],
+)
 async def update_tree(
     tree_id: str,
     body: HierarchyTreeUpdate,
@@ -241,20 +390,27 @@ async def update_tree(
         "UPDATE hierarchy_trees SET name=?, description=?, display_depth=?, updated_at=? WHERE id=?",
         (name, desc, depth, now, tree_id),
     )
-    row = await db.fetchone("SELECT * FROM hierarchy_trees WHERE id=?", (tree_id,))
+    row = await db.fetchone(_TREE_SELECT + " WHERE ht.id=?", (tree_id,))
     return _row_to_tree(row)
 
 
-@router.delete("/trees/{tree_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/trees/{tree_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(contract_audit("DELETE", "/api/v1/hierarchy/trees/{tree_id}"))],
+)
 async def delete_tree(
     tree_id: str,
     _user: str = Depends(get_admin_user),
     db: Database = Depends(get_db),
 ) -> None:
-    row = await db.fetchone("SELECT id FROM hierarchy_trees WHERE id=?", (tree_id,))
-    if not row:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Hierarchiebaum nicht gefunden")
-    await db.execute_and_commit("DELETE FROM hierarchy_trees WHERE id=?", (tree_id,))
+    async with db.transaction():
+        row = await db.fetchone("SELECT id FROM hierarchy_trees WHERE id=?", (tree_id,))
+        if not row:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Hierarchiebaum nicht gefunden")
+        node_ids = await collect_hierarchy_tree_node_ids(db, [tree_id])
+        await delete_hierarchy_grants(db, node_ids)
+        await db.execute("DELETE FROM hierarchy_trees WHERE id=?", (tree_id,))
 
 
 # ---------------------------------------------------------------------------
@@ -265,7 +421,7 @@ async def delete_tree(
 @router.get("/trees/{tree_id}/nodes", response_model=list[HierarchyNode])
 async def get_tree_nodes(
     tree_id: str,
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> list[HierarchyNode]:
     """Gibt den Baum als verschachtelte Struktur zurück."""
@@ -273,18 +429,25 @@ async def get_tree_nodes(
     if not tree:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Hierarchiebaum nicht gefunden")
     rows = await db.fetchall(
-        "SELECT * FROM hierarchy_nodes WHERE tree_id=? ORDER BY node_order, name",
+        "SELECT * FROM hierarchy_nodes WHERE tree_id=? AND is_tree_root=0 ORDER BY node_order, name",
         (tree_id,),
     )
-    flat = [_row_to_node(r) for r in rows]
+    principal = _principal_from_dependency(_user)
+    flat = await _filter_readable_nodes(db, principal, [_row_to_node(r) for r in rows])
     return _build_tree(flat)
 
 
-@router.post("/nodes", response_model=HierarchyNode, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/nodes",
+    response_model=HierarchyNode,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/hierarchy/nodes"))],
+)
 async def create_node(
     body: HierarchyNodeCreate,
     _user: str = Depends(get_admin_user),
     db: Database = Depends(get_db),
+    request: Request = None,
 ) -> HierarchyNode:
     # Baum muss existieren
     tree = await db.fetchone("SELECT id FROM hierarchy_trees WHERE id=?", (body.tree_id,))
@@ -298,6 +461,8 @@ async def create_node(
 
     now = _now()
     nid = _new_id()
+    if request is not None:
+        set_contract_audit_resource_id(request, nid)
     await db.execute_and_commit(
         """INSERT INTO hierarchy_nodes
            (id, tree_id, parent_id, name, description, node_order, icon, created_at, updated_at)
@@ -308,7 +473,11 @@ async def create_node(
     return _row_to_node(row)
 
 
-@router.put("/nodes/{node_id}", response_model=HierarchyNode)
+@router.put(
+    "/nodes/{node_id}",
+    response_model=HierarchyNode,
+    dependencies=[Depends(contract_audit("PUT", "/api/v1/hierarchy/nodes/{node_id}"))],
+)
 async def update_node(
     node_id: str,
     body: HierarchyNodeUpdate,
@@ -331,7 +500,11 @@ async def update_node(
     return _row_to_node(row)
 
 
-@router.put("/nodes/{node_id}/move", response_model=HierarchyNode)
+@router.put(
+    "/nodes/{node_id}/move",
+    response_model=HierarchyNode,
+    dependencies=[Depends(contract_audit("PUT", "/api/v1/hierarchy/nodes/{node_id}/move"))],
+)
 async def move_node(
     node_id: str,
     body: HierarchyNodeMove,
@@ -360,16 +533,22 @@ async def move_node(
     return _row_to_node(row)
 
 
-@router.delete("/nodes/{node_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/nodes/{node_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(contract_audit("DELETE", "/api/v1/hierarchy/nodes/{node_id}"))],
+)
 async def delete_node(
     node_id: str,
     _user: str = Depends(get_admin_user),
     db: Database = Depends(get_db),
 ) -> None:
-    row = await db.fetchone("SELECT id FROM hierarchy_nodes WHERE id=?", (node_id,))
-    if not row:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Knoten nicht gefunden")
-    await db.execute_and_commit("DELETE FROM hierarchy_nodes WHERE id=?", (node_id,))
+    async with db.transaction():
+        node_ids = await collect_hierarchy_subtree_node_ids(db, node_id)
+        if not node_ids:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Knoten nicht gefunden")
+        await delete_hierarchy_grants(db, node_ids)
+        await db.execute("DELETE FROM hierarchy_nodes WHERE id=?", (node_id,))
 
 
 # ---------------------------------------------------------------------------
@@ -380,11 +559,18 @@ async def delete_node(
 @router.get("/nodes/{node_id}/datapoints", response_model=list[DataPointRef])
 async def get_node_datapoints(
     node_id: str,
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> list[DataPointRef]:
     node = await db.fetchone("SELECT id FROM hierarchy_nodes WHERE id=?", (node_id,))
     if not node:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Knoten nicht gefunden")
+    principal = _principal_from_dependency(_user)
+    if principal.type == "user" and principal.is_admin:
+        node_allowed = True
+    else:
+        node_allowed = node_id in set(await filter_authorized_hierarchy_nodes(db, principal, [node_id], action=AuthzAction.READ))
+    if not node_allowed:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Knoten nicht gefunden")
     rows = await db.fetchall(
         """SELECT hdl.id AS link_id, dp.id, dp.name, dp.data_type, dp.unit
@@ -394,6 +580,17 @@ async def get_node_datapoints(
            ORDER BY dp.name""",
         (node_id,),
     )
+    if principal.type == "user" and principal.is_admin:
+        allowed_dp_ids = {row["id"] for row in rows}
+    else:
+        allowed_dp_ids = set(
+            await filter_authorized_datapoints(
+                db,
+                principal,
+                [row["id"] for row in rows],
+                action=AuthzAction.READ,
+            )
+        )
     return [
         DataPointRef(
             id=r["id"],
@@ -403,15 +600,23 @@ async def get_node_datapoints(
             link_id=r["link_id"],
         )
         for r in rows
+        if r["id"] in allowed_dp_ids
     ]
 
 
 @router.get("/datapoints/{dp_id}/nodes", response_model=list[NodeRef])
 async def get_datapoint_nodes(
     dp_id: str,
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> list[NodeRef]:
+    principal = _principal_from_dependency(_user)
+    if principal.type == "user" and principal.is_admin:
+        datapoint_allowed = True
+    else:
+        datapoint_allowed = dp_id in set(await filter_authorized_datapoints(db, principal, [dp_id], action=AuthzAction.READ))
+    if not datapoint_allowed:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "DataPoint nicht gefunden")
     rows = await db.fetchall(
         """SELECT hdl.id AS link_id, hn.id AS node_id, hn.name AS node_name,
                   ht.id AS tree_id, ht.name AS tree_name, ht.display_depth
@@ -423,6 +628,10 @@ async def get_datapoint_nodes(
         (dp_id,),
     )
     node_ids = [r["node_id"] for r in rows]
+    if not (principal.type == "user" and principal.is_admin):
+        allowed_node_ids = set(await filter_authorized_hierarchy_nodes(db, principal, node_ids, action=AuthzAction.READ))
+        rows = [r for r in rows if r["node_id"] in allowed_node_ids]
+        node_ids = [r["node_id"] for r in rows]
     node_paths: dict[str, list[NodePathSegment]] = {}
     if node_ids:
         ph = ",".join("?" * len(node_ids))
@@ -454,11 +663,16 @@ async def get_datapoint_nodes(
     ]
 
 
-@router.post("/links", status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/links",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/hierarchy/links"))],
+)
 async def create_link(
     body: HierarchyLinkCreate,
     _user: str = Depends(get_admin_user),
     db: Database = Depends(get_db),
+    request: Request = None,
 ) -> dict:
     node = await db.fetchone("SELECT id FROM hierarchy_nodes WHERE id=?", (body.node_id,))
     if not node:
@@ -472,9 +686,13 @@ async def create_link(
         (body.node_id, body.datapoint_id),
     )
     if existing:
+        if request is not None:
+            set_contract_audit_resource_id(request, existing["id"])
         return {"id": existing["id"], "node_id": body.node_id, "datapoint_id": body.datapoint_id}
 
     lid = _new_id()
+    if request is not None:
+        set_contract_audit_resource_id(request, lid)
     now = _now()
     await db.execute_and_commit(
         "INSERT INTO hierarchy_datapoint_links (id, node_id, datapoint_id, created_at) VALUES (?,?,?,?)",
@@ -483,7 +701,11 @@ async def create_link(
     return {"id": lid, "node_id": body.node_id, "datapoint_id": body.datapoint_id}
 
 
-@router.delete("/links", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/links",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(contract_audit("DELETE", "/api/v1/hierarchy/links"))],
+)
 async def delete_link(
     node_id: str = Query(...),
     datapoint_id: str = Query(...),
@@ -497,6 +719,254 @@ async def delete_link(
 
 
 # ---------------------------------------------------------------------------
+# Link Endpoints (Logic Graph ↔ Node) — #1217
+#
+# Purely organizational: unlike the DataPoint/device links above, these are
+# NOT filtered through filter_authorized_hierarchy_nodes. Logic graphs already
+# have their own independent authz node type ("logic_graph", see
+# obs/models/authz.py) with their own grants — linking a graph into the
+# hierarchy for grouping/display must not grant or hide anything. Existing
+# logic-router auth on the graph itself remains the sole authority.
+# ---------------------------------------------------------------------------
+
+
+@router.get("/nodes/{node_id}/logic-graphs", response_model=list[LogicGraphRef])
+async def get_node_logic_graphs(
+    node_id: str,
+    _user: Principal | str = Depends(get_current_principal),
+    db: Database = Depends(get_db),
+) -> list[LogicGraphRef]:
+    node = await db.fetchone("SELECT id FROM hierarchy_nodes WHERE id=?", (node_id,))
+    if not node:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Knoten nicht gefunden")
+    rows = await db.fetchall(
+        """SELECT hlgl.id AS link_id, lg.id, lg.name, lg.enabled
+           FROM hierarchy_logic_graph_links hlgl
+           JOIN logic_graphs lg ON lg.id = hlgl.graph_id
+           WHERE hlgl.node_id=?
+           ORDER BY lg.name""",
+        (node_id,),
+    )
+    return [LogicGraphRef(id=r["id"], name=r["name"], enabled=bool(r["enabled"]), link_id=r["link_id"]) for r in rows]
+
+
+@router.get("/logic-graphs/{graph_id}/nodes", response_model=list[NodeRef])
+async def get_logic_graph_nodes(
+    graph_id: str,
+    _user: Principal | str = Depends(get_current_principal),
+    db: Database = Depends(get_db),
+) -> list[NodeRef]:
+    graph = await db.fetchone("SELECT id FROM logic_graphs WHERE id=?", (graph_id,))
+    if not graph:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Logik nicht gefunden")
+    rows = await db.fetchall(
+        """SELECT hlgl.id AS link_id, hn.id AS node_id, hn.name AS node_name,
+                  hn.is_tree_root AS is_tree_root,
+                  ht.id AS tree_id, ht.name AS tree_name, ht.display_depth
+           FROM hierarchy_logic_graph_links hlgl
+           JOIN hierarchy_nodes hn ON hn.id = hlgl.node_id
+           JOIN hierarchy_trees ht ON ht.id = hn.tree_id
+           WHERE hlgl.graph_id=?
+           ORDER BY ht.name, hn.name""",
+        (graph_id,),
+    )
+    node_ids = [r["node_id"] for r in rows]
+    node_paths: dict[str, list[NodePathSegment]] = {}
+    if node_ids:
+        ph = ",".join("?" * len(node_ids))
+        path_rows = await db.fetchall(
+            f"""WITH RECURSIVE anc(leaf_id, cur_id, cur_name, cur_parent, depth) AS (
+                SELECT id, id, name, parent_id, 0 FROM hierarchy_nodes WHERE id IN ({ph})
+                UNION ALL
+                SELECT a.leaf_id, hn2.id, hn2.name, hn2.parent_id, a.depth + 1
+                FROM anc a JOIN hierarchy_nodes hn2 ON hn2.id = a.cur_parent
+                WHERE a.cur_parent IS NOT NULL
+            )
+            SELECT leaf_id, cur_id, cur_name FROM anc WHERE depth > 0
+            ORDER BY leaf_id, depth DESC""",
+            node_ids,
+        )
+        for r in path_rows:
+            node_paths.setdefault(r["leaf_id"], []).append(NodePathSegment(node_id=r["cur_id"], node_name=r["cur_name"]))
+    return [
+        NodeRef(
+            link_id=r["link_id"],
+            node_id=r["node_id"],
+            node_name=r["node_name"],
+            tree_id=r["tree_id"],
+            tree_name=r["tree_name"],
+            node_path=node_paths.get(r["node_id"], []),
+            display_depth=r["display_depth"] if r["display_depth"] is not None else 0,
+            is_tree_root=bool(r["is_tree_root"]),
+        )
+        for r in rows
+    ]
+
+
+@router.post(
+    "/logic-graph-links",
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/hierarchy/logic-graph-links"))],
+)
+async def create_logic_graph_link(
+    body: HierarchyLogicGraphLinkCreate,
+    _user: str = Depends(get_admin_user),
+    db: Database = Depends(get_db),
+    request: Request = None,
+) -> dict:
+    node = await db.fetchone("SELECT id FROM hierarchy_nodes WHERE id=?", (body.node_id,))
+    if not node:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Knoten nicht gefunden")
+    graph = await db.fetchone("SELECT id FROM logic_graphs WHERE id=?", (body.graph_id,))
+    if not graph:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Logik nicht gefunden")
+
+    existing = await db.fetchone(
+        "SELECT id FROM hierarchy_logic_graph_links WHERE node_id=? AND graph_id=?",
+        (body.node_id, body.graph_id),
+    )
+    if existing:
+        if request is not None:
+            set_contract_audit_resource_id(request, existing["id"])
+        return {"id": existing["id"], "node_id": body.node_id, "graph_id": body.graph_id}
+
+    lid = _new_id()
+    if request is not None:
+        set_contract_audit_resource_id(request, lid)
+    now = _now()
+    await db.execute_and_commit(
+        "INSERT INTO hierarchy_logic_graph_links (id, node_id, graph_id, created_at) VALUES (?,?,?,?)",
+        (lid, body.node_id, body.graph_id, now),
+    )
+    return {"id": lid, "node_id": body.node_id, "graph_id": body.graph_id}
+
+
+@router.delete(
+    "/logic-graph-links",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(contract_audit("DELETE", "/api/v1/hierarchy/logic-graph-links"))],
+)
+async def delete_logic_graph_link(
+    node_id: str = Query(...),
+    graph_id: str = Query(...),
+    _user: str = Depends(get_admin_user),
+    db: Database = Depends(get_db),
+) -> None:
+    await db.execute_and_commit(
+        "DELETE FROM hierarchy_logic_graph_links WHERE node_id=? AND graph_id=?",
+        (node_id, graph_id),
+    )
+
+
+@router.delete(
+    "/logic-graph-links/{link_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(contract_audit("DELETE", "/api/v1/hierarchy/logic-graph-links/{link_id}"))],
+)
+async def delete_logic_graph_link_by_id(
+    link_id: str,
+    _user: str = Depends(get_admin_user),
+    db: Database = Depends(get_db),
+) -> None:
+    """Remove one link by its own id — used by the Logic editor's "open" popup
+    (#1217 follow-up) to unlink a graph from the hierarchy position it is
+    currently being browsed under, without the picker having to resolve a
+    node_id for whichever level it happens to be showing (a tree's own root
+    included)."""
+    await db.execute_and_commit(
+        "DELETE FROM hierarchy_logic_graph_links WHERE id=?",
+        (link_id,),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Browse — drill-down navigation for the Logic-graph picker (#1217)
+# ---------------------------------------------------------------------------
+
+
+_UNASSIGNED_LOGIC_GRAPHS_SQL = """
+    SELECT lg.id, lg.name, lg.enabled
+    FROM logic_graphs lg
+    WHERE NOT EXISTS (SELECT 1 FROM hierarchy_logic_graph_links hlgl WHERE hlgl.graph_id = lg.id)
+    ORDER BY lg.name
+"""
+
+_HAS_UNASSIGNED_LOGIC_GRAPHS_SQL = f"SELECT EXISTS({_UNASSIGNED_LOGIC_GRAPHS_SQL}) AS has_any"
+
+
+async def _graphs_linked_to_node(db: Database, node_id: str) -> list[LogicGraphRef]:
+    rows = await db.fetchall(
+        """SELECT hlgl.id AS link_id, lg.id, lg.name, lg.enabled
+           FROM hierarchy_logic_graph_links hlgl
+           JOIN logic_graphs lg ON lg.id = hlgl.graph_id
+           WHERE hlgl.node_id=?
+           ORDER BY lg.name""",
+        (node_id,),
+    )
+    return [LogicGraphRef(id=r["id"], name=r["name"], enabled=bool(r["enabled"]), link_id=r["link_id"]) for r in rows]
+
+
+@router.get("/browse", response_model=HierarchyBrowseResult)
+async def browse_hierarchy(
+    tree_id: str | None = Query(None),
+    node_id: str | None = Query(None),
+    unassigned: bool = Query(False),
+    _user: Principal | str = Depends(get_current_principal),
+    db: Database = Depends(get_db),
+) -> HierarchyBrowseResult:
+    if unassigned:
+        if tree_id is not None or node_id is not None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "unassigned kann nicht mit tree_id/node_id kombiniert werden")
+        rows = await db.fetchall(_UNASSIGNED_LOGIC_GRAPHS_SQL)
+        return HierarchyBrowseResult(logic_graphs=[LogicGraphRef(id=r["id"], name=r["name"], enabled=bool(r["enabled"])) for r in rows])
+
+    if tree_id is None:
+        rows = await db.fetchall("SELECT id, name FROM hierarchy_trees ORDER BY name")
+        has_unassigned = bool((await db.fetchone(_HAS_UNASSIGNED_LOGIC_GRAPHS_SQL))["has_any"])
+        return HierarchyBrowseResult(
+            trees=[BrowseTreeRef(id=r["id"], name=r["name"]) for r in rows],
+            has_unassigned_logic_graphs=has_unassigned,
+        )
+
+    tree = await db.fetchone("SELECT id FROM hierarchy_trees WHERE id=?", (tree_id,))
+    if not tree:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Hierarchiebaum nicht gefunden")
+
+    if node_id is not None:
+        node = await db.fetchone("SELECT id FROM hierarchy_nodes WHERE id=? AND tree_id=?", (node_id, tree_id))
+        if not node:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Knoten nicht gefunden")
+        child_rows = await db.fetchall(
+            "SELECT id, name FROM hierarchy_nodes WHERE tree_id=? AND parent_id=? ORDER BY node_order, name",
+            (tree_id, node_id),
+        )
+        logic_graphs = await _graphs_linked_to_node(db, node_id)
+    else:
+        # Tree top level: real, visible top-level nodes plus whatever is linked
+        # directly to the tree's own hidden root node (#1217 follow-up) — a
+        # tree can hold graphs with no sub-folder at all.
+        child_rows = await db.fetchall(
+            "SELECT id, name FROM hierarchy_nodes WHERE tree_id=? AND parent_id IS NULL AND is_tree_root=0 ORDER BY node_order, name",
+            (tree_id,),
+        )
+        root_node = await db.fetchone("SELECT id FROM hierarchy_nodes WHERE tree_id=? AND is_tree_root=1", (tree_id,))
+        logic_graphs = await _graphs_linked_to_node(db, root_node["id"]) if root_node else []
+
+    subfolders: list[BrowseSubfolder] = []
+    if child_rows:
+        child_ids = [r["id"] for r in child_rows]
+        ph = ",".join("?" * len(child_ids))
+        grandchild_rows = await db.fetchall(
+            f"SELECT DISTINCT parent_id FROM hierarchy_nodes WHERE parent_id IN ({ph})",
+            child_ids,
+        )
+        has_children_ids = {r["parent_id"] for r in grandchild_rows}
+        subfolders = [BrowseSubfolder(id=r["id"], name=r["name"], has_children=r["id"] in has_children_ids) for r in child_rows]
+
+    return HierarchyBrowseResult(subfolders=subfolders, logic_graphs=logic_graphs)
+
+
+# ---------------------------------------------------------------------------
 # Node Search
 # ---------------------------------------------------------------------------
 
@@ -505,7 +975,7 @@ async def delete_link(
 async def search_nodes(
     q: str = Query("", description="Volltext-Suche in Knoten- und Hierarchienamen"),
     limit: int = Query(30, ge=1, le=200),
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> list[NodeSearchResult]:
     """Knoten über alle Hierarchien hinweg suchen. Gibt Knoten mit Hierarchie-Kontext zurück."""
@@ -529,13 +999,13 @@ async def search_nodes(
                    node_matches(id) AS (
                        SELECT hn.id
                        FROM hierarchy_nodes hn
-                       WHERE hn.name LIKE ?
+                       WHERE hn.name LIKE ? AND hn.is_tree_root = 0
                    ),
                    matched_roots(id) AS (
                        SELECT hn.id
                        FROM hierarchy_nodes hn
                        JOIN tree_matches tm ON tm.id = hn.tree_id
-                       WHERE hn.parent_id IS NULL
+                       WHERE hn.parent_id IS NULL AND hn.is_tree_root = 0
                    ),
                    candidate_nodes(id) AS (
                        SELECT id FROM matched_roots
@@ -548,7 +1018,7 @@ async def search_nodes(
                SELECT DISTINCT hn.id AS node_id, hn.name AS node_name,
                       ht.id AS tree_id, ht.name AS tree_name, ht.display_depth
                FROM candidate_nodes candidate
-               JOIN hierarchy_nodes hn ON hn.id = candidate.id
+               JOIN hierarchy_nodes hn ON hn.id = candidate.id AND hn.is_tree_root = 0
                JOIN hierarchy_trees ht ON ht.id = hn.tree_id
                LEFT JOIN node_depths nd ON nd.id = hn.id
                LEFT JOIN tree_depths td ON td.tree_id = ht.id
@@ -556,9 +1026,8 @@ async def search_nodes(
                   OR ht.display_depth <= 0
                   OR COALESCE(td.max_depth, 0) < ht.display_depth
                   OR COALESCE(nd.depth, 1) >= ht.display_depth
-               ORDER BY ht.name, hn.name
-               LIMIT ?""",
-            (like, like, limit),
+               ORDER BY ht.name, hn.name""",
+            (like, like),
         )
     else:
         rows = await db.fetchall(
@@ -578,14 +1047,18 @@ async def search_nodes(
                JOIN hierarchy_trees ht ON ht.id = hn.tree_id
                LEFT JOIN node_depths nd ON nd.id = hn.id
                LEFT JOIN tree_depths td ON td.tree_id = ht.id
-               WHERE ht.display_depth IS NULL
+               WHERE hn.is_tree_root = 0
+                 AND (ht.display_depth IS NULL
                   OR ht.display_depth <= 0
                   OR COALESCE(td.max_depth, 0) < ht.display_depth
-                  OR COALESCE(nd.depth, 1) >= ht.display_depth
-               ORDER BY ht.name, hn.name
-               LIMIT ?""",
-            (limit,),
+                  OR COALESCE(nd.depth, 1) >= ht.display_depth)
+               ORDER BY ht.name, hn.name""",
         )
+
+    principal = _principal_from_dependency(_user)
+    node_ids = [r["node_id"] for r in rows]
+    allowed_node_ids = set(await filter_authorized_hierarchy_nodes(db, principal, node_ids, action=AuthzAction.READ))
+    rows = [r for r in rows if r["node_id"] in allowed_node_ids][:limit]
 
     # Build ancestor paths so callers can disambiguate same-named leaves under
     # different parents (#433). The result query is already limited, so path
@@ -620,11 +1093,25 @@ async def search_nodes(
 # ---------------------------------------------------------------------------
 
 
-@router.post("/import-from-ets", response_model=ImportResult, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "/import-from-ets",
+    response_model=ImportResult,
+    status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/hierarchy/import-from-ets"))],
+)
 async def import_from_ets(
     body: EtsImportRequest,
+    request: Request = None,
     _user: str = Depends(get_admin_user),
     db: Database = Depends(get_db),
 ) -> ImportResult:
     """Erzeugt einen neuen Hierarchiebaum aus importierten ETS-Daten."""
-    return await create_ets_hierarchy(db, body)
+    result = await create_ets_hierarchy(db, body)
+    if request is not None:
+        set_contract_audit_resource_id(request, result.tree_id)
+        set_contract_audit_summary(
+            request,
+            resource_count=result.nodes_created + result.links_created,
+            payload=body.model_dump(),
+        )
+    return result

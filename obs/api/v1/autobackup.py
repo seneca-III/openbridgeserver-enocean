@@ -8,7 +8,7 @@ Einstellungen werden in app_settings gespeichert:
   autobackup.hour           = "0" … "23"  (Uhrzeit der täglichen Sicherung)
   autobackup.retention_days = "1" … "30"  (Anzahl Sicherungen aufbewahren)
 
-Sicherungsdateien liegen in {db_dir}/autobackup/YYYYMMDD-HHMM.json
+Sicherungsdateien liegen in {db_dir}/autobackup/YYYYMMDD-HHMM[-N].json
 """
 
 from __future__ import annotations
@@ -17,18 +17,22 @@ import asyncio
 import json
 import logging
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 
+from obs.api.audit import AuditLogWriter, AuditOutcome, build_audit_context
 from obs.api.auth import get_admin_user
 from obs.db.database import Database, get_db
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["config"])
+
+_BACKUP_STEM_RE = re.compile(r"\d{8}-\d{4}(?:-\d+)?")
 
 # ---------------------------------------------------------------------------
 # Modelle
@@ -83,30 +87,67 @@ async def _save_config(db: Database, cfg: AutobackupConfig) -> None:
         )
 
 
+async def _application_timezone(db: Database) -> ZoneInfo:
+    """Return the configured application timezone, with a safe default."""
+    row = await db.fetchone("SELECT value FROM app_settings WHERE key = 'timezone'")
+    try:
+        return ZoneInfo(row["value"] if row else "Europe/Zurich")
+    except (ZoneInfoNotFoundError, TypeError):
+        return ZoneInfo("Europe/Zurich")
+
+
+async def _application_now(db: Database) -> datetime:
+    return datetime.now(UTC).astimezone(await _application_timezone(db))
+
+
 def _list_backups() -> list[AutobackupEntry]:
     backup_dir = _autobackup_dir()
     entries: list[AutobackupEntry] = []
-    for f in sorted(backup_dir.glob("*.json"), reverse=True):
+    # Prefer write time so suffixed backups from the same local minute appear
+    # newest first.  The name provides a deterministic fallback for files
+    # whose filesystem timestamps are identical.
+    for f in sorted(backup_dir.glob("*.json"), key=lambda f: (f.stat().st_mtime_ns, f.stem), reverse=True):
         stem = f.stem  # z.B. "20240506-0300"
+        if not _BACKUP_STEM_RE.fullmatch(stem):
+            continue
         try:
-            dt = datetime.strptime(stem, "%Y%m%d-%H%M")
+            dt = datetime.strptime(stem[:13], "%Y%m%d-%H%M")  # noqa: DTZ007 -- filename encodes app-local wall-clock; no DB access here to resolve the configured tz
             created_at = dt.isoformat()
         except ValueError:
             created_at = stem
-        entries.append(AutobackupEntry(name=stem, created_at=created_at, size_bytes=f.stat().st_size))
+        entries.append(
+            AutobackupEntry(
+                name=stem,
+                created_at=created_at,
+                size_bytes=f.stat().st_size,
+            )
+        )
     return entries
 
 
 def _prune_old_backups(retention_days: int) -> int:
     backup_dir = _autobackup_dir()
-    files = sorted(backup_dir.glob("*.json"), reverse=True)
+    # Filenames use application-local time for display and can therefore be
+    # non-monotonic after a timezone change or during a repeated DST hour.
+    # Retention must instead use the actual creation/write order.
+    files = [f for f in backup_dir.glob("*.json") if _BACKUP_STEM_RE.fullmatch(f.stem)]
+    files.sort(key=lambda f: (f.stat().st_mtime_ns, f.stem), reverse=True)
     deleted = 0
     for f in files[retention_days:]:
-        try:
-            f.unlink()
+        deleted += _delete_backup_files(f.stem)
+    return deleted
+
+
+def _delete_backup_files(stem: str) -> int:
+    backup_dir = _autobackup_dir()
+    deleted = 0
+    path = backup_dir / f"{stem}.json"
+    try:
+        if path.exists():
+            path.unlink()
             deleted += 1
-        except OSError:
-            pass
+    except OSError:
+        pass
     return deleted
 
 
@@ -117,11 +158,22 @@ async def _create_backup_now(db: Database) -> str:
     # Export-Funktion direkt aufrufen (ohne HTTP-Request)
     export = await export_config(_user="autobackup", db=db)
 
-    ts = datetime.now(UTC).strftime("%Y%m%d-%H%M")
-    backup_path = _autobackup_dir() / f"{ts}.json"
-    backup_path.write_text(json.dumps(export.model_dump(), ensure_ascii=False, indent=2), encoding="utf-8")
+    # Names shown in the UI should reflect the same application-local time as
+    # the configured scheduler hour.
+    ts = (await _application_now(db)).strftime("%Y%m%d-%H%M")
+    backup_dir = _autobackup_dir()
+    suffix = 0
+    while True:
+        name = ts if suffix == 0 else f"{ts}-{suffix}"
+        backup_path = backup_dir / f"{name}.json"
+        try:
+            with backup_path.open("x", encoding="utf-8") as f:
+                f.write(json.dumps(export.model_dump(), ensure_ascii=False, indent=2))
+            break
+        except FileExistsError:
+            suffix += 1
     logger.info("Autobackup erstellt: %s (%d Bytes)", backup_path.name, backup_path.stat().st_size)
-    return ts
+    return name
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +192,7 @@ async def get_autobackup_config(
 @router.put("/autobackup/config", response_model=AutobackupConfig)
 async def set_autobackup_config(
     body: AutobackupConfig,
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
     db: Database = Depends(lambda: get_db()),
 ) -> AutobackupConfig:
@@ -147,7 +200,10 @@ async def set_autobackup_config(
         raise HTTPException(status_code=400, detail="hour muss zwischen 0 und 23 liegen.")
     if not (1 <= body.retention_days <= 30):
         raise HTTPException(status_code=400, detail="retention_days muss zwischen 1 und 30 liegen.")
-    await _save_config(db, body)
+    async with db.transaction():
+        await _save_config(db, body)
+        writer = AuditLogWriter(db, build_audit_context(request, _admin))
+        await writer.write_contract("PUT", "/api/v1/config/autobackup/config", resource_id="global", commit=False)
     # Scheduler über Konfigurationsänderung informieren
     _notify_config_change()
     return body
@@ -162,37 +218,53 @@ async def list_autobackups(
 
 @router.post("/autobackup/run", status_code=status.HTTP_200_OK)
 async def run_autobackup_now(
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
     db: Database = Depends(lambda: get_db()),
 ) -> dict:
     """Autobackup sofort manuell auslösen."""
-    name = await _create_backup_now(db)
-    cfg = await _load_config(db)
-    deleted = _prune_old_backups(cfg.retention_days)
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
+    try:
+        name = await _create_backup_now(db)
+        cfg = await _load_config(db)
+        deleted = _prune_old_backups(cfg.retention_days)
+    except Exception:
+        await writer.write_contract("POST", "/api/v1/config/autobackup/run", outcome=AuditOutcome.FAILED)
+        raise
+    await writer.write_contract("POST", "/api/v1/config/autobackup/run", resource_id=name)
     return {"ok": True, "name": name, "old_backups_deleted": deleted}
 
 
 @router.post("/autobackup/restore/{name}", status_code=status.HTTP_200_OK)
 async def restore_autobackup(
     name: str,
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
     db: Database = Depends(lambda: get_db()),
 ) -> dict:
     """Autobackup-Sicherung wiederherstellen (Upsert-Semantik, wie JSON-Import)."""
-    # Dateinamen strikt validieren (erwartetes Format: YYYYMMDD-HHMM)
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
+
+    async def audit_failed(resource_id: str | None = None) -> None:
+        await writer.write_contract("POST", "/api/v1/config/autobackup/restore/{name}", resource_id=resource_id, outcome=AuditOutcome.FAILED)
+
+    # Dateinamen strikt validieren (erwartetes Format: YYYYMMDD-HHMM[-N])
     safe_name = Path(name).name
-    if not re.fullmatch(r"\d{8}-\d{4}", safe_name):
+    if not _BACKUP_STEM_RE.fullmatch(safe_name):
+        await audit_failed()
         raise HTTPException(status_code=400, detail="Ungültiger Sicherungsname.")
 
     base_dir = _autobackup_dir().resolve()
-    allowed_backups = {p.stem: p for p in base_dir.glob("*.json") if p.is_file() and re.fullmatch(r"\d{8}-\d{4}", p.stem)}
+    allowed_backups = {p.stem: p for p in base_dir.glob("*.json") if p.is_file() and _BACKUP_STEM_RE.fullmatch(p.stem)}
     backup_path = allowed_backups.get(safe_name)
     if backup_path is None:
+        await audit_failed(safe_name)
         raise HTTPException(status_code=404, detail=f"Sicherung '{safe_name}' nicht gefunden.")
 
     try:
         content = json.loads(backup_path.read_text(encoding="utf-8"))
     except Exception as exc:
+        await audit_failed(safe_name)
         raise HTTPException(status_code=400, detail=f"Sicherungsdatei ungültig: {exc}") from exc
 
     from obs.api.v1.config import ConfigExport, ImportResult, import_config
@@ -200,9 +272,25 @@ async def restore_autobackup(
     try:
         body = ConfigExport.model_validate(content)
     except Exception as exc:
+        await audit_failed(safe_name)
         raise HTTPException(status_code=400, detail=f"Sicherungsformat ungültig: {exc}") from exc
 
     result: ImportResult = await import_config(body=body, _user="autobackup-restore", db=db)
+    outcome = AuditOutcome.FAILED if result.errors else AuditOutcome.SUCCESS
+    await writer.write_contract(
+        "POST",
+        "/api/v1/config/autobackup/restore/{name}",
+        resource_id=safe_name,
+        outcome=outcome,
+        details={
+            "counts": {
+                "datapoints": result.datapoints_created + result.datapoints_updated,
+                "bindings": result.bindings_created + result.bindings_updated,
+                "visu_nodes": result.visu_nodes_upserted,
+            },
+            "error_count": len(result.errors),
+        },
+    )
     return {
         "ok": True,
         "name": safe_name,
@@ -216,17 +304,26 @@ async def restore_autobackup(
 @router.delete("/autobackup/{name}", status_code=status.HTTP_200_OK)
 async def delete_autobackup(
     name: str,
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
+    db: Database = Depends(lambda: get_db()),
 ) -> dict:
     """Eine einzelne Autobackup-Sicherung löschen."""
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
+
+    async def audit_failed(resource_id: str | None = None) -> None:
+        await writer.write_contract("DELETE", "/api/v1/config/autobackup/{name}", resource_id=resource_id, outcome=AuditOutcome.FAILED)
+
     safe_name = Path(name).name
-    if not re.fullmatch(r"\d{8}-\d{4}", safe_name):
+    if not _BACKUP_STEM_RE.fullmatch(safe_name):
+        await audit_failed()
         raise HTTPException(status_code=400, detail="Ungültiger Sicherungsname.")
 
     # Allowlist: nur Namen löschen, die als vorhandene Backups gelistet sind.
     existing_backups = _list_backups()
     matched = next((entry for entry in existing_backups if entry.name == safe_name), None)
     if matched is None:
+        await audit_failed(safe_name)
         raise HTTPException(status_code=404, detail=f"Sicherung '{safe_name}' nicht gefunden.")
 
     base_dir = _autobackup_dir().resolve()
@@ -234,11 +331,17 @@ async def delete_autobackup(
     try:
         backup_path.relative_to(base_dir)
     except ValueError:
+        await audit_failed(safe_name)
         raise HTTPException(status_code=400, detail="Ungültiger Sicherungspfad.")
 
     if not backup_path.exists():
+        await audit_failed(safe_name)
         raise HTTPException(status_code=404, detail=f"Sicherung '{safe_name}' nicht gefunden.")
-    backup_path.unlink()
+    _delete_backup_files(matched.name)
+    if backup_path.exists():
+        await audit_failed(safe_name)
+        raise HTTPException(status_code=500, detail=f"Sicherung '{safe_name}' konnte nicht gelöscht werden.")
+    await writer.write_contract("DELETE", "/api/v1/config/autobackup/{name}", resource_id=safe_name)
     return {"ok": True, "name": safe_name}
 
 
@@ -275,11 +378,10 @@ class AutobackupScheduler:
         logger.info("Autobackup-Scheduler gestoppt.")
 
     async def _loop(self) -> None:
-        last_backup_day: int | None = None
+        last_backup_day: str | None = None
 
         while True:
             try:
-                global _config_changed_event
                 cfg = await _load_config(self._db)
 
                 if not cfg.enabled:
@@ -290,29 +392,18 @@ class AutobackupScheduler:
                             timeout=300,
                         )
                         _config_changed_event.clear()
-                    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+                    except (TimeoutError, asyncio.CancelledError) as exc:
                         if isinstance(exc, asyncio.CancelledError):
                             raise
                     continue
 
-                now = datetime.now(UTC)
-                today = now.day
+                now = await _application_now(self._db)
+                today = now.date().isoformat()
 
                 # Prüfen ob heute schon gesichert wurde
                 if last_backup_day == today and now.hour >= cfg.hour:
                     # Warten bis morgen um cfg.hour
-                    tomorrow = datetime(now.year, now.month, now.day, cfg.hour, 0, tzinfo=UTC)
-                    if tomorrow <= now:
-                        # Nächsten Monat / Jahr berücksichtigen
-                        import calendar
-
-                        days_in_month = calendar.monthrange(now.year, now.month)[1]
-                        if now.day < days_in_month:
-                            tomorrow = datetime(now.year, now.month, now.day + 1, cfg.hour, 0, tzinfo=UTC)
-                        elif now.month < 12:
-                            tomorrow = datetime(now.year, now.month + 1, 1, cfg.hour, 0, tzinfo=UTC)
-                        else:
-                            tomorrow = datetime(now.year + 1, 1, 1, cfg.hour, 0, tzinfo=UTC)
+                    tomorrow = (now + timedelta(days=1)).replace(hour=cfg.hour, minute=0, second=0, microsecond=0)
 
                     wait_s = max(60.0, (tomorrow - now).total_seconds())
                     logger.debug("Autobackup: nächste Sicherung in %.0fs um %s", wait_s, tomorrow.isoformat())
@@ -322,7 +413,7 @@ class AutobackupScheduler:
                             timeout=min(wait_s, 270),
                         )
                         _config_changed_event.clear()
-                    except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+                    except (TimeoutError, asyncio.CancelledError) as exc:
                         if isinstance(exc, asyncio.CancelledError):
                             raise
                     continue
@@ -335,8 +426,8 @@ class AutobackupScheduler:
                         last_backup_day = today
                         if deleted:
                             logger.info("Autobackup: %d alte Sicherung(en) gelöscht.", deleted)
-                    except Exception as exc:
-                        logger.error("Autobackup fehlgeschlagen: %s", exc)
+                    except Exception:
+                        logger.exception("Autobackup fehlgeschlagen")
 
                 # Jede Minute prüfen (oder auf Konfigurationsänderung warten)
                 try:
@@ -345,14 +436,14 @@ class AutobackupScheduler:
                         timeout=60,
                     )
                     _config_changed_event.clear()
-                except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
+                except (TimeoutError, asyncio.CancelledError) as exc:
                     if isinstance(exc, asyncio.CancelledError):
                         raise
 
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
-                logger.error("Autobackup-Scheduler Fehler: %s", exc)
+            except Exception:
+                logger.exception("Autobackup-Scheduler Fehler")
                 await asyncio.sleep(60)
 
 

@@ -39,13 +39,19 @@ npm pkg set version="$VERSION" --prefix gui
 # ── Build frontends ───────────────────────────────────────────────────────────
 echo "==> Building Admin GUI..."
 cd gui
-npm install --prefer-offline
+npm ci --prefer-offline
 npm run build
 cd ..
 
 echo "==> Building Visu frontend..."
 cd frontend
-npm install --prefer-offline
+npm ci --prefer-offline
+npm run build
+cd ..
+
+echo "==> Building Help site..."
+cd help
+npm ci --prefer-offline
 npm run build
 cd ..
 
@@ -55,7 +61,8 @@ chmod +x obs-update
 
 # ── App bundle ─────────────────────────────────────────────────────────────────
 echo "==> Creating app bundle..."
-tar -czf "/tmp/$APP_BUNDLE_FILE" obs/ gui_dist/ frontend_dist/ requirements.txt obs-update -C scripts obs-admin
+tar -czf "/tmp/$APP_BUNDLE_FILE" obs/ gui_dist/ frontend_dist/ help_dist/ requirements.txt obs-update \
+    -C scripts obs-admin obs-onewire-configure.sh obs-onewire-should-run.sh
 (cd /tmp && sha256sum "$APP_BUNDLE_FILE" > "$APP_BUNDLE_FILE.sha256")
 # Backward-compat: pre-migration obs-update versions verify via a .sha512 asset.
 (cd /tmp && sha512sum "$APP_BUNDLE_FILE" > "$APP_BUNDLE_FILE.sha512")
@@ -145,8 +152,11 @@ mkdir -p "$ROOTFS/opt/obs"
 cp -r obs              "$ROOTFS/opt/obs/"
 cp -r gui_dist         "$ROOTFS/opt/obs/"
 cp -r frontend_dist    "$ROOTFS/opt/obs/"
+cp -r help_dist        "$ROOTFS/opt/obs/"
 cp    requirements.txt "$ROOTFS/opt/obs/"
 cp    scripts/obs-admin   "$ROOTFS/opt/obs/"
+cp    scripts/obs-onewire-configure.sh scripts/obs-onewire-should-run.sh "$ROOTFS/opt/obs/"
+chmod +x "$ROOTFS/opt/obs/obs-onewire-configure.sh" "$ROOTFS/opt/obs/obs-onewire-should-run.sh"
 echo "$VERSION" | tee "$ROOTFS/opt/obs/version" > /dev/null
 cp obs-update "$ROOTFS/usr/local/bin/obs-update"
 cp scripts/obs-admin "$ROOTFS/usr/local/bin/obs-admin"
@@ -157,7 +167,7 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 apt-get update
-apt-get install -y python3 python3-pip python3-venv gcc libffi-dev libssl-dev mosquitto mosquitto-clients
+apt-get install -y python3 python3-pip python3-venv gcc libffi-dev libssl-dev mosquitto mosquitto-clients owserver
 
 python3 -m venv /opt/obs/venv
 /opt/obs/venv/bin/pip install --no-cache-dir -r /opt/obs/requirements.txt
@@ -167,6 +177,10 @@ mkdir -p /data
 cat > /etc/obs.env << 'EOF'
 OBS_DATABASE__PATH=/data/obs.db
 OBS_CONFIG=/data/config.yaml
+
+# 1-Wire (owserver) — uncomment to enable, then `systemctl restart owserver`:
+# OBS_ONEWIRE__USB_ALL=true
+# OBS_ONEWIRE__PBM_DEVICES=/dev/serial/by-id/usb-FTDI_...
 EOF
 chmod 600 /etc/obs.env
 
@@ -216,6 +230,19 @@ max_connections 100
 max_keepalive 120
 MQTTCONF
 
+# owserver ships enabled by its own Debian/Ubuntu package, but it should only
+# actually run once an admin has configured a 1-Wire bus master (see #1040) —
+# an idle, unconfigured daemon wastes resources on the small hosts OBS often
+# runs on. The drop-in gates the packaged unit's own ExecStart via
+# ExecCondition instead of replacing it, so package upgrades keep working.
+mkdir -p /etc/systemd/system/owserver.service.d
+cat > /etc/systemd/system/owserver.service.d/override.conf << 'EOF'
+[Service]
+EnvironmentFile=/etc/obs.env
+ExecCondition=/opt/obs/obs-onewire-should-run.sh
+ExecStartPre=/opt/obs/obs-onewire-configure.sh
+EOF
+
 cat > /opt/obs/obs-first-boot.sh << 'FIRSTBOOT'
 #!/bin/bash
 set -euo pipefail
@@ -258,7 +285,7 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 FIRSTBOOTSVC
 
-systemctl enable obs.service mosquitto.service obs-first-boot.service
+systemctl enable obs.service mosquitto.service obs-first-boot.service owserver.service
 
 apt-get clean
 rm -rf /var/lib/apt/lists/*

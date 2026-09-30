@@ -18,12 +18,15 @@
     <div class="grid lg:grid-cols-3 gap-4">
       <!-- Current value card -->
       <div class="card p-5 flex flex-col gap-3">
-        <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">{{ $t('datapoints.detail.currentValue') }}</div>
+        <div class="flex items-center justify-between">
+          <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">{{ $t('datapoints.detail.currentValue') }}</div>
+          <HelpButton help-id="datapoints-detail" />
+        </div>
         <div class="text-4xl font-bold font-mono text-blue-600 dark:text-blue-300">
           {{ displayVal }}
         </div>
         <div class="text-xs text-slate-500">
-          {{ liveState?.ts ? new Date(liveState.ts).toLocaleString('de-CH') : dp.updated_at }}
+          {{ liveState?.ts ? fmtDateTime(liveState.ts) : fmtDateTime(dp.updated_at) }}
         </div>
         <div class="font-mono text-xs text-slate-600 break-all">{{ dp.mqtt_topic }}</div>
         <div v-if="dp.mqtt_alias" class="font-mono text-xs text-slate-600 break-all">{{ dp.mqtt_alias }}</div>
@@ -72,7 +75,10 @@
 
       <!-- Properties -->
       <div class="card p-5 col-span-2">
-        <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-4">{{ $t('datapoints.detail.properties') }}</div>
+        <div class="flex items-center justify-between mb-4">
+          <div class="text-xs font-semibold text-slate-500 uppercase tracking-wide">{{ $t('datapoints.detail.properties') }}</div>
+          <HelpButton help-id="datapoints-detail-properties" />
+        </div>
         <dl class="grid grid-cols-2 gap-x-4 gap-y-3 text-sm">
           <dt class="text-slate-500">{{ $t('datapoints.table.name') }}</dt>       <dd class="text-slate-700 dark:text-slate-200">{{ dp.name }}</dd>
           <dt class="text-slate-500">{{ $t('datapoints.detail.datatype') }}</dt>   <dd><Badge variant="info" size="xs">{{ dp.data_type }}</Badge></dd>
@@ -90,8 +96,8 @@
           <dd>
             <Badge :variant="dp.record_history ? 'success' : 'muted'" size="xs" data-testid="badge-record-history">{{ dp.record_history ? $t('common.active') : $t('common.disabled') }}</Badge>
           </dd>
-          <dt class="text-slate-500">{{ $t('datapoints.detail.createdAt') }}</dt>   <dd class="text-slate-400 text-xs">{{ new Date(dp.created_at).toLocaleString('de-CH') }}</dd>
-          <dt class="text-slate-500">{{ $t('datapoints.detail.updatedAt') }}</dt>   <dd class="text-slate-400 text-xs">{{ new Date(dp.updated_at).toLocaleString('de-CH') }}</dd>
+          <dt class="text-slate-500">{{ $t('datapoints.detail.createdAt') }}</dt>   <dd class="text-slate-400 text-xs">{{ fmtDateTime(dp.created_at) }}</dd>
+          <dt class="text-slate-500">{{ $t('datapoints.detail.updatedAt') }}</dt>   <dd class="text-slate-400 text-xs">{{ fmtDateTime(dp.updated_at) }}</dd>
         </dl>
         <div class="flex gap-3 mt-5">
           <button @click="showEdit = true" class="btn-secondary btn-sm">{{ $t('common.edit') }}</button>
@@ -107,10 +113,13 @@
     <div class="card">
       <div class="card-header">
         <h3 class="font-semibold text-slate-800 dark:text-slate-100 text-sm">{{ $t('datapoints.detail.adapterBindings') }}</h3>
-        <button @click="showBindingForm = true" class="btn-primary btn-sm" data-testid="btn-add-binding">
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
-          {{ $t('datapoints.detail.addBinding') }}
-        </button>
+        <div class="flex items-center gap-2">
+          <HelpButton help-id="datapoints-detail-bindings" />
+          <button @click="showBindingForm = true" class="btn-primary btn-sm" data-testid="btn-add-binding">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+            {{ $t('datapoints.detail.addBinding') }}
+          </button>
+        </div>
       </div>
       <div class="card-body">
         <div v-if="bindingsLoading" class="flex justify-center py-4"><Spinner /></div>
@@ -125,7 +134,41 @@
                 </Badge>
                 <Badge v-if="!b.enabled" variant="danger" size="xs">{{ $t('datapoints.detail.bindingDisabled') }}</Badge>
               </div>
-              <div class="text-xs text-slate-500 font-mono mt-1 truncate">{{ JSON.stringify(b.config) }}</div>
+              <div v-if="b.adapter_type?.toUpperCase() === 'KNX'" class="mt-2 flex flex-col gap-2" data-testid="datapoint-knx-context">
+                <div v-if="knxContextLoading" class="text-xs text-slate-500">
+                  {{ $t('common.loading') }}
+                </div>
+                <div
+                  v-for="ga in bindingKnxGroupAddresses(b)"
+                  :key="`${b.id}:${ga.role}:${ga.address}`"
+                  class="rounded border border-slate-200 dark:border-slate-700 px-2 py-1.5"
+                >
+                  <div class="flex flex-wrap items-center gap-2">
+                    <span class="font-mono text-xs text-blue-600 dark:text-blue-300">{{ ga.address }}</span>
+                    <Badge variant="muted" size="xs">{{ knxRoleLabel(ga.role) }}</Badge>
+                    <span class="truncate text-xs text-slate-700 dark:text-slate-200">{{ knxGaLabel(ga.address) }}</span>
+                    <span v-if="knxGaContext(ga.address)?.dpt" class="font-mono text-xs text-slate-500">{{ knxGaContext(ga.address).dpt }}</span>
+                  </div>
+                  <div v-if="knxGaContext(ga.address)?.devices?.length" class="mt-1 flex flex-col gap-1">
+                    <div
+                      v-for="device in knxGaContext(ga.address).devices"
+                      :key="`${ga.address}:${device.pa}`"
+                      class="text-xs text-slate-500"
+                    >
+                      <span class="font-mono text-slate-700 dark:text-slate-200">{{ device.pa }}</span>
+                      <span v-if="device.name" class="text-slate-700 dark:text-slate-200"> {{ device.name }}</span>
+                      <span v-if="device.comm_objects?.length">
+                        · {{ device.comm_objects.map(co => [co.number, co.name].filter(Boolean).join(' ')).filter(Boolean).join(', ') }}
+                      </span>
+                    </div>
+                  </div>
+                  <div v-else class="mt-1 text-xs text-slate-500">{{ $t('datapoints.detail.knxNoDevices') }}</div>
+                </div>
+                <div v-if="!bindingKnxGroupAddresses(b).length" class="text-xs text-slate-500 font-mono truncate">
+                  {{ JSON.stringify(b.config) }}
+                </div>
+              </div>
+              <div v-else class="text-xs text-slate-500 font-mono mt-1 truncate">{{ JSON.stringify(b.config) }}</div>
             </div>
             <div class="flex gap-1 shrink-0">
               <button @click="openEditBinding(b)" class="btn-icon" :title="$t('common.edit')">
@@ -144,6 +187,7 @@
     <div class="card">
       <div class="card-header">
         <h3 class="font-semibold text-slate-800 dark:text-slate-100 text-sm">{{ $t('datapoints.detail.logicBindings') }}</h3>
+        <HelpButton help-id="datapoints-detail-logic" />
       </div>
       <div class="card-body">
         <div v-if="logicUsagesLoading" class="flex justify-center py-4"><Spinner /></div>
@@ -174,12 +218,15 @@
 
     <!-- Edit Objekt Modal -->
     <Modal v-model="showEdit" :title="$t('datapoints.form.editTitle')">
+      <template #header-actions>
+        <HelpButton help-id="datapoints-form" />
+      </template>
       <DataPointForm :initial="dp" :datatypes="dpStore.datatypes" :save-handler="onEditSave" @cancel="showEdit = false" />
     </Modal>
 
     <!-- Binding form Modal -->
     <Modal v-model="showBindingForm" :title="editBinding ? $t('datapoints.detail.bindingModalEdit') : $t('datapoints.detail.bindingModalNew')" max-width="xl">
-      <BindingForm :dp-id="id" :initial="editBinding" :dp-persist-value="dp?.persist_value ?? false" :dp-data-type="dp?.data_type ?? 'UNKNOWN'" @save="onBindingSave" @cancel="showBindingForm = false" />
+      <BindingForm :dp-id="id" :initial="editBinding" :dp-persist-value="dp?.persist_value ?? false" :dp-data-type="dp?.data_type ?? 'UNKNOWN'" :dp-unit="dp?.unit ?? ''" @save="onBindingSave" @cancel="showBindingForm = false" />
     </Modal>
 
     <!-- Delete binding confirm -->
@@ -197,9 +244,12 @@ import { useI18n } from 'vue-i18n'
 import { dpApi, logicApi } from '@/api/client'
 import { useDatapointStore } from '@/stores/datapoints'
 import { useWebSocketStore } from '@/stores/websocket'
+import { useTz } from '@/composables/useTz'
+import { useRegionalFormat } from '@/composables/useRegionalFormat'
 import Badge          from '@/components/ui/Badge.vue'
 import Spinner        from '@/components/ui/Spinner.vue'
 import Modal          from '@/components/ui/Modal.vue'
+import HelpButton     from '@/components/ui/HelpButton.vue'
 import ConfirmDialog  from '@/components/ui/ConfirmDialog.vue'
 import DataPointForm          from '@/components/datapoints/DataPointForm.vue'
 import BindingForm            from '@/components/datapoints/BindingForm.vue'
@@ -207,6 +257,9 @@ import DataPointHierarchyCard from '@/components/datapoints/DataPointHierarchyCa
 
 const props   = defineProps({ id: { type: String, required: true } })
 const { t } = useI18n()
+// Timestamps follow the configured timezone and date/time format (issue #1073).
+const { fmtDateTime } = useTz()
+const { fmtNumber } = useRegionalFormat()
 const dpStore = useDatapointStore()
 const ws      = useWebSocketStore()
 
@@ -214,6 +267,8 @@ const dp                  = ref(null)
 const bindings            = ref([])
 const bindingsLoading     = ref(false)
 const bindingsLoaded      = ref(false)
+const knxContext          = ref(null)
+const knxContextLoading   = ref(false)
 const logicUsages         = ref([])
 const logicUsagesLoading  = ref(false)
 const showEdit            = ref(false)
@@ -229,9 +284,12 @@ let unsubWs = null
 const liveState  = computed(() => ws.liveValues[props.id])
 const currentRawValue = computed(() => liveState.value?.value ?? dp.value?.value)
 const displayVal = computed(() => {
+  // Display only — numbers use the configured regional format (issue #1073),
+  // while the edit field below keeps the raw, locale-neutral value.
   const v = currentRawValue.value
   if (v === null || v === undefined) return '—'
-  return dp.value?.unit ? `${v} ${dp.value.unit}` : String(v)
+  const text = typeof v === 'number' && Number.isFinite(v) ? fmtNumber(v) : String(v)
+  return dp.value?.unit ? `${text} ${dp.value.unit}` : text
 })
 const activeBindings = computed(() => bindings.value.filter(b => b.enabled))
 const activeWritableBindings = computed(() => activeBindings.value.filter(b => b.adapter_type !== 'MESSAGE'))
@@ -251,7 +309,7 @@ onMounted(async () => {
   unsubWs = ws.onValue((id, value, quality) => {
     if (id === props.id && dp.value) { dp.value.value = value; dp.value.quality = quality }
   })
-  await Promise.all([loadBindings(), loadLogicUsages()])
+  await Promise.all([loadBindings(), loadLogicUsages(), loadKnxContext()])
 })
 onUnmounted(() => unsubWs?.())
 
@@ -277,6 +335,18 @@ async function loadBindings() {
   finally { bindingsLoading.value = false }
 }
 
+async function loadKnxContext() {
+  knxContextLoading.value = true
+  try {
+    const { data } = await dpApi.knxContext(props.id)
+    knxContext.value = data
+  } catch {
+    knxContext.value = { datapoint_id: props.id, group_addresses: [] }
+  } finally {
+    knxContextLoading.value = false
+  }
+}
+
 async function loadLogicUsages() {
   logicUsagesLoading.value = true
   try { const { data } = await logicApi.datapointUsages(props.id); logicUsages.value = data }
@@ -290,12 +360,42 @@ async function onEditSave(payload) {
 }
 
 function openEditBinding(b) { editBinding.value = b; showBindingForm.value = true }
-async function onBindingSave() { showBindingForm.value = false; await loadBindings() }
+async function onBindingSave() { showBindingForm.value = false; await Promise.all([loadBindings(), loadKnxContext()]) }
 
 function confirmDeleteBinding(b) { deleteBindingTarget.value = b; showBindingConfirm.value = true }
 async function doDeleteBinding() {
   await dpApi.deleteBinding(props.id, deleteBindingTarget.value.id)
-  await loadBindings()
+  await Promise.all([loadBindings(), loadKnxContext()])
+}
+
+function bindingKnxGroupAddresses(binding) {
+  const cfg = binding?.config || {}
+  const pairs = [
+    { role: 'group_address', address: cfg.group_address },
+    { role: 'state_group_address', address: cfg.state_group_address },
+  ]
+  const seen = new Set()
+  return pairs
+    .map(item => ({ ...item, address: String(item.address || '').trim() }))
+    .filter((item) => {
+      const key = `${item.role}:${item.address}`
+      if (!item.address || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+}
+
+function knxGaContext(address) {
+  return (knxContext.value?.group_addresses || []).find(item => item.address === address)
+}
+
+function knxGaLabel(address) {
+  const ctx = knxGaContext(address)
+  return ctx?.name || ctx?.description || t('datapoints.detail.knxUnnamedGa')
+}
+
+function knxRoleLabel(role) {
+  return role === 'state_group_address' ? t('datapoints.detail.knxStateGa') : t('datapoints.detail.knxMainGa')
 }
 
 function coerceWriteValue(raw) {

@@ -13,9 +13,10 @@ import time
 import uuid
 from collections import deque
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from obs.adapters.base import AdapterBase
 from obs.adapters.message import providers as message_providers
@@ -23,13 +24,23 @@ from obs.adapters.message.providers.base import MessageSendResult
 from obs.adapters.registry import register
 from obs.core.event_bus import DataValueEvent
 from obs.core.json import json_dumps
+from obs.datetime_format import DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT, format_datetime
+from obs.db.database import get_db
+from obs.regional_format import (
+    DEFAULT_CURRENCY,
+    DEFAULT_REGION_FORMAT,
+    format_number,
+    is_finite_number,
+    resolve_region_format,
+)
 
 logger = logging.getLogger(__name__)
 
 MessageOperator = Literal["any", "=", "==", "<", "<=", ">", ">=", "!=", "contains", "contains not", "starts with", "ends with"]
+ArchiveStrategy = Literal["none", "send_only", "archive_only", "send_and_archive"]
 MAX_PENDING_EVENTS_PER_BINDING = 100
 _NO_PENDING_COALESCE = object()
-_PLACEHOLDER_PATTERN = re.compile("###(?:DP|DPU|DPN|DPI|TS)###")
+_PLACEHOLDER_PATTERN = re.compile("###(?:DP|DPU|DPN|DPI|TS|DATE|TIME)###")
 
 
 class ProviderTargetRef(BaseModel):
@@ -45,7 +56,7 @@ class MessageAdapterConfig(BaseModel):
     )
 
     @model_validator(mode="after")
-    def _validate_providers(self) -> "MessageAdapterConfig":
+    def _validate_providers(self) -> MessageAdapterConfig:
         for provider_type, provider_config in self.providers.items():
             provider = message_providers.get_provider(provider_type)
             if provider is None:
@@ -66,13 +77,19 @@ class MessageBindingConfig(BaseModel):
     send_on_change: bool = True
     cooldown_seconds: int = Field(default=0, ge=0)
     enabled: bool = True
+    archive_id: str | None = None
+    archive_strategy: ArchiveStrategy = "send_only"
 
     @model_validator(mode="after")
-    def _validate_targets(self) -> "MessageBindingConfig":
+    def _validate_targets(self) -> MessageBindingConfig:
         if not self.message.strip():
             raise ValueError("MESSAGE binding message must not be empty")
-        if self.enabled and not self.providers:
+        sends_notification = self.archive_strategy in {"send_only", "send_and_archive"}
+        archives_notification = self.archive_strategy in {"archive_only", "send_and_archive"}
+        if self.enabled and sends_notification and not self.providers:
             raise ValueError("MESSAGE binding requires at least one target")
+        if self.enabled and archives_notification and not self.archive_id:
+            raise ValueError("MESSAGE binding archive_id is required for archive strategies")
         seen_targets: set[tuple[str, str]] = set()
         for ref in self.providers:
             key = (ref.provider, ref.target)
@@ -127,6 +144,7 @@ def _values_equal(left: Any, right: Any) -> bool:
     try:
         return left == right
     except Exception:
+        logger.exception("MESSAGE: comparing binding values failed — treating as unequal")
         return False
 
 
@@ -198,21 +216,67 @@ def evaluate_condition(value: Any, operator: str, compare_value: Any) -> bool:
     return False
 
 
-def _format_value(value: Any) -> str:
+def _format_value(value: Any, region_format: str = "de-DE") -> str:
+    """Render a datapoint value for a human-readable message.
+
+    Numbers use the configured regional format so a German reader sees
+    ``1,05`` rather than the ambiguous ``1.05``; every other type — including
+    infinities and NaN, which have no regional form — keeps its locale-neutral
+    JSON representation.
+    """
     if isinstance(value, str):
         return value
+    if isinstance(value, bool):
+        return json_dumps(value)
+    if isinstance(value, (int, float)) and is_finite_number(value):
+        return format_number(value, region_format)
     return json_dumps(value)
 
 
-def render_message(template: str, *, value: Any, unit: str | None, name: str, datapoint_id: uuid.UUID, ts: datetime) -> str:
+def render_message(
+    template: str,
+    *,
+    value: Any,
+    unit: str | None,
+    name: str,
+    datapoint_id: uuid.UUID,
+    ts: datetime,
+    date_format: str = DEFAULT_DATE_FORMAT,
+    time_format: str = DEFAULT_TIME_FORMAT,
+    language: str = "de",
+    region_format: str = DEFAULT_REGION_FORMAT,
+    display_ts: datetime | None = None,
+) -> str:
+    display_ts = display_ts or ts
     replacements = {
-        "###DP###": _format_value(value),
+        "###DP###": _format_value(value, resolve_region_format(region_format, language)),
         "###DPU###": unit or "",
         "###DPN###": name,
         "###DPI###": str(datapoint_id),
         "###TS###": ts.isoformat(),
+        "###DATE###": format_datetime(display_ts, date_format, language),
+        "###TIME###": format_datetime(display_ts, time_format, language),
     }
     return _PLACEHOLDER_PATTERN.sub(lambda match: replacements[match.group(0)], template)
+
+
+async def _datetime_settings() -> dict[str, str]:
+    values = {
+        "timezone": "Europe/Zurich",
+        "date_format": DEFAULT_DATE_FORMAT,
+        "time_format": DEFAULT_TIME_FORMAT,
+        "language": "de",
+        "region_format": DEFAULT_REGION_FORMAT,
+        "currency": DEFAULT_CURRENCY,
+    }
+    try:
+        rows = await get_db().fetchall(
+            "SELECT key, value FROM app_settings WHERE key IN ('timezone', 'date_format', 'time_format', 'language', 'region_format', 'currency')"
+        )
+        values.update({row["key"]: row["value"] for row in rows})
+    except RuntimeError:
+        pass
+    return values
 
 
 @register
@@ -255,7 +319,7 @@ class MessageAdapter(AdapterBase):
                 continue
             try:
                 cfg = _binding_config(binding)
-            except Exception:
+            except (ValidationError, TypeError):
                 logger.warning("Invalid MESSAGE binding config for %s skipped", binding.id)
                 continue
             if not cfg.enabled:
@@ -280,8 +344,33 @@ class MessageAdapter(AdapterBase):
         )
         await self._handle_binding_event(binding, event, ignore_repetition=True)
 
+    async def send_notification(
+        self,
+        *,
+        message: str,
+        providers: list[dict[str, str] | ProviderTargetRef],
+        title: str | None = None,
+        priority: int | None = None,
+    ) -> list[MessageSendResult]:
+        """Send an already rendered notification through the shared provider path."""
+        refs = [ref if isinstance(ref, ProviderTargetRef) else ProviderTargetRef(**ref) for ref in providers]
+        cfg = MessageBindingConfig(message=message, providers=refs, title=title, priority=priority)
+        event = DataValueEvent(
+            datapoint_id=uuid.UUID(int=0),
+            value=message,
+            quality="good",
+            source_adapter=self.adapter_type,
+        )
+        return await self._send_to_targets(cfg, SimpleNamespace(id=uuid.uuid4()), event, message)
+
     async def _on_value_event(self, event: DataValueEvent) -> None:
         if event.quality != "good":
+            return
+        if getattr(event, "suppress_action_triggers", False) is True:
+            return
+        if getattr(event, "initialization", False) is True:
+            # Save-time seeding by the logic initialization pass (issue
+            # #1031) is not a value change — never notify on it.
             return
         for binding in self._binding_map.get(event.datapoint_id, []):
             await self._handle_binding_event(binding, event)
@@ -310,13 +399,26 @@ class MessageAdapter(AdapterBase):
                     return
 
         dp = _lookup_datapoint(event.datapoint_id)
+        app_settings = await _datetime_settings()
+        event_ts = event.ts if event.ts.tzinfo else event.ts.replace(tzinfo=UTC)
+        try:
+            from zoneinfo import ZoneInfo
+
+            display_ts = event_ts.astimezone(ZoneInfo(app_settings["timezone"]))
+        except (KeyError, ValueError):
+            display_ts = event_ts
         rendered = render_message(
             cfg.message,
             value=event.value,
             unit=getattr(dp, "unit", None),
             name=getattr(dp, "name", str(event.datapoint_id)),
             datapoint_id=event.datapoint_id,
-            ts=event.ts if event.ts.tzinfo else event.ts.replace(tzinfo=UTC),
+            ts=event_ts,
+            date_format=app_settings["date_format"],
+            time_format=app_settings["time_format"],
+            language=app_settings["language"],
+            region_format=app_settings.get("region_format", DEFAULT_REGION_FORMAT),
+            display_ts=display_ts,
         )
         reset_version = state.reset_version
         if state.in_flight and not ignore_repetition:
@@ -338,13 +440,22 @@ class MessageAdapter(AdapterBase):
         reset_version: int,
     ) -> None:
         try:
-            results = await self._send_to_targets(cfg, binding, event, rendered)
+            results = []
+            if cfg.archive_strategy in {"send_only", "send_and_archive"}:
+                results = await self._send_to_targets(cfg, binding, event, rendered)
         except Exception as exc:  # pragma: no cover - defensive guard for unexpected task errors
             logger.exception("MESSAGE send task failed unexpectedly")
             results = [MessageSendResult("message", "internal", False, str(exc))]
 
-        success = bool(results) and all(result.ok for result in results)
-        partial_success = bool(results) and any(result.ok for result in results)
+        archive_ok = True
+        if cfg.archive_strategy in {"archive_only", "send_and_archive"} and cfg.archive_id:
+            archive_ok = await self._archive_notification(cfg, binding, event, rendered, results)
+        no_op = cfg.archive_strategy == "none"
+        archive_only = cfg.archive_strategy == "archive_only"
+        provider_success = bool(results) and any(result.ok for result in results)
+        provider_all_ok = bool(results) and all(result.ok for result in results)
+        success = no_op or (archive_only and archive_ok) or (provider_all_ok and archive_ok)
+        partial_success = no_op or (archive_only and archive_ok) or provider_success
         if success or partial_success:
             state.last_sent_monotonic = time.monotonic()
             if state.reset_version == reset_version:
@@ -352,11 +463,12 @@ class MessageAdapter(AdapterBase):
                 state.last_value = event.value
 
         failures = [result for result in results if not result.ok]
-        if failures:
-            detail = f"MESSAGE provider failures: {len(failures)} target(s)"
-            await self._publish_status(True, detail, severity="warning", code="messageProviderFailures", params={"count": len(failures)})
-        elif results:
-            await self._publish_status(True, "MESSAGE sent", code="messageSent")
+        if archive_ok:
+            if failures:
+                detail = f"MESSAGE provider failures: {len(failures)} target(s)"
+                await self._publish_status(True, detail, severity="warning", code="messageProviderFailures", params={"count": len(failures)})
+            elif results:
+                await self._publish_status(True, "MESSAGE sent", code="messageSent")
 
         state.in_flight = False
         state.in_flight_key = _NO_PENDING_COALESCE
@@ -426,6 +538,40 @@ class MessageAdapter(AdapterBase):
                 results.append(MessageSendResult(ref.provider, ref.target, False, "send failed"))
         return results
 
+    async def _archive_notification(
+        self,
+        cfg: MessageBindingConfig,
+        binding: Any,
+        event: DataValueEvent,
+        rendered: str,
+        results: list[MessageSendResult],
+    ) -> bool:
+        try:
+            from obs.message_archive import get_message_archive_service
+
+            delivery_status = "archived"
+            if cfg.archive_strategy == "send_and_archive":
+                delivery_status = "sent" if results and all(result.ok for result in results) else "failed"
+            await get_message_archive_service().record(
+                cfg.archive_id or "notifications",
+                type="notification",
+                severity="info" if delivery_status in {"sent", "archived"} else "warning",
+                source=f"notification.binding.{binding.id}",
+                title=cfg.title or "",
+                message=rendered,
+                payload={
+                    "datapoint_id": str(event.datapoint_id),
+                    "binding_id": str(binding.id),
+                    "notification_providers": sorted({result.provider for result in results}) if results else [],
+                    "delivery_status": delivery_status,
+                },
+            )
+            return True
+        except Exception:
+            logger.exception("MESSAGE archive write failed")
+            await self._publish_status(True, "MESSAGE archive write failed", severity="warning", code="messageArchiveWriteFailed")
+            return False
+
 
 def _model_dump(value: Any) -> dict[str, Any]:
     if isinstance(value, BaseModel):
@@ -438,5 +584,5 @@ def _lookup_datapoint(datapoint_id: uuid.UUID) -> Any | None:
         from obs.core.registry import get_registry
 
         return get_registry().get(datapoint_id)
-    except Exception:
+    except RuntimeError:
         return None

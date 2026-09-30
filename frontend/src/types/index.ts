@@ -19,6 +19,11 @@ export interface VisuNode {
   updated_at: string
 }
 
+export type VisuNodeUpdate = Partial<VisuNode> & {
+  /** Wird zusammen mit dem Access-Level atomar gespeichert. */
+  usernames?: string[]
+}
+
 // ── PageConfig ────────────────────────────────────────────────────────────────
 
 export interface PageConfig {
@@ -42,6 +47,10 @@ export interface WidgetInstance {
   w: number
   h: number
   config: Record<string, unknown>
+}
+
+export interface WidgetRefInstance extends WidgetInstance {
+  source_page_readonly?: boolean
 }
 
 // ── DataPoint ─────────────────────────────────────────────────────────────────

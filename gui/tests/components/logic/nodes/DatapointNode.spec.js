@@ -66,11 +66,12 @@ describe('DatapointNode — datapoint_read', () => {
     expect(w.text()).not.toContain('⊘')
   })
 
-  it('shows debug band when data._dbg is set', async () => {
-    const w = await mountDp({ data: { _dbg: '42.5' } })
+  it('shows the compact debug band when data._dbg is set', async () => {
+    const w = await mountDp({ data: { _dbg: '42.5', _dbg_title: 'value=42.5' } })
     await flushPromises()
-    expect(w.find('[data-testid="debug-band"]').exists()).toBe(true)
-    expect(w.find('[data-testid="debug-band"]').text()).toBe('42.5')
+    const band = w.find('[data-testid="debug-band"]')
+    expect(band.text()).toBe('42.5')
+    expect(band.attributes('title')).toBe('value=42.5')
   })
 
   it('calls removeNodes on delete button click', async () => {

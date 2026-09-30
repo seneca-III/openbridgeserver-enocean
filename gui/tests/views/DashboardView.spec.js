@@ -65,6 +65,7 @@ async function mountDashboard({
     authApi:    { login: vi.fn(), me: vi.fn() },
     settingsApi: { get: vi.fn().mockResolvedValue({ data: {} }) },
     navLinksApi: { list: vi.fn().mockResolvedValue({ data: [] }) },
+    ringbufferApi: { stats: vi.fn().mockResolvedValue({ data: { enabled: false } }) },
   }))
   vi.doMock('@/stores/websocket', () => ({
     useWebSocketStore: () => ({
@@ -93,6 +94,7 @@ async function mountDashboard({
           template: '<div class="stat-card" :data-label="label" :data-value="String(value)" :data-color="color" />',
           props: ['label', 'value', 'icon', 'color'],
         },
+        RingBufferCard: { template: '<div class="ringbuffer-card-stub" />' },
       },
     },
   })
@@ -227,6 +229,20 @@ describe('DashboardView — live values list', () => {
   it('appends unit when dp.unit is set', async () => {
     const { wrapper } = await mountDashboard({ dps: [makeDP({ value: 22, unit: '°C' })] })
     expect(wrapper.text()).toContain('22 °C')
+  })
+
+  it('formats numeric values in the regional format and leaves strings alone (#1073)', async () => {
+    const { wrapper } = await mountDashboard({
+      dps: [makeDP({ id: 'dp-num', value: 1234.5, unit: 'W' }), makeDP({ id: 'dp-str', value: 'AN', unit: '' })],
+    })
+    expect(wrapper.text()).toContain('1.234,5 W')
+    expect(wrapper.text()).toContain('AN')
+  })
+
+  it('never renders a nonzero live value as zero (#1073)', async () => {
+    const { wrapper } = await mountDashboard({ dps: [makeDP({ id: 'dp-tiny', value: 1e-21, unit: 'A' })] })
+    expect(wrapper.text()).toContain('0,000000000000000000001 A')
+    expect(wrapper.text()).not.toMatch(/(^|\s)0 A/)
   })
 
   it('shows live value from ws.liveValues when available', async () => {

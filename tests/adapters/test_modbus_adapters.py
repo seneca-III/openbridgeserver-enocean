@@ -194,7 +194,7 @@ class TestModbusTcpConnect:
         assert status_event.connected is False
 
     async def test_disconnect_cancels_tasks_and_closes(self):
-        adapter, bus = _make_tcp()
+        adapter, _bus = _make_tcp()
         client = _make_client()
         adapter._client = client
         t = asyncio.create_task(asyncio.sleep(100))
@@ -264,7 +264,7 @@ class TestModbusRtuConnect:
         assert status_event.connected is False
 
     async def test_disconnect_cancels_tasks(self):
-        adapter, bus = _make_rtu()
+        adapter, _bus = _make_rtu()
         client = _make_client()
         adapter._client = client
         t = asyncio.create_task(asyncio.sleep(100))
@@ -1050,9 +1050,8 @@ class TestBindingsReloadedAwaitAndReconnect:
             old_task_done_when_new_started.append(old_task.done())
             return original_create_task(coro, **kwargs)
 
-        with patch.object(adapter, "_poll_loop", new=AsyncMock()):
-            with patch("asyncio.create_task", side_effect=recording_create_task):
-                await adapter._on_bindings_reloaded()
+        with patch.object(adapter, "_poll_loop", new=AsyncMock()), patch("asyncio.create_task", side_effect=recording_create_task):
+            await adapter._on_bindings_reloaded()
 
         assert old_task_done_when_new_started, "No new task was created"
         assert all(old_task_done_when_new_started), "New task was created before old task finished — gather() was not awaited properly."
@@ -1122,6 +1121,23 @@ class TestBindingsReloadedAwaitAndReconnect:
 
         for t in adapter._poll_tasks:
             t.cancel()
+
+    async def test_close_failure_on_previous_client_is_swallowed(self):
+        """If closing the previous client raises, reload must still proceed to a new client."""
+        adapter, _ = _make_tcp()
+        client = _make_client(connected=True)
+        client.close = MagicMock(side_effect=RuntimeError("close failed"))
+        new_client = _make_client(connected=True)
+        adapter._client = client
+        _install_client_factory(adapter, new_client)
+        adapter._initial_load_done = True
+        adapter._bindings = []
+
+        await adapter._on_bindings_reloaded()
+
+        client.close.assert_called_once()
+        new_client.connect.assert_awaited_once()
+        assert adapter._client is new_client
 
     async def test_no_reconnect_attempt_when_no_client(self):
         """If _client is None, no AttributeError must be raised."""
@@ -1219,6 +1235,7 @@ class TestPollLoopAutoReconnect:
         """
         adapter, bus = _make_tcp()
         call_count = 0
+        recovered_read = asyncio.Event()
 
         async def flaky_read(*args, **kwargs):
             nonlocal call_count
@@ -1226,6 +1243,8 @@ class TestPollLoopAutoReconnect:
             if call_count == 2:
                 adapter._client.connected = False
                 raise OSError("connection lost")
+            if call_count >= 3:
+                recovered_read.set()
             return _ok_response([77])
 
         async def mock_connect():
@@ -1238,12 +1257,14 @@ class TestPollLoopAutoReconnect:
 
         binding = make_binding(_HOLDING_CFG, direction="SOURCE")
         task = asyncio.create_task(adapter._poll_loop(binding, apply_jitter=False))
-        await asyncio.sleep(0.25)
-        task.cancel()
         try:
-            await task
-        except asyncio.CancelledError:
-            pass
+            await asyncio.wait_for(recovered_read.wait(), timeout=1.0)
+        finally:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         client.connect.assert_awaited()
         good_events = [c.args[0] for c in bus.publish.call_args_list if hasattr(c.args[0], "quality") and c.args[0].quality == "good"]
@@ -1532,10 +1553,7 @@ class TestDisconnectAwaitsGather:
         task_done_at_close = []
 
         async def slow_task():
-            try:
-                await asyncio.sleep(100)
-            except asyncio.CancelledError:
-                raise
+            await asyncio.sleep(100)
 
         task = asyncio.create_task(slow_task())
         adapter._poll_tasks.append(task)
@@ -1945,7 +1963,7 @@ class TestReconnectBackoff:
         With poll_interval=0.05s the backoff expires every cycle, producing one connect()
         call per cycle rather than one per backoff window.
         """
-        adapter, bus = _make_tcp()
+        adapter, _bus = _make_tcp()
         connect_calls = 0
 
         async def failing_connect():
@@ -2014,3 +2032,49 @@ class TestReconnectBackoff:
         adapter._bindings = [slow_binding, fast_binding]
 
         assert adapter._reconnect_backoff_delay(slow_binding.config["poll_interval"]) == 1.0
+
+    async def test_backoff_skips_binding_with_invalid_config(self):
+        """A binding whose config no longer validates must be skipped, not raise."""
+        adapter, _ = _make_tcp()
+        client = _make_client(connected=False)
+        client.connect = AsyncMock()
+        adapter._client = client
+
+        fast_binding = make_binding({**_HOLDING_CFG, "poll_interval": 1.0}, direction="SOURCE")
+        invalid_binding = make_binding({**_HOLDING_CFG, "poll_interval": "not-a-number"}, direction="SOURCE")
+        adapter._bindings = [fast_binding, invalid_binding]
+
+        assert adapter._reconnect_backoff_delay(fast_binding.config["poll_interval"]) == 1.0
+
+
+class TestModbusTcpSharedBus:
+    # shared_bus: instances on the same host:port share one I/O semaphore (PR#1045)
+
+    async def test_shared_bus_sem_is_shared_per_endpoint(self):
+        from obs.adapters.modbus_tcp.adapter import _shared_bus_sem
+
+        s1 = _shared_bus_sem("10.9.9.1", 502)
+        s2 = _shared_bus_sem("10.9.9.1", 502)
+        s3 = _shared_bus_sem("10.9.9.1", 5020)
+        assert s1 is s2  # same endpoint -> same semaphore
+        assert s1 is not s3  # different port -> different semaphore
+
+    async def test_shared_bus_true_shares_semaphore_across_instances(self):
+        from obs.adapters.modbus_tcp.adapter import _shared_bus_sem
+
+        cfg = {"host": "10.9.9.2", "port": 502, "timeout": 1.0, "shared_bus": True}
+        a1, _ = _make_tcp(dict(cfg))
+        a2, _ = _make_tcp(dict(cfg))
+        client = _make_client(connected=True)
+        fake_mod = MagicMock()
+        fake_mod.AsyncModbusTcpClient = MagicMock(return_value=client)
+        with patch.dict("sys.modules", {"pymodbus.client": fake_mod}):
+            await a1.connect()
+            await a2.connect()
+        assert a1._io_sem is a2._io_sem
+        assert a1._io_sem is _shared_bus_sem("10.9.9.2", 502)
+
+    def test_default_config_has_shared_bus_false(self):
+        from obs.adapters.modbus_tcp.adapter import ModbusTcpAdapterConfig
+
+        assert ModbusTcpAdapterConfig().shared_bus is False

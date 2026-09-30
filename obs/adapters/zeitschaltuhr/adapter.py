@@ -51,8 +51,12 @@ Binding-Konfiguration (1 Binding = 1 Schaltpunkt):
 
   ─── Ausgabe ─────────────────────────────────────────────────────────────────
   value:  Ausgabewert beim Schalten (default: "1")
-          Gültige Werte: "0"/"1", "true"/"false", "on"/"off", "ein"/"aus",
-          Ganzzahl, Dezimalzahl oder beliebiger String
+          Wird gegen den ``data_type`` des Ziel-Datenpunkts geparst (Issue #1008):
+            BOOLEAN            — "0"/"1", "true"/"false", "on"/"off", "ein"/"aus"
+            INTEGER / FLOAT    — Zahl (boolesche Literale werden zu 1/0)
+            STRING             — Wert wörtlich, keine Bool-/Zahl-Interpretation
+            DATE/TIME/DATETIME — ISO 8601 (z.B. "2026-12-24", "08:00:00")
+            UNKNOWN            — Heuristik: bool → int → float → str
 """
 
 from __future__ import annotations
@@ -336,7 +340,11 @@ class ZeitschaltuhrBindingConfig(BaseModel):
     # ── Ausgabe ───────────────────────────────────────────────────────────────
     value: str = Field(
         "1",
-        description=("Ausgabewert beim Schalten. Erlaubt: 0/1, true/false, on/off, ein/aus, Ganzzahl, Dezimalzahl oder String"),
+        description=(
+            "Ausgabewert beim Schalten — wird gegen den Objekttyp des Ziel-Datenpunkts geparst: "
+            "BOOLEAN 0/1, true/false, on/off, ein/aus · INTEGER/FLOAT Zahl · STRING wörtlich · "
+            "DATE/TIME/DATETIME ISO 8601"
+        ),
     )
 
 
@@ -489,9 +497,13 @@ class ZeitschaltuhrAdapter(AdapterBase):
         today = now.date()
 
         # Date window gate (DAILY / ANNUAL / HOLIDAY — checked before all other gates)
-        if cfg.date_window_enabled and cfg.date_window_from and cfg.date_window_to:
-            if not self._in_date_window(cfg.date_window_from, cfg.date_window_to, today):
-                return False
+        if (
+            cfg.date_window_enabled
+            and cfg.date_window_from
+            and cfg.date_window_to
+            and not self._in_date_window(cfg.date_window_from, cfg.date_window_to, today)
+        ):
+            return False
 
         # Feiertagsschaltuhr: fires on specific holidays only
         if cfg.timer_type == TimerType.HOLIDAY:
@@ -597,8 +609,8 @@ class ZeitschaltuhrAdapter(AdapterBase):
             return s.get({"sunrise": "sunrise", "sunset": "sunset", "solar_noon": "noon"}[ref.value])
         except ImportError:
             logger.warning("astral nicht installiert — Sonnenzeit-Berechnungen nicht verfügbar (pip install astral)")
-        except Exception as exc:
-            logger.warning("Sonnenzeit-Berechnung für %s fehlgeschlagen: %s", for_date, exc)
+        except Exception:
+            logger.exception("Sonnenzeit-Berechnung für %s fehlgeschlagen", for_date)
         return None
 
     def _get_solar_altitude_time(
@@ -631,13 +643,12 @@ class ZeitschaltuhrAdapter(AdapterBase):
             return result
         except ImportError:
             logger.warning("astral nicht installiert — Sonnenhöhenwinkel-Berechnung nicht verfügbar (pip install astral)")
-        except Exception as exc:
-            logger.warning(
-                "Sonnenhöhenwinkel-Berechnung für %s°/%s am %s fehlgeschlagen: %s",
+        except Exception:
+            logger.exception(
+                "Sonnenhöhenwinkel-Berechnung für %s°/%s am %s fehlgeschlagen",
                 altitude_deg,
                 direction.value,
                 for_date,
-                exc,
             )
         return None
 
@@ -645,28 +656,63 @@ class ZeitschaltuhrAdapter(AdapterBase):
     # Publish helper
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resolve_data_type(datapoint_id: Any) -> str:
+        """Liefert den ``data_type`` des Ziel-Datenpunkts (``UNKNOWN``, wenn nicht auflösbar)."""
+        try:
+            from obs.core.registry import get_registry
+
+            dp = get_registry().get(datapoint_id)
+        except RuntimeError:
+            return "UNKNOWN"
+        if dp is None:
+            return "UNKNOWN"
+        return getattr(dp, "data_type", None) or "UNKNOWN"
+
+    async def _report_value_mismatch(self, binding: Any, data_type: str, raw: str) -> None:
+        """Hinterlegt ein ``type_mismatch``-Diagnostic für einen nicht koerzierbaren Schaltwert."""
+        try:
+            from obs.core.registry import get_registry
+
+            registry = get_registry()
+        except RuntimeError:
+            return
+        reporter = getattr(registry, "report_type_mismatch", None)
+        if reporter is None:
+            return
+        await reporter(
+            binding.datapoint_id,
+            expected=data_type,
+            got="str",
+            source_adapter=self.adapter_type,
+            value=raw,
+        )
+
     async def _fire_binding(self, binding: Any, cfg: ZeitschaltuhrBindingConfig) -> None:
         from obs.core.event_bus import DataValueEvent
+        from obs.models.types import coerce_text_value_for_type
 
-        raw = cfg.value.strip()
-        if raw.lower() in ("true", "1", "on", "ein"):
-            value: Any = True
-        elif raw.lower() in ("false", "0", "off", "aus"):
-            value = False
-        else:
-            try:
-                value = int(raw)
-            except ValueError:
-                try:
-                    value = float(raw)
-                except ValueError:
-                    value = raw
+        data_type = self._resolve_data_type(binding.datapoint_id)
+        try:
+            value: Any = coerce_text_value_for_type(cfg.value, data_type)
+        except ValueError as exc:
+            logger.warning(
+                "Zeitschaltuhr '%s': Binding %s — Schaltwert %r passt nicht zum Objekttyp %s: %s",
+                self._instance_name,
+                binding.id,
+                cfg.value,
+                data_type,
+                exc,
+            )
+            await self._report_value_mismatch(binding, data_type, cfg.value)
+            return
 
         logger.debug(
-            "Zeitschaltuhr '%s': Binding %s → %r",
+            "Zeitschaltuhr '%s': Binding %s → %r (%s)",
             self._instance_name,
             binding.id,
             value,
+            data_type,
         )
         await self._bus.publish(
             DataValueEvent(
@@ -725,7 +771,7 @@ class ZeitschaltuhrAdapter(AdapterBase):
     # ------------------------------------------------------------------
 
     def _build_holidays(self) -> dict[date, str]:
-        year = datetime.now().year
+        year = datetime.now(self._tz).year
         years = [year, year + 1]
         result: dict[date, str] = {}
 
@@ -742,7 +788,7 @@ class ZeitschaltuhrAdapter(AdapterBase):
                 hol_obj = hol_lib.country_holidays(self._cfg.holiday_country, **kwargs)
             except Exception:
                 kwargs.pop("language", None)
-                logger.debug(
+                logger.exception(
                     "Sprache '%s' für Land '%s' nicht unterstützt — nutze Standardsprache",
                     self._cfg.holiday_language,
                     self._cfg.holiday_country,
@@ -751,15 +797,15 @@ class ZeitschaltuhrAdapter(AdapterBase):
             result.update(dict(hol_obj.items()))
         except ImportError:
             logger.info("holidays-Bibliothek nicht installiert — Feiertagserkennung deaktiviert (pip install holidays)")
-        except Exception as exc:
-            logger.warning("Feiertagskalender konnte nicht geladen werden: %s", exc)
+        except Exception:
+            logger.exception("Feiertagskalender konnte nicht geladen werden")
 
         # Custom holidays (merged on top — custom entries override library names for same date)
         for y in years:
             for entry in self._cfg.custom_holidays:
                 try:
                     result.update(self._parse_custom_holiday_entry(entry, y))
-                except Exception as exc:
+                except ValueError as exc:
                     logger.warning("Benutzerdefinierter Feiertag '%s' konnte nicht geparst werden: %s", entry, exc)
 
         return result
@@ -879,7 +925,7 @@ class ZeitschaltuhrAdapter(AdapterBase):
                     if h["name"].upper() == name_up:
                         return date.fromisoformat(h["date"]) + timedelta(days=offset)
             except Exception:
-                pass
+                logger.exception("Feiertagssuche für '%s' (Jahr %s) fehlgeschlagen", name_up, year)
             return None
 
         logger.debug("Unbekanntes Datum-Fenster-Ausdruck: '%s'", expr_s)
@@ -899,9 +945,7 @@ class ZeitschaltuhrAdapter(AdapterBase):
         if d_to_next is not None and d_from <= today <= d_to_next:
             return True
         d_from_prev = self._parse_date_expression(from_expr, year - 1)
-        if d_from_prev is not None and d_from_prev <= today <= d_to:
-            return True
-        return False
+        return bool(d_from_prev is not None and d_from_prev <= today <= d_to)
 
     def get_holidays_for_year(self, year: int) -> list[dict]:
         """Returns all holidays for the given year as a date-sorted list of {date, name} dicts."""
@@ -918,17 +962,22 @@ class ZeitschaltuhrAdapter(AdapterBase):
                 hol_obj = hol_lib.country_holidays(self._cfg.holiday_country, **kwargs)
             except Exception:
                 kwargs.pop("language", None)
+                logger.exception(
+                    "Sprache '%s' für Land '%s' nicht unterstützt — nutze Standardsprache",
+                    self._cfg.holiday_language,
+                    self._cfg.holiday_country,
+                )
                 hol_obj = hol_lib.country_holidays(self._cfg.holiday_country, **kwargs)
             result.update(dict(hol_obj.items()))
         except ImportError:
             pass
-        except Exception as exc:
-            logger.warning("Feiertagskalender konnte nicht geladen werden: %s", exc)
+        except Exception:
+            logger.exception("Feiertagskalender konnte nicht geladen werden")
 
         for entry in self._cfg.custom_holidays:
             try:
                 result.update(self._parse_custom_holiday_entry(entry, year))
-            except Exception:
+            except ValueError:
                 pass
 
         return [{"date": d.isoformat(), "name": n} for d, n in sorted(result.items())]
@@ -939,7 +988,7 @@ class ZeitschaltuhrAdapter(AdapterBase):
     def _holiday_name(self, d: date) -> str:
         try:
             return self._hol.get(d, "")
-        except Exception:
+        except TypeError:
             return ""
 
     def _parse_vacation_period(self, n: int) -> tuple[date | None, date | None]:
@@ -977,11 +1026,11 @@ class ZeitschaltuhrAdapter(AdapterBase):
                 if row:
                     tz_name = row["value"]
             except Exception:
-                pass
+                logger.exception("Zeitzone konnte nicht aus app_settings gelesen werden")
         if not tz_name:
             tz_name = "UTC"
         try:
             return zoneinfo.ZoneInfo(tz_name)
-        except Exception:
+        except (ValueError, zoneinfo.ZoneInfoNotFoundError):
             logger.warning("Zeitzone '%s' unbekannt — nutze UTC", tz_name)
             return UTC

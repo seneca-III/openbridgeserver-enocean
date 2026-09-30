@@ -1,11 +1,10 @@
 import { test, expect } from '@playwright/test'
-import { apiPost, apiPut, apiGet, apiDelete, getToken } from '../helpers'
+import { apiPost, apiPut, apiGet, apiDelete, getToken, openLogicGraph } from '../helpers'
 
 
 /**
  * End-to-end test: Create a logic graph with a const_value node via API,
- * open it in the GUI, enable debug mode, run it, and verify the debug-band
- * shows a value (not the default "—").
+ * open it in the GUI, enable debug mode, run it, and verify the inspector.
  */
 test('Logic-Editor Debug-Modus zeigt Wert nach Ausführen', async ({ page }) => {
   // 1. Create a graph with one const_value node via API
@@ -37,11 +36,11 @@ test('Logic-Editor Debug-Modus zeigt Wert nach Ausführen', async ({ page }) => 
     await page.waitForLoadState('networkidle')
 
     // 3. Select the graph from the dropdown
-    await page.selectOption('[data-testid="select-graph"]', graphId)
+    await openLogicGraph(page, graphId)
 
     // 4. Wait for the canvas to render the node (VueFlow + API load takes a moment)
     await page.waitForTimeout(1_000)
-    await expect(page.locator('[data-testid="debug-band"]').first()).toBeHidden({ timeout: 5_000 })
+    await expect(page.locator('[data-testid="debug-inspector"]')).toBeHidden({ timeout: 5_000 })
 
     // 5. Enable debug mode
     await page.click('[data-testid="btn-debug"]')
@@ -49,13 +48,11 @@ test('Logic-Editor Debug-Modus zeigt Wert nach Ausführen', async ({ page }) => 
     // 6. Run the graph
     await page.click('[data-testid="btn-run"]')
 
-    // 7. The debug-band must appear and show a value (not "—")
-    //    runGraph() calls POST /api/v1/logic/graphs/{id}/run → Vue reactivity update; allow up to 8 s
-    const debugBand = page.locator('[data-testid="debug-band"]').first()
-    await expect(debugBand).toBeVisible({ timeout: 8_000 })
-    const text = await debugBand.textContent()
-    expect(text?.trim()).not.toBe('—')
-    expect(text?.trim()).not.toBe('')
+    // 7. Select the node and verify its output in the dedicated inspector.
+    await page.locator('.vue-flow__node[data-id="node-1"]').click()
+    const inspector = page.locator('[data-testid="debug-inspector"]')
+    await expect(inspector).toBeVisible({ timeout: 8_000 })
+    await expect(inspector).toContainText('42')
   } finally {
     await apiDelete(`/api/v1/logic/graphs/${graphId}`)
   }
@@ -88,16 +85,14 @@ test('AND-Gate mit 3 Eingängen (input_count=3) zeigt true wenn alle Eingänge t
   try {
     await page.goto('/logic')
     await page.waitForLoadState('networkidle')
-    await page.selectOption('[data-testid="select-graph"]', graphId)
+    await openLogicGraph(page, graphId)
     await page.waitForTimeout(1_000)
     await page.click('[data-testid="btn-debug"]')
     await page.click('[data-testid="btn-run"]')
-    // Verify the AND gate's debug band shows a truthy result
-    const debugBands = page.locator('[data-testid="debug-band"]')
-    await expect(debugBands.first()).toBeVisible({ timeout: 8_000 })
-    // At least one debug band must be visible (graph ran successfully)
-    const count = await debugBands.count()
-    expect(count).toBeGreaterThan(0)
+    await page.locator('.vue-flow__node[data-id="g"]').click()
+    const inspector = page.locator('[data-testid="debug-inspector"]')
+    await expect(inspector).toBeVisible({ timeout: 8_000 })
+    await expect(inspector).toContainText('true')
   } finally {
     await apiDelete(`/api/v1/logic/graphs/${graphId}`)
   }
@@ -696,7 +691,7 @@ test('api_client Config-Panel zeigt Auth-Felder korrekt an', async ({ page }) =>
   try {
     await page.goto('/logic')
     await page.waitForLoadState('networkidle')
-    await page.selectOption('[data-testid="select-graph"]', graphId)
+    await openLogicGraph(page, graphId)
     await page.waitForTimeout(1_500)
 
     // Click on the node to open the config panel
@@ -916,7 +911,7 @@ test('json_extractor Config-Panel zeigt Preview-Bereich und Pfad-Eingabe', async
   try {
     await page.goto('/logic')
     await page.waitForLoadState('networkidle')
-    await page.selectOption('[data-testid="select-graph"]', graphId)
+    await openLogicGraph(page, graphId)
     await page.waitForTimeout(1_500)
 
     // Click on the node to open the config panel
@@ -951,7 +946,7 @@ test('Logikblatt-Toggle: Button zeigt Aktiv-Status und deaktiviert das Blatt', a
   try {
     await page.goto('/logic')
     await page.waitForLoadState('networkidle')
-    await page.selectOption('[data-testid="select-graph"]', graphId)
+    await openLogicGraph(page, graphId)
     await page.waitForTimeout(500)
 
     // Initially the graph is active — button must show "Aktiv"
@@ -966,9 +961,18 @@ test('Logikblatt-Toggle: Button zeigt Aktiv-Status und deaktiviert das Blatt', a
     // Button must now show "Deaktiviert"
     await expect(toggleBtn).toContainText('Deaktiviert')
 
-    // Dropdown entry must show "(deaktiviert)" suffix
-    const option = page.locator(`[data-testid="select-graph"] option[value="${graphId}"]`)
+    // Graph-picker entry must show "(deaktiviert)" suffix. The graph is
+    // already open, so the picker auto-navigates straight into "Nicht
+    // zugeordnet" (#1233 follow-up) instead of showing the root folder
+    // list — only click the folder if it's actually the one shown.
+    await page.click('[data-testid="btn-open-graph-picker"]')
+    await page.waitForSelector('[data-testid="picker-unassigned"], [data-testid="crumb-unassigned"]')
+    if (await page.locator('[data-testid="picker-unassigned"]').count()) {
+      await page.click('[data-testid="picker-unassigned"]')
+    }
+    const option = page.locator(`[data-testid="picker-graph-${graphId}"]`)
     await expect(option).toContainText('(deaktiviert)')
+    await option.click() // re-select the same (already active) graph to close the picker
 
     // Click again to re-activate
     await toggleBtn.click()
@@ -999,7 +1003,7 @@ test('Deaktiviertes Logikblatt: Ausführen-Button ist disabled und Kanten sind g
   try {
     await page.goto('/logic')
     await page.waitForLoadState('networkidle')
-    await page.selectOption('[data-testid="select-graph"]', graphId)
+    await openLogicGraph(page, graphId)
     await page.waitForTimeout(800)
 
     // Ausführen-Button muss disabled sein
@@ -1024,9 +1028,9 @@ test('Logikblatt-Bezeichnung: Toolbar und Modals verwenden "Logikblatt" statt "G
   await page.goto('/logic')
   await page.waitForLoadState('networkidle')
 
-  // Dropdown placeholder
-  const select = page.locator('[data-testid="select-graph"]')
-  await expect(select).toContainText('Logikblatt wählen')
+  // Graph-picker button placeholder
+  const openBtn = page.locator('[data-testid="btn-open-graph-picker"]')
+  await expect(openBtn).toContainText('Logikblatt wählen')
 
   // Empty-canvas hint
   await expect(page.getByText('Logikblatt wählen oder neu erstellen')).toBeVisible({ timeout: 5_000 })

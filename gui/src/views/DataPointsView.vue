@@ -7,6 +7,7 @@
         <h2 class="text-xl font-bold text-slate-800 dark:text-slate-100">{{ $t('datapoints.title') }}</h2>
         <p class="text-sm text-slate-500 mt-0.5">{{ $t('datapoints.subtitle', { count: store.total }) }}</p>
       </div>
+      <HelpButton help-id="datapoints-list" />
       <button v-if="auth.isAdmin" @click="openCreate" class="btn-primary" data-testid="btn-new-datapoint">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
@@ -241,19 +242,25 @@
         </div>
 
         <!-- Aktive Filter: Alle zurücksetzen -->
-        <button v-if="hasActiveFilters" @click="clearAllFilters"
-          class="text-xs text-slate-500 hover:text-red-500 dark:hover:text-red-400 transition-colors ml-auto flex items-center gap-1"
-          data-testid="btn-clear-filters">
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-          </svg>
-          {{ $t('datapoints.clearAllFilters') }}
-        </button>
+        <div class="ml-auto flex items-center gap-2">
+          <button v-if="hasActiveFilters" @click="clearAllFilters"
+            class="text-xs text-slate-500 hover:text-red-500 dark:hover:text-red-400 transition-colors flex items-center gap-1"
+            data-testid="btn-clear-filters">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+            </svg>
+            {{ $t('datapoints.clearAllFilters') }}
+          </button>
+          <HelpButton help-id="datapoints-filters" />
+        </div>
       </div>
     </div>
 
     <!-- Tabelle -->
     <div class="card overflow-hidden">
+      <div class="flex justify-end px-4 pt-3">
+        <HelpButton help-id="datapoints-table" />
+      </div>
       <div v-if="store.loading && !store.items.length" class="flex justify-center py-12">
         <Spinner size="lg" />
       </div>
@@ -367,6 +374,17 @@
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
                     </svg>
                   </button>
+                  <button
+                    v-if="auth.isAdmin"
+                    @click="openDuplicate(dp)"
+                    class="btn-icon"
+                    :title="$t('datapoints.duplicate.action')"
+                    :data-testid="`btn-duplicate-${dp.id}`"
+                  >
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 8h11v11H8zM5 16H4a1 1 0 01-1-1V4a1 1 0 011-1h11a1 1 0 011 1v1"/>
+                    </svg>
+                  </button>
                   <button v-if="auth.isAdmin" @click="confirmDelete(dp)" class="btn-icon text-red-400" :title="$t('common.delete')">
                     <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
@@ -397,7 +415,47 @@
 
     <!-- Create / Edit Modal -->
     <Modal v-model="showForm" :title="editTarget ? $t('datapoints.form.editTitle') : $t('datapoints.createModal')">
+      <template #header-actions>
+        <HelpButton help-id="datapoints-form" />
+      </template>
       <DataPointForm :initial="editTarget" :datatypes="store.datatypes" :save-handler="onSave" @cancel="showForm = false" />
+    </Modal>
+
+    <!-- Duplicate modal -->
+    <Modal v-model="showDuplicate" :title="$t('datapoints.duplicate.title')" :dismissible="!duplicateSaving">
+      <form class="space-y-4" @submit.prevent="doDuplicate">
+        <p class="text-sm text-slate-500 dark:text-slate-400">
+          {{ $t('datapoints.duplicate.hint') }}
+        </p>
+        <div>
+          <label for="duplicate-datapoint-name" class="block text-sm font-medium text-slate-700 dark:text-slate-200 mb-1">
+            {{ $t('datapoints.form.name') }}
+          </label>
+          <input
+            id="duplicate-datapoint-name"
+            v-model="duplicateName"
+            class="input w-full"
+            maxlength="255"
+            required
+            autofocus
+            data-testid="input-duplicate-name"
+          />
+        </div>
+        <p v-if="duplicateError" class="text-sm text-red-500" data-testid="duplicate-error">{{ duplicateError }}</p>
+        <div class="flex justify-end gap-2">
+          <button type="button" class="btn-secondary" :disabled="duplicateSaving" @click="showDuplicate = false">
+            {{ $t('common.cancel') }}
+          </button>
+          <button
+            type="submit"
+            class="btn-primary"
+            :disabled="duplicateSaving || !duplicateName.trim()"
+            data-testid="confirm-duplicate"
+          >
+            {{ duplicateSaving ? $t('datapoints.duplicate.saving') : $t('datapoints.duplicate.action') }}
+          </button>
+        </div>
+      </form>
     </Modal>
 
     <!-- Delete confirm -->
@@ -414,10 +472,12 @@ import { useI18n } from 'vue-i18n'
 import { useDatapointStore } from '@/stores/datapoints'
 import { useAuthStore } from '@/stores/auth'
 import { useWebSocketStore } from '@/stores/websocket'
+import { useRegionalFormat } from '@/composables/useRegionalFormat'
 import { hierarchyApi } from '@/api/client'
 import Badge         from '@/components/ui/Badge.vue'
 import Spinner       from '@/components/ui/Spinner.vue'
 import Modal         from '@/components/ui/Modal.vue'
+import HelpButton    from '@/components/ui/HelpButton.vue'
 import PathLabel     from '@/components/ui/PathLabel.vue'
 import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
 import AdapterCombobox from '@/components/ui/AdapterCombobox.vue'
@@ -444,12 +504,18 @@ const { t } = useI18n()
 const store = useDatapointStore()
 const auth  = useAuthStore()
 const ws    = useWebSocketStore()
+const { fmtNumber } = useRegionalFormat()
 
 const filters      = ref({ q: '', tags: [], adapters: [], quality: '', type: '', node_ids: [], tree_ids: [] })
 const showForm     = ref(false)
 const showConfirm  = ref(false)
+const showDuplicate = ref(false)
 const editTarget   = ref(null)
 const deleteTarget = ref(null)
+const duplicateTarget = ref(null)
+const duplicateName = ref('')
+const duplicateSaving = ref(false)
+const duplicateError = ref('')
 const sentinelEl   = ref(null)
 const nodeFilterRef = ref(null)
 const tagFilterRef  = ref(null)
@@ -743,12 +809,33 @@ function openEdit(dp) {
   editTarget.value = dp
   showForm.value = true
 }
+function openDuplicate(dp) {
+  if (!auth.isAdmin) return
+  duplicateTarget.value = dp
+  duplicateName.value = Array.from(t('datapoints.duplicate.defaultName', { name: dp.name })).slice(0, 255).join('')
+  duplicateError.value = ''
+  showDuplicate.value = true
+}
 
 async function onSave(payload) {
   if (!auth.isAdmin) return
   if (editTarget.value) await store.update(editTarget.value.id, payload)
   else await store.create(payload)
   showForm.value = false
+}
+
+async function doDuplicate() {
+  if (!auth.isAdmin || !duplicateTarget.value || !duplicateName.value.trim()) return
+  duplicateSaving.value = true
+  duplicateError.value = ''
+  try {
+    await store.duplicate(duplicateTarget.value.id, duplicateName.value.trim())
+    showDuplicate.value = false
+  } catch (error) {
+    duplicateError.value = error.response?.data?.detail || t('datapoints.duplicate.error')
+  } finally {
+    duplicateSaving.value = false
+  }
 }
 
 function confirmDelete(dp) {
@@ -786,9 +873,11 @@ function isAncestorSelected(ref) {
 // --------------------------------------------------------------------------
 
 function liveValue(dp) {
+  // Display only — numbers use the configured regional format (issue #1073).
   const v = ws.liveValues[dp.id]?.value ?? dp.value
   if (v === null || v === undefined) return '—'
-  return dp.unit ? `${v} ${dp.unit}` : String(v)
+  const text = typeof v === 'number' && Number.isFinite(v) ? fmtNumber(v) : String(v)
+  return dp.unit ? `${text} ${dp.unit}` : text
 }
 function liveQuality(dp) { return ws.liveValues[dp.id]?.quality ?? dp.quality }
 function qualityVariant(q) {

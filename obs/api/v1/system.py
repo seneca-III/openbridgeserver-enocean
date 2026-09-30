@@ -4,6 +4,7 @@ GET    /api/v1/system/health           liveness check (no auth required)
 GET    /api/v1/system/adapters         detailed adapter instances + binding stats
 GET    /api/v1/system/datatypes        all registered DataTypes
 GET    /api/v1/system/settings         read app settings (timezone, …)
+GET    /api/v1/system/display-settings display formatting settings (public, used by the Visu)
 PUT    /api/v1/system/settings         update app settings
 GET    /api/v1/system/history/settings read history backend configuration
 PUT    /api/v1/system/history/settings update history backend configuration
@@ -19,6 +20,7 @@ PUT    /api/v1/system/log-level        change log level at runtime (admin only)
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import UTC, datetime
 
@@ -28,11 +30,24 @@ from pydantic import BaseModel, Field
 
 from obs import __version__
 from obs.adapters import registry as adapter_registry
-from obs.api.audit import AuditLogWriter, build_audit_context
+from obs.api.audit import AuditLogWriter, AuditOutcome, build_audit_context
 from obs.api.auth import get_admin_user, get_current_user
 from obs.api.v1.redaction import REDACTED, redact_sensitive_fields
+from obs.datetime_format import DEFAULT_DATE_FORMAT, DEFAULT_TIME_FORMAT, validate_datetime_setting
 from obs.db.database import Database, get_db
 from obs.models.types import DataTypeRegistry
+from obs.regional_format import (
+    DEFAULT_CURRENCY,
+    DEFAULT_REGION_FORMAT,
+    REGIONAL_SETTING_KEYS,
+    SUPPORTED_CURRENCIES,
+    SUPPORTED_REGION_FORMATS,
+    resolve_currency,
+    resolve_region_format,
+    validate_regional_setting,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["system"])
 
@@ -67,10 +82,39 @@ class DataTypeOut(BaseModel):
 
 class AppSettingsOut(BaseModel):
     timezone: str
+    date_format: str
+    time_format: str
+    language: str
+    region_format: str = DEFAULT_REGION_FORMAT
+    currency: str = DEFAULT_CURRENCY
 
 
 class AppSettingsIn(BaseModel):
+    timezone: str | None = None
+    date_format: str | None = None
+    time_format: str | None = None
+    language: str | None = None
+    region_format: str | None = None
+    currency: str | None = None
+
+
+class DisplaySettingsOut(BaseModel):
+    """Public, read-only display formatting settings.
+
+    Consumed by the Visu SPA, which is reachable without an admin login, and by
+    the Admin GUI to build the regional-format/currency option lists.
+    """
+
+    language: str
     timezone: str
+    date_format: str
+    time_format: str
+    region_format: str
+    currency: str
+    resolved_region_format: str
+    resolved_currency: str
+    supported_region_formats: list[str]
+    supported_currencies: list[str]
 
 
 class HistorySettingsOut(BaseModel):
@@ -179,7 +223,7 @@ async def adapters_detail(
     """Alle laufenden Adapter-Instanzen mit Status."""
     all_instances = adapter_registry.get_all_instances()
     result = []
-    for instance_id, instance in all_instances.items():
+    for instance in all_instances.values():
         result.append(
             AdapterDetailOut(
                 id=instance._instance_id,
@@ -214,42 +258,115 @@ async def get_app_settings(
     _user: str = Depends(get_current_user),
 ) -> AppSettingsOut:
     """Read current application settings."""
-    row = await db.fetchone("SELECT value FROM app_settings WHERE key = 'timezone'")
-    return AppSettingsOut(timezone=row["value"] if row else "Europe/Zurich")
+    timezone_row = await db.fetchone("SELECT value FROM app_settings WHERE key = 'timezone'")
+    date_row = await db.fetchone("SELECT value FROM app_settings WHERE key = 'date_format'")
+    time_row = await db.fetchone("SELECT value FROM app_settings WHERE key = 'time_format'")
+    language_row = await db.fetchone("SELECT value FROM app_settings WHERE key = 'language'")
+    region_row = await db.fetchone("SELECT value FROM app_settings WHERE key = 'region_format'")
+    currency_row = await db.fetchone("SELECT value FROM app_settings WHERE key = 'currency'")
+    return AppSettingsOut(
+        timezone=timezone_row["value"] if timezone_row else "Europe/Zurich",
+        date_format=date_row["value"] if date_row else DEFAULT_DATE_FORMAT,
+        time_format=time_row["value"] if time_row else DEFAULT_TIME_FORMAT,
+        language=language_row["value"] if language_row else "de",
+        region_format=region_row["value"] if region_row else DEFAULT_REGION_FORMAT,
+        currency=currency_row["value"] if currency_row else DEFAULT_CURRENCY,
+    )
+
+
+@router.get("/display-settings", response_model=DisplaySettingsOut)
+async def get_display_settings(db: Database = Depends(get_db)) -> DisplaySettingsOut:
+    """Read the display formatting settings.
+
+    Deliberately unauthenticated: the Visu is served to anonymous and PIN-only
+    users, who still have to see numbers and dates in the configured regional
+    format. The response carries no sensitive data and is read-only.
+    """
+    settings = await get_app_settings(db=db, _user="")
+    region = resolve_region_format(settings.region_format, settings.language)
+    return DisplaySettingsOut(
+        language=settings.language,
+        timezone=settings.timezone,
+        date_format=settings.date_format,
+        time_format=settings.time_format,
+        region_format=settings.region_format,
+        currency=settings.currency,
+        resolved_region_format=region,
+        resolved_currency=resolve_currency(settings.currency, region),
+        supported_region_formats=list(SUPPORTED_REGION_FORMATS),
+        supported_currencies=list(SUPPORTED_CURRENCIES),
+    )
 
 
 @router.put("/settings", response_model=AppSettingsOut)
 async def update_app_settings(
     body: AppSettingsIn,
+    request: Request = None,  # type: ignore[assignment]
     db: Database = Depends(get_db),
     _user: str = Depends(get_current_user),
 ) -> AppSettingsOut:
     """Update application settings. Changes are applied immediately."""
-    # Validate timezone using zoneinfo
-    try:
-        from zoneinfo import ZoneInfo
-
-        ZoneInfo(body.timezone)
-    except Exception:
+    supplied_fields = body.model_fields_set
+    if not supplied_fields:
+        raise HTTPException(status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail="At least one setting must be supplied")
+    format_fields = {"date_format", "time_format"} & supplied_fields
+    if len(format_fields) == 1:
         raise HTTPException(
             status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail=f"Unknown timezone: {body.timezone!r}",
+            detail="Date and time formats must be supplied together",
         )
+    try:
+        for field in supplied_fields:
+            if field in REGIONAL_SETTING_KEYS:
+                validate_regional_setting(field, getattr(body, field))
+            else:
+                validate_datetime_setting(field, getattr(body, field))
+    except ValueError as exc:
+        raise HTTPException(status_code=http_status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
-    await db.execute_and_commit(
-        "INSERT OR REPLACE INTO app_settings (key, value) VALUES ('timezone', ?)",
-        (body.timezone,),
-    )
+    current_settings = await get_app_settings(db=db, _user=_user)
+    updated_config = {
+        field: value
+        for field in ("timezone", "date_format", "time_format", "language", "region_format", "currency")
+        if field in supplied_fields and (value := getattr(body, field)) is not None
+    }
+    before_config = {field: getattr(current_settings, field) for field in updated_config}
+    changed_fields = [field for field, value in updated_config.items() if before_config[field] != value]
+    placeholders = ", ".join("(?, ?)" for _ in updated_config)
+    parameters = tuple(item for pair in updated_config.items() for item in pair)
+    async with db.transaction():
+        await db.execute(f"INSERT OR REPLACE INTO app_settings (key, value) VALUES {placeholders}", parameters)
+        audit_writer = AuditLogWriter(db=db, context=build_audit_context(request=request, current_user=_user))
+        await audit_writer.write_contract(
+            "PUT",
+            "/api/v1/system/settings",
+            resource_id="global",
+            details={
+                "after": updated_config,
+                "before": before_config,
+                "changed_fields": changed_fields,
+            },
+            commit=False,
+        )
+    # Kept for Database-compatible test doubles; real transactions are already committed.
+    await db.commit()
 
     # Hot-reload LogicManager so astro_sun picks up new timezone immediately
     try:
         from obs.logic.manager import get_logic_manager
 
-        get_logic_manager().update_app_config({"timezone": body.timezone})
-    except Exception:
+        get_logic_manager().update_app_config(updated_config)
+    except RuntimeError:
         pass  # Manager may not be running — non-critical
 
-    return AppSettingsOut(timezone=body.timezone)
+    return AppSettingsOut(
+        timezone=updated_config.get("timezone", current_settings.timezone),
+        date_format=updated_config.get("date_format", current_settings.date_format),
+        time_format=updated_config.get("time_format", current_settings.time_format),
+        language=updated_config.get("language", current_settings.language),
+        region_format=updated_config.get("region_format", current_settings.region_format),
+        currency=updated_config.get("currency", current_settings.currency),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -359,44 +476,44 @@ async def update_history_settings(
             if data[field] == REDACTED:
                 data[field] = existing_cfg[field]
 
-    for k, v in data.items():
-        await db.execute_and_commit(
-            "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
-            (f"history.{k}", v),
-        )
-
-    # Hot-reload the history plugin
-    try:
-        from obs.history.factory import reload_history_plugin
-
-        await reload_history_plugin(db)
-    except Exception as exc:
-        raise HTTPException(
-            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Settings saved but plugin reload failed: {exc}",
-        )
+    async with db.transaction():
+        for k, v in data.items():
+            await db.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+                (f"history.{k}", v),
+            )
 
     audit_writer = AuditLogWriter(
         db=db,
         context=build_audit_context(request=request, current_user=_admin),
     )
-    await audit_writer.write(
-        action="system.history.settings.updated",
-        resource_type="history_settings",
+    audit_details = {
+        "plugin": body.plugin,
+        "default_window_hours": body.default_window_hours,
+        "influx_version": body.influx_version,
+    }
+    try:
+        from obs.history.factory import reload_history_plugin
+
+        await reload_history_plugin(db)
+    except Exception as exc:
+        logger.exception("History plugin reload failed")
+        await audit_writer.write_contract(
+            "PUT",
+            "/api/v1/system/history/settings",
+            resource_id="global",
+            details=audit_details,
+            outcome=AuditOutcome.FAILED,
+        )
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Settings saved but plugin reload failed: {exc}",
+        ) from exc
+    await audit_writer.write_contract(
+        "PUT",
+        "/api/v1/system/history/settings",
         resource_id="global",
-        details={
-            "plugin": body.plugin,
-            "default_window_hours": body.default_window_hours,
-            "influx_url": body.influx_url,
-            "influx_version": body.influx_version,
-            "influx_org": body.influx_org,
-            "influx_bucket": body.influx_bucket,
-            "influx_database": body.influx_database,
-            "influx_username": body.influx_username,
-            "has_influx_token": bool(body.influx_token),
-            "has_influx_password": bool(body.influx_password),
-            "has_timescale_dsn": bool(body.timescale_dsn),
-        },
+        details=audit_details,
     )
 
     payload = redact_sensitive_fields(
@@ -421,71 +538,69 @@ async def update_history_settings(
 @router.post("/history/test", response_model=HistoryTestResult)
 async def test_history_connection(
     body: HistorySettingsIn,
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
     db: Database = Depends(get_db),
 ) -> HistoryTestResult:
     """Test connectivity for the given history backend configuration. Admin only."""
     try:
         if body.plugin == "sqlite":
-            return HistoryTestResult(ok=True, message="SQLite is always available.")
+            result = HistoryTestResult(ok=True, message="SQLite is always available.")
+        else:
+            data: dict[str, str] = {
+                "influx_url": body.influx_url,
+                "influx_version": str(body.influx_version),
+                "influx_token": body.influx_token,
+                "influx_org": body.influx_org,
+                "influx_bucket": body.influx_bucket,
+                "influx_database": body.influx_database,
+                "influx_username": body.influx_username,
+                "influx_password": body.influx_password,
+                "timescale_dsn": body.timescale_dsn,
+            }
+            if any(data[field] == REDACTED for field in _HISTORY_SENSITIVE_FIELDS):
+                existing_cfg = await _read_history_cfg(db)
+                for field in _HISTORY_SENSITIVE_FIELDS:
+                    if data[field] == REDACTED:
+                        data[field] = existing_cfg[field]
 
-        data: dict[str, str] = {
-            "influx_url": body.influx_url,
-            "influx_version": str(body.influx_version),
-            "influx_token": body.influx_token,
-            "influx_org": body.influx_org,
-            "influx_bucket": body.influx_bucket,
-            "influx_database": body.influx_database,
-            "influx_username": body.influx_username,
-            "influx_password": body.influx_password,
-            "timescale_dsn": body.timescale_dsn,
-        }
-        if any(data[field] == REDACTED for field in _HISTORY_SENSITIVE_FIELDS):
-            existing_cfg = await _read_history_cfg(db)
-            for field in _HISTORY_SENSITIVE_FIELDS:
-                if data[field] == REDACTED:
-                    data[field] = existing_cfg[field]
+            if body.plugin == "influxdb":
+                from obs.history.influxdb_plugin import InfluxDBHistoryPlugin
 
-        if body.plugin == "influxdb":
-            from obs.history.influxdb_plugin import InfluxDBHistoryPlugin
-
-            plugin = InfluxDBHistoryPlugin(
-                url=data["influx_url"],
-                version=int(data["influx_version"]),
-                token=data["influx_token"],
-                org=data["influx_org"],
-                bucket=data["influx_bucket"],
-                database=data["influx_database"],
-                username=data["influx_username"],
-                password=data["influx_password"],
-            )
-            ok = await plugin.ping()
-            if ok:
-                return HistoryTestResult(
-                    ok=True,
-                    message=f"InfluxDB v{body.influx_version} reachable at {body.influx_url}",
+                plugin = InfluxDBHistoryPlugin(
+                    url=data["influx_url"],
+                    version=int(data["influx_version"]),
+                    token=data["influx_token"],
+                    org=data["influx_org"],
+                    bucket=data["influx_bucket"],
+                    database=data["influx_database"],
+                    username=data["influx_username"],
+                    password=data["influx_password"],
                 )
-            return HistoryTestResult(
-                ok=False,
-                message=f"InfluxDB v{body.influx_version} not reachable at {body.influx_url}",
-            )
+                ok = await plugin.ping()
+                result = HistoryTestResult(
+                    ok=ok,
+                    message=f"InfluxDB v{body.influx_version} {'reachable' if ok else 'not reachable'} at {body.influx_url}",
+                )
+            elif body.plugin == "timescaledb":
+                from obs.history.timescaledb_plugin import TimescaleDBHistoryPlugin
 
-        if body.plugin == "timescaledb":
-            from obs.history.timescaledb_plugin import TimescaleDBHistoryPlugin
-
-            plugin = TimescaleDBHistoryPlugin(dsn=data["timescale_dsn"])
-            ok = await plugin.ping()
-            if ok:
-                return HistoryTestResult(ok=True, message="PostgreSQL/TimescaleDB reachable.")
-            return HistoryTestResult(ok=False, message="PostgreSQL/TimescaleDB not reachable.")
-
-        return HistoryTestResult(ok=False, message=f"Unknown plugin: {body.plugin}")
-
-    except RuntimeError as exc:
-        # Missing optional dependency
-        return HistoryTestResult(ok=False, message=str(exc))
+                plugin = TimescaleDBHistoryPlugin(dsn=data["timescale_dsn"])
+                ok = await plugin.ping()
+                result = HistoryTestResult(
+                    ok=ok,
+                    message=f"PostgreSQL/TimescaleDB {'reachable' if ok else 'not reachable'}.",
+                )
+            else:
+                result = HistoryTestResult(ok=False, message=f"Unknown plugin: {body.plugin}")
     except Exception as exc:
-        return HistoryTestResult(ok=False, message=str(exc))
+        logger.exception("History connection test failed")
+        result = HistoryTestResult(ok=False, message=str(exc))
+
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
+    outcome = AuditOutcome.SUCCESS if result.ok else AuditOutcome.FAILED
+    await writer.write_contract("POST", "/api/v1/system/history/test", resource_id="global", outcome=outcome)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -516,24 +631,28 @@ async def list_nav_links(
 @router.post("/nav-links", response_model=NavLinkOut, status_code=201)
 async def create_nav_link(
     body: NavLinkIn,
+    request: Request = None,  # type: ignore[assignment]
     db: Database = Depends(get_db),
     _admin: str = Depends(get_admin_user),
 ) -> NavLinkOut:
     """Create a new custom navigation link. Admin only."""
     link_id = str(uuid.uuid4())
     now = datetime.now(UTC).isoformat()
-    await db.execute_and_commit(
-        "INSERT INTO nav_links (id, label, url, icon, sort_order, open_new_tab, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (
-            link_id,
-            body.label,
-            body.url,
-            body.icon,
-            body.sort_order,
-            int(body.open_new_tab),
-            now,
-        ),
-    )
+    async with db.transaction():
+        await db.execute_and_commit(
+            "INSERT INTO nav_links (id, label, url, icon, sort_order, open_new_tab, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                link_id,
+                body.label,
+                body.url,
+                body.icon,
+                body.sort_order,
+                int(body.open_new_tab),
+                now,
+            ),
+        )
+        writer = AuditLogWriter(db, build_audit_context(request, _admin))
+        await writer.write_contract("POST", "/api/v1/system/nav-links", resource_id=link_id, commit=False)
     return NavLinkOut(
         id=link_id,
         label=body.label,
@@ -548,6 +667,7 @@ async def create_nav_link(
 async def update_nav_link(
     link_id: str,
     body: NavLinkPatch,
+    request: Request = None,  # type: ignore[assignment]
     db: Database = Depends(get_db),
     _admin: str = Depends(get_admin_user),
 ) -> NavLinkOut:
@@ -565,10 +685,13 @@ async def update_nav_link(
     new_sort_order = body.sort_order if body.sort_order is not None else row["sort_order"]
     new_open_new_tab = body.open_new_tab if body.open_new_tab is not None else bool(row["open_new_tab"])
 
-    await db.execute_and_commit(
-        "UPDATE nav_links SET label=?, url=?, icon=?, sort_order=?, open_new_tab=? WHERE id=?",
-        (new_label, new_url, new_icon, new_sort_order, int(new_open_new_tab), link_id),
-    )
+    async with db.transaction():
+        await db.execute_and_commit(
+            "UPDATE nav_links SET label=?, url=?, icon=?, sort_order=?, open_new_tab=? WHERE id=?",
+            (new_label, new_url, new_icon, new_sort_order, int(new_open_new_tab), link_id),
+        )
+        writer = AuditLogWriter(db, build_audit_context(request, _admin))
+        await writer.write_contract("PATCH", "/api/v1/system/nav-links/{link_id}", resource_id=link_id, commit=False)
     return NavLinkOut(
         id=link_id,
         label=new_label,
@@ -582,6 +705,7 @@ async def update_nav_link(
 @router.delete("/nav-links/{link_id}", status_code=204)
 async def delete_nav_link(
     link_id: str,
+    request: Request = None,  # type: ignore[assignment]
     db: Database = Depends(get_db),
     _admin: str = Depends(get_admin_user),
 ) -> None:
@@ -589,7 +713,10 @@ async def delete_nav_link(
     row = await db.fetchone("SELECT id FROM nav_links WHERE id = ?", (link_id,))
     if row is None:
         raise HTTPException(status_code=http_status.HTTP_404_NOT_FOUND, detail="Link not found")
-    await db.execute_and_commit("DELETE FROM nav_links WHERE id = ?", (link_id,))
+    async with db.transaction():
+        await db.execute_and_commit("DELETE FROM nav_links WHERE id = ?", (link_id,))
+        writer = AuditLogWriter(db, build_audit_context(request, _admin))
+        await writer.write_contract("DELETE", "/api/v1/system/nav-links/{link_id}", resource_id=link_id, commit=False)
 
 
 # ---------------------------------------------------------------------------
@@ -637,7 +764,9 @@ async def get_log_level(
 @router.put("/log-level", status_code=204)
 async def set_log_level(
     body: LogLevelIn,
+    request: Request = None,  # type: ignore[assignment]
     _admin: str = Depends(get_admin_user),
+    db: Database = Depends(get_db),
 ) -> None:
     """Change the root log level at runtime without restarting. Admin only."""
     from obs.log_buffer import set_log_buffer_level
@@ -649,3 +778,5 @@ async def set_log_level(
             detail=f"level must be one of: {', '.join(sorted(_VALID_LOG_LEVELS))}",
         )
     set_log_buffer_level(lvl)
+    writer = AuditLogWriter(db, build_audit_context(request, _admin))
+    await writer.write_contract("PUT", "/api/v1/system/log-level", resource_id="global")

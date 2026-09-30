@@ -16,7 +16,6 @@ from fastapi import HTTPException
 
 from obs.security.url_targets import UrlTargetDecision
 
-
 # ---------------------------------------------------------------------------
 # Stubs
 # ---------------------------------------------------------------------------
@@ -287,9 +286,8 @@ class TestGetBackground:
 
     @pytest.mark.asyncio
     async def test_not_found_raises_404(self, tmp_path):
-        with patch("obs.api.v1.visu_backgrounds._backgrounds_dir", return_value=tmp_path):
-            with pytest.raises(HTTPException) as exc:
-                await get_background("nonexistent")
+        with patch("obs.api.v1.visu_backgrounds._backgrounds_dir", return_value=tmp_path), pytest.raises(HTTPException) as exc:
+            await get_background("nonexistent")
         assert exc.value.status_code == 404
 
     @pytest.mark.asyncio
@@ -329,10 +327,20 @@ class TestDeleteBackgrounds:
         from obs.api.v1.visu_backgrounds import DeleteRequest
 
         body = DeleteRequest(names=["../evil"])
-        with patch("obs.api.v1.visu_backgrounds._backgrounds_dir", return_value=tmp_path):
-            with pytest.raises(HTTPException) as exc:
-                await delete_backgrounds(body=body, _user="admin")
+        with patch("obs.api.v1.visu_backgrounds._backgrounds_dir", return_value=tmp_path), pytest.raises(HTTPException) as exc:
+            await delete_backgrounds(body=body, _user="admin")
         assert exc.value.status_code == 400
+
+    @pytest.mark.asyncio
+    async def test_late_invalid_name_does_not_partially_delete(self, tmp_path):
+        (tmp_path / "floor.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        from obs.api.v1.visu_backgrounds import DeleteRequest
+
+        body = DeleteRequest(names=["floor", "../evil"])
+        with patch("obs.api.v1.visu_backgrounds._backgrounds_dir", return_value=tmp_path), pytest.raises(HTTPException) as exc:
+            await delete_backgrounds(body=body, _user="admin")
+        assert exc.value.status_code == 400
+        assert (tmp_path / "floor.png").exists()
 
 
 # ===========================================================================
@@ -355,9 +363,8 @@ class TestImportBackgrounds:
         upload = AsyncMock()
         upload.filename = "test.png"
         upload.read = AsyncMock(return_value=b"not an image")
-        with patch("obs.api.v1.visu_backgrounds._backgrounds_dir", return_value=tmp_path):
-            with pytest.raises(HTTPException) as exc:
-                await import_backgrounds(files=[upload], _user="admin")
+        with patch("obs.api.v1.visu_backgrounds._backgrounds_dir", return_value=tmp_path), pytest.raises(HTTPException) as exc:
+            await import_backgrounds(files=[upload], _user="admin")
         assert exc.value.status_code == 422
 
     @pytest.mark.asyncio
@@ -383,6 +390,19 @@ class TestImportBackgrounds:
         assert result.skipped == 1
         assert result.imported == 0
 
+    @pytest.mark.asyncio
+    async def test_late_invalid_upload_does_not_partially_import(self, tmp_path):
+        png_bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50
+        valid = AsyncMock(filename="floor.png")
+        valid.read = AsyncMock(return_value=png_bytes)
+        invalid = AsyncMock(filename="broken.png")
+        invalid.read = AsyncMock(return_value=b"not an image")
+
+        with patch("obs.api.v1.visu_backgrounds._backgrounds_dir", return_value=tmp_path), pytest.raises(HTTPException) as exc:
+            await import_backgrounds(files=[valid, invalid], _user="admin")
+        assert exc.value.status_code == 422
+        assert list(tmp_path.iterdir()) == []
+
 
 # ===========================================================================
 # camera — _check_ssrf
@@ -401,23 +421,27 @@ class TestCheckSsrf:
 
     @pytest.mark.asyncio
     async def test_loopback_blocked(self):
-        with patch(
-            "obs.api.v1.camera.build_pinned_url_targets",
-            side_effect=ValueError("Blocked URL target"),
+        with (
+            patch(
+                "obs.api.v1.camera.build_pinned_url_targets",
+                side_effect=ValueError("Blocked URL target"),
+            ),
+            pytest.raises(HTTPException) as exc,
         ):
-            with pytest.raises(HTTPException) as exc:
-                await _check_ssrf("http://localhost/stream")
+            await _check_ssrf("http://localhost/stream")
         assert exc.value.status_code == 400
 
     @pytest.mark.asyncio
     async def test_metadata_blocked(self):
         # 169.254.169.254 is the cloud metadata address
-        with patch(
-            "obs.api.v1.camera.build_pinned_url_targets",
-            side_effect=ValueError("Blocked URL target"),
+        with (
+            patch(
+                "obs.api.v1.camera.build_pinned_url_targets",
+                side_effect=ValueError("Blocked URL target"),
+            ),
+            pytest.raises(HTTPException) as exc,
         ):
-            with pytest.raises(HTTPException) as exc:
-                await _check_ssrf("http://metadata.internal/")
+            await _check_ssrf("http://metadata.internal/")
         assert exc.value.status_code == 400
 
     @pytest.mark.asyncio
@@ -432,22 +456,26 @@ class TestCheckSsrf:
 
     @pytest.mark.asyncio
     async def test_dns_failure_raises_502(self):
-        with patch(
-            "obs.api.v1.camera.build_pinned_url_targets",
-            side_effect=ValueError("Hostname could not be resolved: no address"),
+        with (
+            patch(
+                "obs.api.v1.camera.build_pinned_url_targets",
+                side_effect=ValueError("Hostname could not be resolved: no address"),
+            ),
+            pytest.raises(HTTPException) as exc,
         ):
-            with pytest.raises(HTTPException) as exc:
-                await _check_ssrf("http://nonexistent.local/stream")
+            await _check_ssrf("http://nonexistent.local/stream")
         assert exc.value.status_code == 400
 
     @pytest.mark.asyncio
     async def test_ipv6_loopback_blocked(self):
-        with patch(
-            "obs.api.v1.camera.build_pinned_url_targets",
-            side_effect=ValueError("Blocked URL target"),
+        with (
+            patch(
+                "obs.api.v1.camera.build_pinned_url_targets",
+                side_effect=ValueError("Blocked URL target"),
+            ),
+            pytest.raises(HTTPException) as exc,
         ):
-            with pytest.raises(HTTPException) as exc:
-                await _check_ssrf("http://[::1]/stream")
+            await _check_ssrf("http://[::1]/stream")
         assert exc.value.status_code == 400
 
 
@@ -456,33 +484,70 @@ class TestCheckSsrf:
 # ===========================================================================
 
 
-from obs.api.v1.camera import _camera_auth
+from obs.api.v1.camera import _camera_auth, _page_config_contains_camera_url
 
 
 class TestCameraAuth:
     @pytest.mark.asyncio
-    async def test_missing_auth_raises_401(self):
+    async def test_missing_auth_returns_anonymous_identity(self):
         request = MagicMock()
         request.headers = {"Authorization": ""}
-        with pytest.raises(HTTPException) as exc:
-            await _camera_auth(request=request, _token="")
-        assert exc.value.status_code == 401
+        result = await _camera_auth(request=request, _token="")
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_bearer_header_accepted(self):
         request = MagicMock()
         request.headers = {"Authorization": "Bearer mytoken"}
+        db = MagicMock()
+        db.fetchone = AsyncMock(return_value={"exists": 1})
         with patch("obs.api.v1.camera.decode_token", return_value="testuser"):
-            result = await _camera_auth(request=request, _token="")
+            result = await _camera_auth(request=request, _token="", db=db)
         assert result == "testuser"
 
     @pytest.mark.asyncio
     async def test_query_token_accepted(self):
         request = MagicMock()
         request.headers = {}
+        db = MagicMock()
+        db.fetchone = AsyncMock(return_value={"exists": 1})
         with patch("obs.api.v1.camera.decode_token", return_value="testuser"):
-            result = await _camera_auth(request=request, _token="mytoken")
+            result = await _camera_auth(request=request, _token="mytoken", db=db)
         assert result == "testuser"
+
+    def test_page_scope_matches_legacy_api_key_auth_type(self):
+        page_config = {
+            "widgets": [
+                {
+                    "type": "kamera",
+                    "config": {
+                        "url": "http://cam.local/snapshot",
+                        "authType": "API-Key (Query-Parameter)",
+                        "apiKeyParam": "token",
+                        "apiKeyValue": "abc123",
+                    },
+                }
+            ]
+        }
+
+        assert _page_config_contains_camera_url(page_config, "http://cam.local/snapshot?token=abc123")
+
+    def test_page_scope_matches_legacy_basic_auth_type(self):
+        page_config = {
+            "widgets": [
+                {
+                    "type": "kamera",
+                    "config": {
+                        "url": "http://cam.local/snapshot",
+                        "authType": "Basic Auth (Benutzername / Passwort)",
+                        "username": "alice",
+                        "password": "secret",
+                    },
+                }
+            ]
+        }
+
+        assert _page_config_contains_camera_url(page_config, "http://cam.local/snapshot", "alice", "secret")
 
 
 # ===========================================================================
@@ -551,33 +616,26 @@ class TestResolveAccess:
     @pytest.mark.asyncio
     async def test_public_fallback_when_no_rows(self):
         db = MagicMock()
-        cursor = _FakeCursor(row=None)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=None)
         result = await _resolve_access(db, "node-1")
         assert result == "public"
 
     @pytest.mark.asyncio
     async def test_returns_explicit_access(self):
-        row = _Row({"access": "readonly", "parent_id": None})
+        row = _Row({"access_mode": "readonly", "parent_id": None})
         db = MagicMock()
-        cursor = _FakeCursor(row=row)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=row)
         result = await _resolve_access(db, "node-1")
         assert result == "readonly"
 
     @pytest.mark.asyncio
     async def test_traverses_parents(self):
         # Child has access=None, parent has access="user"
-        child_row = _Row({"access": None, "parent_id": "parent-1"})
-        parent_row = _Row({"access": "user", "parent_id": None})
-
-        cursors = iter([_FakeCursor(row=child_row), _FakeCursor(row=parent_row)])
-
-        def mock_execute(query, params=()):
-            return next(cursors)
+        child_row = _Row({"access_mode": None, "parent_id": "parent-1"})
+        parent_row = _Row({"access_mode": "user", "parent_id": None})
 
         db = MagicMock()
-        db.conn.execute = MagicMock(side_effect=mock_execute)
+        db.fetchone = AsyncMock(side_effect=[child_row, parent_row])
         result = await _resolve_access(db, "child-node")
         assert result == "user"
 
@@ -586,18 +644,16 @@ class TestResolveAccessWithNode:
     @pytest.mark.asyncio
     async def test_returns_public_none_when_no_rows(self):
         db = MagicMock()
-        cursor = _FakeCursor(row=None)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=None)
         access, node_id = await _resolve_access_with_node(db, "node-1")
         assert access == "public"
         assert node_id is None
 
     @pytest.mark.asyncio
     async def test_returns_defining_node_id(self):
-        row = _Row({"access": "protected", "parent_id": None})
+        row = _Row({"access_mode": "protected", "parent_id": None})
         db = MagicMock()
-        cursor = _FakeCursor(row=row)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=row)
         access, defining_id = await _resolve_access_with_node(db, "node-1")
         assert access == "protected"
         assert defining_id == "node-1"
@@ -615,8 +671,7 @@ class TestGetNodeOr404:
     @pytest.mark.asyncio
     async def test_raises_404_when_not_found(self):
         db = MagicMock()
-        cursor = _FakeCursor(row=None)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=None)
         with pytest.raises(HTTPException) as exc:
             await _get_node_or_404(db, "missing-id")
         assert exc.value.status_code == 404
@@ -638,8 +693,7 @@ class TestGetNodeOr404:
             }
         )
         db = MagicMock()
-        cursor = _FakeCursor(row=row)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=row)
         node = await _get_node_or_404(db, "node-1")
         assert node.id == "node-1"
         assert node.name == "Root"
@@ -657,8 +711,7 @@ class TestGetTree:
     @pytest.mark.asyncio
     async def test_empty_tree(self):
         db = MagicMock()
-        cursor = _FakeCursor(rows=[])
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchall = AsyncMock(return_value=[])
         result = await get_tree(db=db)
         assert result == []
 
@@ -682,8 +735,8 @@ class TestGetTree:
             for i in range(3)
         ]
         db = MagicMock()
-        cursor = _FakeCursor(rows=rows)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=None)
+        db.fetchall = AsyncMock(return_value=rows)
         result = await get_tree(db=db)
         assert len(result) == 3
 
@@ -700,8 +753,8 @@ class TestGetChildren:
     @pytest.mark.asyncio
     async def test_empty_children(self):
         db = MagicMock()
-        cursor = _FakeCursor(rows=[])
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=None)
+        db.fetchall = AsyncMock(return_value=[])
         result = await get_children(node_id="node-1", db=db)
         assert result == []
 
@@ -724,8 +777,8 @@ class TestGetChildren:
             )
         ]
         db = MagicMock()
-        cursor = _FakeCursor(rows=rows)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=None)
+        db.fetchall = AsyncMock(return_value=rows)
         result = await get_children(node_id="parent-1", db=db)
         assert len(result) == 1
         assert result[0].id == "child-1"
@@ -735,8 +788,7 @@ class TestGetBreadcrumb:
     @pytest.mark.asyncio
     async def test_empty_when_node_missing(self):
         db = MagicMock()
-        cursor = _FakeCursor(row=None)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=None)
         result = await get_breadcrumb(node_id="missing", db=db)
         assert result == []
 
@@ -757,8 +809,7 @@ class TestGetBreadcrumb:
             }
         )
         db = MagicMock()
-        cursor = _FakeCursor(row=row)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=row)
         result = await get_breadcrumb(node_id="node-1", db=db)
         assert len(result) == 1
         assert result[0].id == "node-1"
@@ -782,7 +833,8 @@ class TestGetPage:
                 "type": "PAGE",
                 "node_order": 0,
                 "icon": None,
-                "access": access,
+                "access": None,
+                "access_mode": access,
                 "page_config": json.dumps({"grid_cols": 12, "grid_row_height": 80, "background": None, "widgets": []}),
                 "created_at": "2024-01-01T00:00:00+00:00",
                 "updated_at": "2024-01-01T00:00:00+00:00",
@@ -800,14 +852,14 @@ class TestGetPage:
                 "node_order": 0,
                 "icon": None,
                 "access": None,
+                "access_mode": None,
                 "page_config": None,
                 "created_at": "2024-01-01T00:00:00+00:00",
                 "updated_at": "2024-01-01T00:00:00+00:00",
             }
         )
         db = MagicMock()
-        cursor = _FakeCursor(row=location_row)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=location_row)
         request = MagicMock()
         request.headers = {}
         with pytest.raises(HTTPException) as exc:
@@ -818,8 +870,7 @@ class TestGetPage:
     async def test_public_page_accessible_without_auth(self):
         row = self._make_page_node_row(access="public")
         db = MagicMock()
-        cursor = _FakeCursor(row=row)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=row)
         request = MagicMock()
         request.headers = {}
         pc = await get_page(node_id="page-1", request=request, db=db, user=None)
@@ -829,8 +880,7 @@ class TestGetPage:
     async def test_user_page_without_auth_raises_401(self):
         row = self._make_page_node_row(access="user")
         db = MagicMock()
-        cursor = _FakeCursor(row=row)
-        db.conn.execute = MagicMock(return_value=cursor)
+        db.fetchone = AsyncMock(return_value=row)
         request = MagicMock()
         request.headers = {}
         with pytest.raises(HTTPException) as exc:
@@ -1468,6 +1518,39 @@ class TestImportKnxprojFile:
         create_hierarchy.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_unavailable_trades_hierarchy_uses_localized_mode_name(self):
+        upload = AsyncMock()
+        upload.filename = "project.knxproj"
+        upload.read = AsyncMock(return_value=b"data")
+        record = SimpleNamespace(address="1/1/1", name="Light", description="", dpt="1.001", main_group_name="G1", mid_group_name="M1")
+        db = _make_db()
+        create_hierarchy = AsyncMock()
+
+        with (
+            patch("obs.api.v1.knxproj.parse_knxproj", return_value=[record]),
+            patch("obs.api.v1.knxproj.parse_knxproj_locations", return_value=([], [])),
+            patch("obs.api.v1.knxproj.parse_knxproj_trades", return_value=[]),
+            patch("obs.api.v1.knxproj.create_ets_hierarchy", create_hierarchy),
+        ):
+            result = await import_knxproj_file(
+                file=upload,
+                password=None,
+                adapter_name=None,
+                direction="SOURCE",
+                hierarchy_modes=["trades"],
+                hierarchy_auto_link=True,
+                _user="admin",
+                db=db,
+            )
+
+        assert result.hierarchies[0].status == "failed"
+        assert result.hierarchies[0].message == (
+            "Keine Gewerke-Daten aus dieser .knxproj importiert. Der Gewerke-Hierarchieimport wurde übersprungen."
+        )
+        assert "trades" not in result.hierarchies[0].message
+        create_hierarchy.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_invalid_hierarchy_mode_raises_400(self):
         upload = AsyncMock()
         upload.filename = "project.knxproj"
@@ -1545,9 +1628,8 @@ class TestImportGaCsvFile:
         upload.filename = "data.csv"
         upload.read = AsyncMock(return_value=b"garbage")
         db = _make_db()
-        with patch("obs.api.v1.knxproj.parse_ga_csv", side_effect=ValueError("bad csv")):
-            with pytest.raises(HTTPException) as exc:
-                await import_ga_csv_file(file=upload, adapter_name=None, direction="SOURCE", _user="admin", db=db)
+        with patch("obs.api.v1.knxproj.parse_ga_csv", side_effect=ValueError("bad csv")), pytest.raises(HTTPException) as exc:
+            await import_ga_csv_file(file=upload, adapter_name=None, direction="SOURCE", _user="admin", db=db)
         assert exc.value.status_code == 400
 
     @pytest.mark.asyncio
@@ -1556,9 +1638,8 @@ class TestImportGaCsvFile:
         upload.filename = "data.csv"
         upload.read = AsyncMock(return_value=b"data")
         db = _make_db()
-        with patch("obs.api.v1.knxproj.parse_ga_csv", return_value=[]):
-            with pytest.raises(HTTPException) as exc:
-                await import_ga_csv_file(file=upload, adapter_name=None, direction="SOURCE", _user="admin", db=db)
+        with patch("obs.api.v1.knxproj.parse_ga_csv", return_value=[]), pytest.raises(HTTPException) as exc:
+            await import_ga_csv_file(file=upload, adapter_name=None, direction="SOURCE", _user="admin", db=db)
         assert exc.value.status_code == 422
 
     @pytest.mark.asyncio
@@ -1567,9 +1648,8 @@ class TestImportGaCsvFile:
         upload.filename = "data.csv"
         upload.read = AsyncMock(return_value=b"data")
         db = _make_db()
-        with patch("obs.api.v1.knxproj.parse_ga_csv", side_effect=RuntimeError("parser broken")):
-            with pytest.raises(HTTPException) as exc:
-                await import_ga_csv_file(file=upload, adapter_name=None, direction="SOURCE", _user="admin", db=db)
+        with patch("obs.api.v1.knxproj.parse_ga_csv", side_effect=RuntimeError("parser broken")), pytest.raises(HTTPException) as exc:
+            await import_ga_csv_file(file=upload, adapter_name=None, direction="SOURCE", _user="admin", db=db)
         assert exc.value.status_code == 500
 
     @pytest.mark.asyncio
@@ -1679,8 +1759,10 @@ from obs.api.v1.config import (
     ExportedKnxGroupAddress,
     ExportedLogicGraph,
     ExportedVisuNode,
-    ImportResult as ConfigImportResult,
     ResetResult,
+)
+from obs.api.v1.config import (
+    ImportResult as ConfigImportResult,
 )
 
 
@@ -1717,9 +1799,7 @@ class TestConfigModels:
         assert lg.name == "Graph"
 
     def test_exported_visu_node_defaults(self):
-        vn = ExportedVisuNode(
-            id="v1", parent_id=None, name="Room", type="LOCATION", node_order=0, icon=None, access=None, access_pin=None, page_config=None
-        )
+        vn = ExportedVisuNode(id="v1", parent_id=None, name="Room", type="LOCATION", node_order=0, icon=None, access=None, page_config=None)
         assert vn.users == []
 
     def test_import_result_defaults(self):

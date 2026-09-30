@@ -6,15 +6,27 @@ Includes a simple version-based migration system.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Callable
+import sqlite3
+import uuid
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC
 from pathlib import Path
-from typing import Any
+from types import TracebackType
+from typing import Any, Self
+from urllib.parse import parse_qsl, urlencode
 
 import aiosqlite
 
 logger = logging.getLogger(__name__)
+
+# Busy timeout for the dedicated checkpoint connection. Zero → non-waiting: if a reader
+# (DB export/backup) or writer holds the DB, the checkpoint gives up immediately and is
+# retried on the next maintenance tick rather than stalling application write traffic
+# behind maintenance. See issue #908.
+_CHECKPOINT_BUSY_TIMEOUT_SECONDS = 0.0
 
 # ---------------------------------------------------------------------------
 # Migration SQL
@@ -129,7 +141,7 @@ async def _migration_v5(conn: aiosqlite.Connection) -> None:
     try:
         await conn.execute("ALTER TABLE adapter_bindings ADD COLUMN adapter_instance_id TEXT")
         await conn.commit()
-    except Exception:
+    except aiosqlite.OperationalError:
         pass  # Spalte existiert bereits
 
     # 3. adapter_configs → adapter_instances migrieren
@@ -642,6 +654,564 @@ CREATE INDEX IF NOT EXISTS idx_authz_node_roles_role
     ON authz_node_roles(role);
 """
 
+# Index-Audit #919/#935: Nur ein Index mit belegtem, heißem Query-Pfad wird
+# angelegt. Die Registry lädt bei jedem Adapter-Start/-Reload die Bindings via
+#   SELECT * FROM adapter_bindings WHERE adapter_instance_id=? AND enabled=1
+# (obs/adapters/registry.py:102/214/263, obs/api/v1/adapters.py:972). Bisher
+# existiert kein Index auf adapter_instance_id -> EXPLAIN QUERY PLAN zeigt einen
+# vollen 'SCAN adapter_bindings'. Der zusammengesetzte Index bringt den Plan auf
+# 'SEARCH ... USING INDEX (adapter_instance_id=? AND enabled=?)'. Schreibkosten
+# sind vertretbar: adapter_bindings wird nur bei Konfigänderungen geschrieben,
+# nicht im Datenpfad. Alle weiteren im Issue vorgeschlagenen OBS.db-Indexe wurden
+# per EXPLAIN als Duplikate oder ohne genutzten Query-Pfad verworfen (Details im
+# Audit-Skript tools/index-audit-919.py).
+_MIGRATION_V40_BINDING_INDEX = """
+CREATE INDEX IF NOT EXISTS idx_bind_instance_enabled
+    ON adapter_bindings(adapter_instance_id, enabled);
+"""
+
+_MIGRATION_V41_DATETIME_SETTINGS = """
+CREATE TABLE IF NOT EXISTS app_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+INSERT OR IGNORE INTO app_settings (key, value) VALUES ('date_format', 'dd.MM.yyyy');
+INSERT OR IGNORE INTO app_settings (key, value) VALUES ('time_format', 'HH:mm:ss');
+INSERT OR IGNORE INTO app_settings (key, value) VALUES ('language', 'de');
+"""
+
+_MIGRATION_V51_REGIONAL_SETTINGS = """
+INSERT OR IGNORE INTO app_settings (key, value) VALUES ('region_format', 'auto');
+INSERT OR IGNORE INTO app_settings (key, value) VALUES ('currency', 'auto');
+"""
+
+
+async def _migration_v52_external_write(conn: aiosqlite.Connection) -> None:
+    async with conn.execute("PRAGMA table_info(datapoints)") as cur:
+        columns = {row["name"] for row in await cur.fetchall()}
+    if columns and "external_write_enabled" not in columns:
+        await conn.execute("ALTER TABLE datapoints ADD COLUMN external_write_enabled INTEGER NOT NULL DEFAULT 0")
+
+
+async def _migration_v54_hierarchy_tree_root_nodes(conn: aiosqlite.Connection) -> None:
+    """Give every hierarchy tree an implicit, hidden root node (#1217 follow-up).
+
+    A Logic graph link always points at a ``hierarchy_nodes`` row — there was
+    no way to link a graph "directly to a tree" without first creating a
+    visible child node, which is unwanted friction for a tree that is meant
+    to directly hold graphs with no further nesting (e.g. a tree named
+    "Beschattung" holding graphs straight away). Rather than loosening
+    hierarchy_logic_graph_links.node_id's NOT NULL constraint (SQLite has no
+    ALTER TABLE ... DROP NOT NULL short of a full table rebuild), every tree
+    gets exactly one ``is_tree_root=1`` node that behaves like an ordinary
+    node for linking purposes but is excluded from every *visible* folder
+    listing (get_tree_nodes/_build_tree, search_nodes) so it never appears as
+    a renamable/deletable child folder duplicating the tree's own name.
+    """
+    async with conn.execute("PRAGMA table_info(hierarchy_nodes)") as cur:
+        columns = {row["name"] for row in await cur.fetchall()}
+    if not columns:
+        return  # fresh DB — the CREATE TABLE below already includes the column
+    if "is_tree_root" not in columns:
+        await conn.execute("ALTER TABLE hierarchy_nodes ADD COLUMN is_tree_root INTEGER NOT NULL DEFAULT 0")
+
+    from datetime import datetime
+
+    now = datetime.now(UTC).isoformat()
+    async with conn.execute(
+        """SELECT ht.id, ht.name FROM hierarchy_trees ht
+           WHERE NOT EXISTS (
+               SELECT 1 FROM hierarchy_nodes hn WHERE hn.tree_id = ht.id AND hn.is_tree_root = 1
+           )"""
+    ) as cur:
+        trees_needing_root = await cur.fetchall()
+    for tree in trees_needing_root:
+        await conn.execute(
+            """INSERT INTO hierarchy_nodes
+                   (id, tree_id, parent_id, name, description, node_order, icon, is_tree_root, created_at, updated_at)
+               VALUES (?,?,NULL,?,'',-1,NULL,1,?,?)""",
+            (str(uuid.uuid4()), tree["id"], tree["name"], now, now),
+        )
+
+
+_MIGRATION_V53_HIERARCHY_LOGIC_GRAPH_LINKS = """
+CREATE TABLE IF NOT EXISTS hierarchy_logic_graph_links (
+    id         TEXT PRIMARY KEY,
+    node_id    TEXT NOT NULL REFERENCES hierarchy_nodes(id) ON DELETE CASCADE,
+    graph_id   TEXT NOT NULL REFERENCES logic_graphs(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    UNIQUE(node_id, graph_id)
+);
+CREATE INDEX IF NOT EXISTS idx_hierarchy_logic_graph_links_node
+    ON hierarchy_logic_graph_links(node_id);
+CREATE INDEX IF NOT EXISTS idx_hierarchy_logic_graph_links_graph
+    ON hierarchy_logic_graph_links(graph_id);
+"""
+
+
+_MIGRATION_V38 = """
+CREATE TABLE IF NOT EXISTS hierarchy_device_links (
+    id         TEXT PRIMARY KEY,
+    node_id    TEXT NOT NULL REFERENCES hierarchy_nodes(id) ON DELETE CASCADE,
+    device_id  TEXT NOT NULL REFERENCES knx_devices(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    UNIQUE(node_id, device_id)
+);
+CREATE INDEX IF NOT EXISTS idx_hierarchy_device_links_node
+    ON hierarchy_device_links(node_id);
+CREATE INDEX IF NOT EXISTS idx_hierarchy_device_links_device
+    ON hierarchy_device_links(device_id);
+"""
+
+_MIGRATION_V39 = _MIGRATION_V38
+
+
+async def _migration_v40(conn: aiosqlite.Connection) -> None:
+    """Add nullable ownership without attributing legacy rows."""
+    for table in ("logic_graphs", "visu_nodes"):
+        async with conn.execute(f"PRAGMA table_info({table})") as cur:
+            columns = {row["name"] for row in await cur.fetchall()}
+        if not columns:
+            continue
+        if "created_by" not in columns:
+            await conn.execute(f"ALTER TABLE {table} ADD COLUMN created_by TEXT")
+        await conn.execute(f"CREATE INDEX IF NOT EXISTS idx_{table}_created_by ON {table}(created_by)")
+
+
+_MIGRATION_V41_AUTHZ_CAPABILITIES = """
+CREATE TABLE IF NOT EXISTS api_key_capability_sets (
+    key_id      TEXT PRIMARY KEY REFERENCES api_keys(id) ON DELETE CASCADE,
+    revision    INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+    updated_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE TABLE IF NOT EXISTS api_key_capabilities (
+    key_id      TEXT NOT NULL REFERENCES api_keys(id) ON DELETE CASCADE,
+    capability  TEXT NOT NULL CHECK (capability IN ('visu.page_config.write', 'datapoint.metadata.write')),
+    PRIMARY KEY (key_id, capability)
+);
+CREATE INDEX IF NOT EXISTS idx_api_key_capabilities_key ON api_key_capabilities(key_id);
+"""
+
+
+async def _migration_v42(conn: aiosqlite.Connection) -> None:
+    """Move Visu page access policy and user assignments into central AuthZ storage."""
+    await conn.executescript("""
+        CREATE TABLE IF NOT EXISTS authz_visu_page_policies (
+            node_id      TEXT PRIMARY KEY REFERENCES visu_nodes(id) ON DELETE CASCADE,
+            access_mode  TEXT NOT NULL CHECK (access_mode IN ('readonly', 'public', 'protected', 'user')),
+            created_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+            updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        );
+        CREATE INDEX IF NOT EXISTS idx_authz_visu_page_policies_mode
+            ON authz_visu_page_policies(access_mode);
+
+        CREATE TABLE IF NOT EXISTS authz_visu_page_credentials (
+            node_id      TEXT PRIMARY KEY REFERENCES authz_visu_page_policies(node_id) ON DELETE CASCADE,
+            pin_hash     TEXT NOT NULL,
+            updated_at   TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+        );
+    """)
+
+    async with conn.execute("PRAGMA table_info(visu_nodes)") as cur:
+        visu_columns = {row["name"] for row in await cur.fetchall()}
+    if {"access", "access_pin"} <= visu_columns:
+        # A policy without a usable protected credential remains protected and
+        # therefore fails closed. PIN hashes are deliberately stored only in the
+        # credential table, never in grants or audit payloads.
+        await conn.execute(
+            """
+            INSERT OR IGNORE INTO authz_visu_page_policies (node_id, access_mode)
+            SELECT id, access
+            FROM visu_nodes
+            WHERE access IN ('readonly', 'public', 'protected', 'user')
+            """,
+        )
+        await conn.execute(
+            """
+            INSERT OR IGNORE INTO authz_visu_page_credentials (node_id, pin_hash)
+            SELECT id, access_pin
+            FROM visu_nodes
+            WHERE access = 'protected'
+              AND access_pin IS NOT NULL
+              AND access_pin != ''
+            """,
+        )
+
+    async with conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='visu_node_users'") as cur:
+        has_legacy_users = await cur.fetchone() is not None
+    if has_legacy_users:
+        # Only unambiguous assignments survive: the defining legacy node must
+        # explicitly be user-scoped and the non-admin user must already exist.
+        await conn.execute(
+            """
+            INSERT OR IGNORE INTO authz_node_roles
+                (principal_type, principal_id, node_type, node_id, role, effect)
+            SELECT 'user', vnu.username, 'visu_page', vnu.node_id, 'guest', 'allow'
+            FROM visu_node_users AS vnu
+            JOIN visu_nodes AS vn ON vn.id = vnu.node_id AND vn.access = 'user'
+            JOIN users AS u ON u.username = vnu.username AND u.is_admin = 0
+            """,
+        )
+        await conn.execute("DROP TABLE visu_node_users")
+
+    if {"access", "access_pin"} <= visu_columns:
+        await conn.execute("UPDATE visu_nodes SET access = NULL, access_pin = NULL WHERE access IS NOT NULL OR access_pin IS NOT NULL")
+
+
+async def _migration_v43(conn: aiosqlite.Connection) -> None:
+    """Snapshot legacy filterset access into central role grants.
+
+    Before V43 every authenticated principal could read every filterset, while
+    a valid ``created_by`` user was its effective owner.  Materialize that
+    exact population once: future principals intentionally receive no grant.
+    Owner rows are inserted first so the subsequent read snapshot cannot
+    downgrade them.  Empty and orphaned owner names never become principals.
+    """
+    table_rows = await (await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    tables = {row[0] for row in table_rows}
+    if not {"authz_node_roles", "ringbuffer_filtersets", "users", "api_keys"} <= tables:
+        return
+
+    await conn.execute(
+        """
+        INSERT INTO authz_node_roles
+            (principal_type, principal_id, node_type, node_id, role, effect)
+        SELECT 'user', users.username, 'ringbuffer_filterset', filtersets.id, 'owner', 'allow'
+        FROM ringbuffer_filtersets AS filtersets
+        JOIN users ON users.username = filtersets.created_by
+        WHERE filtersets.created_by IS NOT NULL AND trim(filtersets.created_by) != ''
+        ON CONFLICT(principal_type, principal_id, node_type, node_id) DO NOTHING
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO authz_node_roles
+            (principal_type, principal_id, node_type, node_id, role, effect)
+        SELECT 'user', users.username, 'ringbuffer_filterset', filtersets.id, 'guest', 'allow'
+        FROM users CROSS JOIN ringbuffer_filtersets AS filtersets
+        WHERE true
+        ON CONFLICT(principal_type, principal_id, node_type, node_id) DO NOTHING
+        """
+    )
+    await conn.execute(
+        """
+        INSERT INTO authz_node_roles
+            (principal_type, principal_id, node_type, node_id, role, effect)
+        SELECT 'api_key', api_keys.id, 'ringbuffer_filterset', filtersets.id, 'guest', 'allow'
+        FROM api_keys CROSS JOIN ringbuffer_filtersets AS filtersets
+        WHERE true
+        ON CONFLICT(principal_type, principal_id, node_type, node_id) DO NOTHING
+        """
+    )
+
+
+async def _migration_v44(conn: aiosqlite.Connection) -> None:
+    """Materialize legacy bound-datapoint scope as adapter-instance grants.
+
+    The former adapter scope was implicit in the effective authorization of an
+    instance's bound datapoints.  Only unambiguous effective access is copied:
+    any readable bound datapoint yields ``guest`` while write access to every
+    bound datapoint yields ``operator``.  Unbound or malformed instances and
+    conflicting API-key aliases remain default-deny.
+    """
+    table_rows = await (await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    tables = {row[0] for row in table_rows}
+    if not {"authz_node_roles", "adapter_instances", "adapter_bindings", "users", "api_keys"} <= tables:
+        return
+
+    from obs.api.auth import Principal
+    from obs.api.authz import AuthzAction, AuthzTarget, RoleGrant, authorize
+
+    grant_rows = await (
+        await conn.execute(
+            """
+        SELECT principal_type, principal_id, node_type, node_id, role, effect
+        FROM authz_node_roles
+        WHERE node_type != 'adapter_instance'
+        ORDER BY principal_type, principal_id, node_type, node_id
+        """,
+        )
+    ).fetchall()
+    if not grant_rows:
+        return
+
+    user_rows = await (await conn.execute("SELECT username FROM users WHERE is_admin=0")).fetchall()
+    key_rows = await (await conn.execute("SELECT id FROM api_keys")).fetchall()
+    valid_principals = {
+        *(("user", row["username"]) for row in user_rows),
+        *(("api_key", row["id"]) for row in key_rows),
+    }
+
+    def canonical_principal(principal_type: str, principal_id: str) -> tuple[str, str]:
+        if principal_type == "api_key":
+            return principal_type, principal_id.removeprefix("api_key:")
+        return principal_type, principal_id
+
+    grants_by_principal: dict[tuple[str, str], dict[tuple[str, str], RoleGrant]] = {}
+    ambiguous_principals: set[tuple[str, str]] = set()
+
+    hierarchy_rows = await (await conn.execute("SELECT id, parent_id FROM hierarchy_nodes")).fetchall()
+    parents = {row["id"]: row["parent_id"] for row in hierarchy_rows}
+
+    def ancestors(node_id: str) -> tuple[str, ...] | None:
+        if node_id not in parents:
+            return None
+        result: list[str] = []
+        seen = {node_id}
+        current = parents[node_id]
+        while current is not None:
+            if current in seen or current not in parents:
+                return None
+            result.append(current)
+            seen.add(current)
+            current = parents[current]
+        result.reverse()
+        return tuple(result)
+
+    for row in grant_rows:
+        principal_key = canonical_principal(row["principal_type"], row["principal_id"])
+        if principal_key not in valid_principals:
+            ambiguous_principals.add(principal_key)
+            continue
+        target_key = (row["node_type"], row["node_id"])
+        grant_ancestors: tuple[str, ...] = ()
+        if row["node_type"] == "hierarchy":
+            resolved = ancestors(row["node_id"])
+            if resolved is None:
+                ambiguous_principals.add(principal_key)
+                continue
+            grant_ancestors = resolved
+        grant = RoleGrant(
+            principal_type=row["principal_type"],
+            principal_id=principal_key[1],
+            node_type=row["node_type"],
+            node_id=row["node_id"],
+            role=row["role"],
+            effect=row["effect"],
+            ancestors=grant_ancestors,
+        )
+        previous = grants_by_principal.setdefault(principal_key, {}).get(target_key)
+        if previous is not None and (previous.role != grant.role or previous.effect != grant.effect):
+            ambiguous_principals.add(principal_key)
+            continue
+        grants_by_principal[principal_key][target_key] = grant
+
+    instance_rows = await (await conn.execute("SELECT id, adapter_type FROM adapter_instances")).fetchall()
+    instance_types = {row["id"]: row["adapter_type"] for row in instance_rows}
+    binding_rows = await (
+        await conn.execute(
+            """
+        SELECT adapter_instance_id, adapter_type, datapoint_id
+        FROM adapter_bindings
+        WHERE adapter_instance_id IS NOT NULL
+        ORDER BY adapter_instance_id, datapoint_id
+        """,
+        )
+    ).fetchall()
+    datapoint_rows = await (await conn.execute("SELECT id FROM datapoints")).fetchall()
+    datapoint_ids = {row["id"] for row in datapoint_rows}
+    bindings_by_instance: dict[str, set[str]] = {}
+    ambiguous_instances: set[str] = set()
+    for row in binding_rows:
+        instance_id = row["adapter_instance_id"]
+        if instance_id not in instance_types or row["datapoint_id"] not in datapoint_ids:
+            ambiguous_instances.add(instance_id)
+            continue
+        if row["adapter_type"] != instance_types[instance_id]:
+            ambiguous_instances.add(instance_id)
+            continue
+        bindings_by_instance.setdefault(instance_id, set()).add(row["datapoint_id"])
+
+    link_rows = await (
+        await conn.execute(
+            "SELECT datapoint_id, node_id FROM hierarchy_datapoint_links ORDER BY datapoint_id, node_id",
+        )
+    ).fetchall()
+    node_ids_by_datapoint: dict[str, list[str]] = {}
+    ambiguous_datapoints: set[str] = set()
+    for row in link_rows:
+        if ancestors(row["node_id"]) is None:
+            ambiguous_datapoints.add(row["datapoint_id"])
+            continue
+        node_ids_by_datapoint.setdefault(row["datapoint_id"], []).append(row["node_id"])
+
+    def datapoint_targets(datapoint_id: str, grants: list[RoleGrant], *, write: bool) -> list[AuthzTarget]:
+        min_role = "operator" if write else None
+        targets = [
+            AuthzTarget(
+                node_type="hierarchy",
+                node_id=node_id,
+                ancestors=ancestors(node_id) or (),
+                min_role=min_role,
+            )
+            for node_id in node_ids_by_datapoint.get(datapoint_id, [])
+        ]
+        if not write and any(grant.node_type == "datapoint" and grant.node_id == datapoint_id for grant in grants):
+            targets.append(AuthzTarget(node_type="datapoint", node_id=datapoint_id, min_role=min_role))
+        return targets
+
+    def datapoint_write_allowed(
+        principal: Principal,
+        datapoint_id: str,
+        targets: list[AuthzTarget],
+        grants: list[RoleGrant],
+    ) -> bool:
+        hierarchy_decision = authorize(
+            principal=principal,
+            action=AuthzAction.WRITE,
+            targets=targets,
+            grants=grants,
+        )
+        direct_grants = [grant for grant in grants if grant.node_type == "datapoint" and grant.node_id == datapoint_id]
+        if not direct_grants:
+            return hierarchy_decision.allowed
+        direct_decision = authorize(
+            principal=principal,
+            action=AuthzAction.WRITE,
+            targets=[AuthzTarget(node_type="datapoint", node_id=datapoint_id)],
+            grants=grants,
+        )
+        if hierarchy_decision.reason == "explicit_deny" or direct_decision.reason == "explicit_deny":
+            return False
+        return hierarchy_decision.allowed or direct_decision.allowed
+
+    inserts: list[tuple[str, str, str, str, str, str]] = []
+    for principal_key, grants_by_target in grants_by_principal.items():
+        if principal_key in ambiguous_principals:
+            continue
+        principal_type, principal_id = principal_key
+        principal = Principal(
+            subject=f"api_key:{principal_id}" if principal_type == "api_key" else principal_id,
+            type=principal_type,
+            is_admin=False,
+        )
+        grants = list(grants_by_target.values())
+        for instance_id, bound_datapoints in bindings_by_instance.items():
+            if instance_id in ambiguous_instances or not bound_datapoints:
+                continue
+            if any(datapoint_id in ambiguous_datapoints for datapoint_id in bound_datapoints):
+                continue
+
+            readable = False
+            writable = True
+            for datapoint_id in bound_datapoints:
+                read_targets = datapoint_targets(datapoint_id, grants, write=False)
+                read_grants = [
+                    grant for grant in grants if any(grant.node_type == target.node_type and grant.node_id in target.path for target in read_targets)
+                ]
+                if authorize(
+                    principal=principal,
+                    action=AuthzAction.READ,
+                    targets=read_targets,
+                    grants=read_grants,
+                ).allowed:
+                    readable = True
+
+                write_targets = datapoint_targets(datapoint_id, grants, write=True)
+                if not datapoint_write_allowed(principal, datapoint_id, write_targets, grants):
+                    writable = False
+
+            role = "operator" if writable else "guest" if readable else None
+            if role is not None:
+                inserts.append((principal_type, principal_id, "adapter_instance", instance_id, role, "allow"))
+
+    if inserts:
+        await conn.executemany(
+            """
+            INSERT OR IGNORE INTO authz_node_roles
+                (principal_type, principal_id, node_type, node_id, role, effect)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            inserts,
+        )
+
+
+async def _migration_v45(conn: aiosqlite.Connection) -> None:
+    """Remove central grants whose concrete resource no longer exists.
+
+    Central grants deliberately have no polymorphic foreign key.  Resource
+    lifecycle cleanup now removes them with each resource, while this one-time
+    reconciliation repairs rows left by older deletion and reset paths.  A
+    missing resource table in a partial historical schema is not evidence that
+    every grant of that type is orphaned, so that type is left untouched.
+    """
+    table_rows = await (await conn.execute("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()
+    tables = {row[0] for row in table_rows}
+    if "authz_node_roles" not in tables:
+        return
+
+    resources = {
+        "datapoint": "datapoints",
+        "hierarchy": "hierarchy_nodes",
+        "visu_page": "visu_nodes",
+        "logic_graph": "logic_graphs",
+        "ringbuffer_filterset": "ringbuffer_filtersets",
+        "adapter_instance": "adapter_instances",
+    }
+    for node_type, table in resources.items():
+        if table not in tables:
+            continue
+        await conn.execute(
+            f"""DELETE FROM authz_node_roles
+                WHERE node_type=?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM {table}
+                      WHERE {table}.id=authz_node_roles.node_id
+                  )""",
+            (node_type,),
+        )
+
+
+async def _migration_v46(conn: aiosqlite.Connection) -> None:
+    """Add fail-closed central-control metadata without widening existing access."""
+    for table in ("datapoints", "logic_graphs"):
+        async with conn.execute(f"PRAGMA table_info({table})") as cur:
+            columns = {row["name"] for row in await cur.fetchall()}
+        if columns and "control_class" not in columns:
+            await conn.execute(
+                f"ALTER TABLE {table} ADD COLUMN control_class TEXT NOT NULL DEFAULT 'room_local' "
+                "CHECK (control_class IN ('room_local', 'central_plant'))"
+            )
+
+    async with conn.execute("PRAGMA table_info(authz_node_roles)") as cur:
+        grant_columns = {row["name"] for row in await cur.fetchall()}
+    if grant_columns and "central_control" not in grant_columns:
+        await conn.execute("ALTER TABLE authz_node_roles ADD COLUMN central_control INTEGER NOT NULL DEFAULT 0 CHECK (central_control IN (0, 1))")
+
+
+async def _migration_v47(conn: aiosqlite.Connection) -> None:
+    """Add queryable principal, outcome and route identity to audit events."""
+    async with conn.execute("PRAGMA table_info(audit_log_entries)") as cur:
+        columns = {row["name"] for row in await cur.fetchall()}
+    additions = {
+        "principal_type": "TEXT CHECK (principal_type IN ('user', 'api_key', 'anonymous', 'system'))",
+        "principal_id": "TEXT",
+        "outcome": "TEXT NOT NULL DEFAULT 'success' CHECK (outcome IN ('success', 'denied', 'failed'))",
+        "http_method": "TEXT",
+        "route_template": "TEXT",
+    }
+    for name, definition in additions.items():
+        if name not in columns:
+            await conn.execute(f"ALTER TABLE audit_log_entries ADD COLUMN {name} {definition}")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_entries_principal ON audit_log_entries(principal_type, principal_id)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_entries_outcome ON audit_log_entries(outcome)")
+    await conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_log_entries_route ON audit_log_entries(http_method, route_template)")
+
+
+async def _migration_v50(conn: aiosqlite.Connection) -> None:
+    """Reconcile the two pre-merge migration lineages at versions 40 and 41.
+
+    Main used these versions for the binding index and datetime settings while
+    the AuthZ feature branch used the same numbers for ownership and API-key
+    capabilities.  The authoritative merged sequence keeps main's immutable
+    versions and moves the AuthZ migrations to 42-49.  Reapplying main's two
+    idempotent migrations here also repairs local AuthZ development databases
+    that had already recorded schema version 47 before the merge.
+    """
+    await conn.executescript(_MIGRATION_V40_BINDING_INDEX)
+    await conn.executescript(_MIGRATION_V41_DATETIME_SETTINGS)
+
 
 # List of (version, sql_or_callable) tuples — append new migrations here
 MIGRATIONS: list[tuple[int, str | Callable]] = [
@@ -684,6 +1254,23 @@ MIGRATIONS: list[tuple[int, str | Callable]] = [
     (35, _MIGRATION_V35),
     (36, _migration_v36),
     (37, _MIGRATION_V37),
+    (38, _MIGRATION_V38),
+    (39, _MIGRATION_V39),
+    (40, _MIGRATION_V40_BINDING_INDEX),
+    (41, _MIGRATION_V41_DATETIME_SETTINGS),
+    (42, _migration_v40),
+    (43, _MIGRATION_V41_AUTHZ_CAPABILITIES),
+    (44, _migration_v42),
+    (45, _migration_v43),
+    (46, _migration_v44),
+    (47, _migration_v45),
+    (48, _migration_v46),
+    (49, _migration_v47),
+    (50, _migration_v50),
+    (51, _MIGRATION_V51_REGIONAL_SETTINGS),
+    (52, _migration_v52_external_write),
+    (53, _MIGRATION_V53_HIERARCHY_LOGIC_GRAPH_LINKS),
+    (54, _migration_v54_hierarchy_tree_root_nodes),
 ]
 
 
@@ -692,37 +1279,269 @@ MIGRATIONS: list[tuple[int, str | Callable]] = [
 # ---------------------------------------------------------------------------
 
 
+class _LoopReusableLock:
+    """Keep asyncio lock ownership isolated per event loop.
+
+    Production uses one loop, while integration fixtures may reuse a Database
+    from several sequential loops. Keeping the concrete asyncio.Lock per loop
+    prevents an orphaned/stopped loop from replacing or blocking another
+    loop's lock, and lets each loop release exactly the lock it acquired.
+    """
+
+    def __init__(self) -> None:
+        self._locks: dict[asyncio.AbstractEventLoop, asyncio.Lock] = {}
+
+    def _current_lock(self) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        lock = self._locks.get(loop)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._locks[loop] = lock
+        return lock
+
+    async def acquire(self) -> bool:
+        return await self._current_lock().acquire()
+
+    def release(self) -> None:
+        self._current_lock().release()
+
+    def locked(self) -> bool:
+        try:
+            return self._current_lock().locked()
+        except RuntimeError:
+            return any(lock.locked() for lock in self._locks.values())
+
+    async def __aenter__(self) -> Self:
+        await self.acquire()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
+        self.release()
+
+
+class _DatabaseTransaction:
+    """Connection handle for a multi-statement transaction."""
+
+    def __init__(self, conn: aiosqlite.Connection) -> None:
+        self._conn = conn
+
+    async def execute(self, sql: str, params: Any = ()) -> aiosqlite.Cursor:
+        return await self._conn.execute(sql, params)
+
+    async def executemany(self, sql: str, params: Any) -> aiosqlite.Cursor:
+        return await self._conn.executemany(sql, params)
+
+    async def fetchall(self, sql: str, params: Any = ()) -> list[aiosqlite.Row]:
+        async with self._conn.execute(sql, params) as cur:
+            return await cur.fetchall()
+
+    async def fetchone(self, sql: str, params: Any = ()) -> aiosqlite.Row | None:
+        async with self._conn.execute(sql, params) as cur:
+            return await cur.fetchone()
+
+    async def commit(self) -> None:
+        await self._conn.commit()
+
+    async def rollback(self) -> None:
+        await self._conn.rollback()
+
+
+class _DatabaseLifecycle:
+    """Connection lifecycle operations under the database's exclusive lock."""
+
+    def __init__(self, database: Database) -> None:
+        self._database = database
+
+    async def connect(self) -> None:
+        await self._database._connect()
+
+    async def disconnect(self) -> None:
+        await self._database._disconnect()
+
+
 class Database:
     """Async SQLite database wrapper with built-in migration support."""
 
     def __init__(self, path: str) -> None:
+        from obs.ringbuffer.ringbuffer import _is_sqlite_memory_path
+
         self._path = path
+        self._is_memory = _is_sqlite_memory_path(path)
+        # Memory databases only exist inside one SQLite connection unless every
+        # connection uses the same shared-cache URI. Give plain ``:memory:`` a
+        # private name and normalize all supported memory URIs accordingly.
+        if path == ":memory:":
+            self._connection_path = f"file:obs-{uuid.uuid4().hex}?mode=memory&cache=shared"
+        elif self._is_memory:
+            uri_path, _, query_string = path.partition("?")
+            query = [(key, value) for key, value in parse_qsl(query_string, keep_blank_values=True) if key.lower() != "cache"]
+            query.append(("cache", "shared"))
+            self._connection_path = f"{uri_path}?{urlencode(query)}"
+        else:
+            self._connection_path = path
+        self._connection_uri = self._connection_path.startswith("file:")
         self._conn: aiosqlite.Connection | None = None
+        # Serializes WAL checkpoints and pairs them with disconnect: a restore
+        # (POST /config/import/db) disconnects the DB and rewrites the file, and
+        # cancelling asyncio.to_thread does not stop the worker thread — so disconnect
+        # must wait for any in-flight checkpoint to finish before returning. See #908.
+        self._checkpoint_lock = _LoopReusableLock()
+        # Dedicated audit transactions use private SQLite connections while legacy
+        # helpers still write through the shared connection. Serialize both paths so
+        # a shared execute-and-commit cannot collide with BEGIN IMMEDIATE under
+        # concurrent HTTP mutations.
+        self._write_lock = _LoopReusableLock()
+        self._legacy_write_owner: asyncio.Task | None = None
+        self._transaction_connections: dict[asyncio.Task, aiosqlite.Connection] = {}
+        # A config restore may replace the database file after disconnect. Keep
+        # disconnect from returning while a private transaction still owns the
+        # old file.
+        self._transaction_lifecycle_lock = _LoopReusableLock()
+        # Serialize shared-connection operations with private transactions. For
+        # shared-cache memory databases this avoids immediate SQLITE_LOCKED errors;
+        # for WAL files it prevents a shared reader snapshot from becoming stale
+        # when a private writer commits (SQLITE_BUSY_SNAPSHOT on the next shared
+        # write). The historical attribute name is kept for test compatibility.
+        self._memory_operation_lock = _LoopReusableLock()
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     async def connect(self) -> None:
+        async with self._transaction_lifecycle_lock:
+            await self._connect()
+
+    async def _connect(self) -> None:
         if self._path not in (":memory:", "file::memory:?cache=shared"):
             Path(self._path).parent.mkdir(parents=True, exist_ok=True)
 
-        self._conn = await aiosqlite.connect(self._path)
+        self._conn = await self._open_connection()
         self._conn.row_factory = aiosqlite.Row
 
         await self._conn.execute("PRAGMA journal_mode=WAL")
         await self._conn.execute("PRAGMA foreign_keys=ON")
         await self._conn.execute("PRAGMA synchronous=NORMAL")
+        # Bound the -wal sidecar: auto-checkpoint roughly every 1000 pages and, on each
+        # checkpoint, truncate the WAL file back down to 64 MiB instead of leaving it at
+        # its high-water mark. Combined with the periodic TRUNCATE checkpoint driven by
+        # obs/db/maintenance.py this prevents the unbounded WAL growth that could fill the
+        # disk under continuous history writes. See issue #908.
+        await self._conn.execute("PRAGMA wal_autocheckpoint=1000")
+        await self._conn.execute("PRAGMA journal_size_limit=67108864")
         await self._conn.commit()
+
+        # Reclaim any oversized WAL left by a previous run *before* migrations or other
+        # startup writes: on a restart recovering from the full-disk condition behind
+        # issue #908, this frees space so the following writes don't hit ENOSPC. Best
+        # effort — a failure here must not block startup.
+        try:
+            await self.checkpoint()
+        except Exception:
+            logger.exception("Initial WAL checkpoint on connect failed")
 
         await self._run_migrations()
         logger.info("Database connected: %s", self._path)
 
     async def disconnect(self) -> None:
-        if self._conn is not None:
-            await self._conn.close()
-            self._conn = None
-            logger.info("Database disconnected")
+        # Hold the checkpoint lock across the whole teardown: this waits for any
+        # in-flight maintenance checkpoint to finish (its worker thread cannot be
+        # cancelled) before closing, so a restore that rewrites the file right after
+        # disconnect never races a checkpoint still holding locks on it. See #908.
+        async with self._transaction_lifecycle_lock:
+            await self._disconnect()
+
+    async def _disconnect(self) -> None:
+        async with self._checkpoint_lock:
+            if self._conn is not None:
+                # Leave the -wal sidecar bounded on graceful shutdown.
+                try:
+                    await self._run_checkpoint()
+                except Exception:
+                    logger.exception("WAL checkpoint on disconnect failed")
+                await self._conn.close()
+                self._conn = None
+                logger.info("Database disconnected")
+
+    @asynccontextmanager
+    async def exclusive_lifecycle(self) -> AsyncIterator[_DatabaseLifecycle]:
+        """Block transactions throughout a disconnect/replace/reconnect sequence."""
+        async with self._transaction_lifecycle_lock:
+            yield _DatabaseLifecycle(self)
+
+    async def checkpoint(self) -> bool:
+        """Force a TRUNCATE WAL checkpoint to keep the ``-wal`` sidecar bounded.
+
+        The default PASSIVE auto-checkpoint writes WAL pages back into the DB but never
+        shrinks the WAL file on disk, so under continuous history writes it can grow
+        without bound. A TRUNCATE checkpoint resets the file once no read snapshot is
+        pinning it.
+
+        The checkpoint runs on a short-lived private ``sqlite3`` connection off the
+        event loop (via a worker thread) rather than the shared ``aiosqlite``
+        connection. That way it never commits another coroutine's in-flight
+        transaction/savepoint and never blocks the shared connection's operation queue
+        behind SQLite's busy timeout. Runs are serialized with ``disconnect()`` via
+        ``_checkpoint_lock`` so a restore that disconnects and rewrites the file never
+        races an in-flight checkpoint (the worker thread cannot be cancelled). Returns
+        ``True`` only when the WAL was actually checkpointed, ``False`` for in-memory
+        databases, a disconnected ``Database``, or a busy/locked result. See issue #908.
+        """
+        from obs.ringbuffer.ringbuffer import _is_sqlite_memory_path
+
+        if self._conn is None or _is_sqlite_memory_path(self._path):
+            return False
+        async with self._checkpoint_lock:
+            # Re-check under the lock: disconnect may have closed the DB while we waited.
+            if self._conn is None:
+                return False
+            return await self._run_checkpoint()
+
+    async def _run_checkpoint(self) -> bool:
+        """Execute the TRUNCATE checkpoint. Caller must hold ``_checkpoint_lock``.
+
+        Skips in-memory databases (including named ``file:…?mode=memory`` URIs, which
+        would otherwise be normalized to a real on-disk filename). The checkpoint runs in
+        a worker thread that cannot be cancelled; if this coroutine is cancelled
+        (shutdown), we still wait for that worker to finish before propagating the
+        cancellation, so the caller keeps ``_checkpoint_lock`` until the thread has
+        released its SQLite locks and a following disconnect/restore can't race it. See
+        issue #908.
+        """
+        from obs.ringbuffer.ringbuffer import _is_sqlite_memory_path, _sqlite_filesystem_path
+
+        if _is_sqlite_memory_path(self._path):
+            return False
+        fs_path = _sqlite_filesystem_path(self._path)
+
+        def _run() -> bool:
+            conn = sqlite3.connect(fs_path, timeout=_CHECKPOINT_BUSY_TIMEOUT_SECONDS)
+            try:
+                row = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+            except sqlite3.OperationalError as exc:
+                # Non-waiting busy timeout surfaces contention as "database is locked";
+                # treat it as a skipped checkpoint rather than an error to retry later.
+                if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                    return False
+                raise
+            finally:
+                conn.close()
+            # row = (busy, log_pages, checkpointed_pages); busy != 0 → WAL not reset.
+            return bool(row is not None and row[0] == 0)
+
+        fut = asyncio.get_running_loop().run_in_executor(None, _run)
+        try:
+            return await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            # The worker thread can't be cancelled — wait for it to finish (releasing its
+            # SQLite locks) before we unwind and release _checkpoint_lock.
+            await asyncio.wait({fut})
+            raise
 
     # ------------------------------------------------------------------
     # Migrations
@@ -753,36 +1572,228 @@ class Database:
     # Query helpers
     # ------------------------------------------------------------------
 
+    async def _open_connection(self) -> aiosqlite.Connection:
+        conn = await aiosqlite.connect(self._connection_path, uri=self._connection_uri)
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA foreign_keys=ON")
+        await conn.execute("PRAGMA busy_timeout=30000")
+        return conn
+
+    @asynccontextmanager
+    async def transaction(self) -> AsyncIterator[None]:
+        """Run task-local helper calls on an isolated SQLite connection."""
+        task = asyncio.current_task()
+        assert task is not None
+        if task in self._transaction_connections:
+            # Mutation endpoints own the outer transaction so their domain write
+            # and canonical audit event commit together.  Existing domain helpers
+            # may already describe a smaller transaction boundary; reusing the
+            # task-local connection lets the outer boundary remain authoritative.
+            yield
+            return
+        if task is self._legacy_write_owner:
+            raise RuntimeError("Commit or roll back the pending shared-connection transaction first")
+
+        # Checkpoints, disconnect/restore, and explicit transactions all hold this
+        # lifecycle guard. A restore therefore cannot close or replace the database
+        # file while a dedicated transaction is still using it.
+        async with self._transaction_lifecycle_lock, self._checkpoint_lock, self._isolated_operation(), self._write_lock:
+            if self._conn is None:
+                raise RuntimeError("Database.connect() has not been called")
+            transaction_conn = await self._open_connection()
+            began = False
+            try:
+                self._transaction_connections[task] = transaction_conn
+                await transaction_conn.execute("BEGIN IMMEDIATE")
+                began = True
+                yield
+                await transaction_conn.commit()
+            except BaseException:
+                if began:
+                    await transaction_conn.rollback()
+                raise
+            finally:
+                self._transaction_connections.pop(task, None)
+                await transaction_conn.close()
+
+    @property
+    def in_transaction(self) -> bool:
+        """Whether the current asyncio task owns an explicit transaction."""
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            return False
+        return task is not None and task in self._transaction_connections
+
     @property
     def conn(self) -> aiosqlite.Connection:
+        try:
+            task = asyncio.current_task()
+        except RuntimeError:
+            task = None
+        if task is not None:
+            transaction_conn = self._transaction_connections.get(task)
+            if transaction_conn is not None:
+                return transaction_conn
         if self._conn is None:
             raise RuntimeError("Database.connect() has not been called")
         return self._conn
 
+    @asynccontextmanager
+    async def isolated_transaction(self) -> AsyncIterator[_DatabaseTransaction]:
+        """Yield a private connection so a multi-statement transaction cannot interleave."""
+        async with self._transaction_lifecycle_lock, self._checkpoint_lock, self._isolated_operation(), self._write_lock:
+            if self._conn is None:
+                raise RuntimeError("Database.connect() has not been called")
+            isolated = await aiosqlite.connect(
+                self._connection_path,
+                uri=self._connection_path.startswith("file:"),
+            )
+            try:
+                isolated.row_factory = aiosqlite.Row
+                await isolated.execute("PRAGMA foreign_keys=ON")
+                yield _DatabaseTransaction(isolated)
+            finally:
+
+                async def _cleanup() -> None:
+                    if isolated.in_transaction:
+                        await isolated.rollback()
+                    await isolated.close()
+
+                cleanup_task = asyncio.create_task(_cleanup())
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    await cleanup_task
+                    raise
+
+    @asynccontextmanager
+    async def _isolated_operation(self) -> AsyncIterator[None]:
+        while True:
+            # Do not retain the lock while waiting: the existing ordinary
+            # transaction may need another helper call before it can commit.
+            while self.conn.in_transaction:
+                await asyncio.sleep(0)
+            await self._memory_operation_lock.acquire()
+            if not self.conn.in_transaction:
+                break
+            self._memory_operation_lock.release()
+
+        try:
+            yield
+        finally:
+            self._memory_operation_lock.release()
+
+    @asynccontextmanager
+    async def _ordinary_operation(self) -> AsyncIterator[None]:
+        # Task-local transactions already hold the operation isolation lock for
+        # their whole lifetime. Re-entering it from fetchone()/fetchall() would
+        # deadlock because asyncio locks are deliberately not re-entrant.
+        if self.in_transaction:
+            yield
+        else:
+            async with self._memory_operation_lock:
+                yield
+
     async def execute(self, sql: str, params: Any = ()) -> aiosqlite.Cursor:
-        return await self.conn.execute(sql, params)
+        if self.in_transaction:
+            return await self.conn.execute(sql, params)
+        task = asyncio.current_task()
+        assert task is not None
+        if task is self._legacy_write_owner:
+            return await self.conn.execute(sql, params)
+        async with self._ordinary_operation():
+            await self._write_lock.acquire()
+            try:
+                cur = await self.conn.execute(sql, params)
+                if self.conn.in_transaction:
+                    self._legacy_write_owner = task
+                else:
+                    self._write_lock.release()
+                return cur
+            except BaseException:
+                self._write_lock.release()
+                raise
 
     async def executemany(self, sql: str, params: Any) -> aiosqlite.Cursor:
-        return await self.conn.executemany(sql, params)
+        if self.in_transaction:
+            return await self.conn.executemany(sql, params)
+        task = asyncio.current_task()
+        assert task is not None
+        if task is self._legacy_write_owner:
+            return await self.conn.executemany(sql, params)
+        async with self._ordinary_operation():
+            await self._write_lock.acquire()
+            try:
+                cur = await self.conn.executemany(sql, params)
+                if self.conn.in_transaction:
+                    self._legacy_write_owner = task
+                else:
+                    self._write_lock.release()
+                return cur
+            except BaseException:
+                self._write_lock.release()
+                raise
 
     async def commit(self) -> None:
-        await self.conn.commit()
+        # The outer explicit transaction owns the durability boundary.  Some
+        # legacy bulk helpers call commit() after intermediate phases; allowing
+        # that here would make their domain rows survive a later audit failure.
+        if self.in_transaction:
+            return
+        task = asyncio.current_task()
+        if task is self._legacy_write_owner:
+            try:
+                await self.conn.commit()
+            finally:
+                self._legacy_write_owner = None
+                self._write_lock.release()
+            return
+        async with self._write_lock:
+            await self.conn.commit()
 
     async def rollback(self) -> None:
-        await self.conn.rollback()
+        if self.in_transaction:
+            await self.conn.rollback()
+            return
+        task = asyncio.current_task()
+        if task is self._legacy_write_owner:
+            try:
+                await self.conn.rollback()
+            finally:
+                self._legacy_write_owner = None
+                self._write_lock.release()
+            return
+        async with self._write_lock:
+            await self.conn.rollback()
 
     async def fetchall(self, sql: str, params: Any = ()) -> list[aiosqlite.Row]:
-        async with self.conn.execute(sql, params) as cur:
+        async with self._ordinary_operation(), self.conn.execute(sql, params) as cur:
             return await cur.fetchall()
 
     async def fetchone(self, sql: str, params: Any = ()) -> aiosqlite.Row | None:
-        async with self.conn.execute(sql, params) as cur:
+        async with self._ordinary_operation(), self.conn.execute(sql, params) as cur:
             return await cur.fetchone()
 
     async def execute_and_commit(self, sql: str, params: Any = ()) -> aiosqlite.Cursor:
-        cur = await self.conn.execute(sql, params)
-        await self.conn.commit()
-        return cur
+        # An explicit task-local transaction owns its commit boundary.  Legacy
+        # mutation helpers may still call this method inside that boundary; an
+        # early commit here would make the mutation survive a later audit failure.
+        if self.in_transaction:
+            return await self.conn.execute(sql, params)
+        task = asyncio.current_task()
+        if task is self._legacy_write_owner:
+            try:
+                cur = await self.conn.execute(sql, params)
+                await self.conn.commit()
+                return cur
+            finally:
+                self._legacy_write_owner = None
+                self._write_lock.release()
+        async with self._ordinary_operation(), self._write_lock:
+            cur = await self.conn.execute(sql, params)
+            await self.conn.commit()
+            return cur
 
 
 # ---------------------------------------------------------------------------

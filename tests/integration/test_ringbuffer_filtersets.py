@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import uuid
-
 from datetime import UTC, datetime
 
 import pytest
@@ -117,6 +116,33 @@ async def _seed_knx_pa_ga_link(pa: str, ga: str) -> None:
             (co_id, ga),
         )
     await db.commit()
+
+
+async def _seed_empty_hierarchy_node() -> tuple[str, str]:
+    from obs.db.database import get_db
+
+    db = get_db()
+    tree_id = str(uuid.uuid4())
+    node_id = str(uuid.uuid4())
+    now = datetime.now(UTC).isoformat()
+    await db.execute(
+        "INSERT INTO hierarchy_trees (id, name, description, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        (tree_id, "Empty RingBuffer test tree", "", now, now),
+    )
+    await db.execute(
+        """INSERT INTO hierarchy_nodes
+           (id, tree_id, parent_id, name, description, node_order, icon, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (node_id, tree_id, None, "Empty RingBuffer test node", "", 0, None, now, now),
+    )
+    await db.commit()
+    return tree_id, node_id
+
+
+async def _delete_hierarchy_tree(tree_id: str) -> None:
+    from obs.db.database import get_db
+
+    await get_db().execute_and_commit("DELETE FROM hierarchy_trees WHERE id=?", (tree_id,))
 
 
 async def _create_filterset(client, auth_headers, payload: dict) -> dict:
@@ -253,6 +279,22 @@ async def test_filterset_color_validation_rejects_garbage(client, auth_headers):
     assert resp.status_code == 422, resp.text
 
 
+async def test_filterset_rejects_empty_criteria(client, auth_headers):
+    """A filterset whose ``filter`` declares none of hierarchy_nodes/datapoints/devices/
+    tags/adapters/q/value_filter must be rejected with 422 — an empty filter would
+    otherwise silently match every entry (#36 UX regression guard)."""
+    resp = await client.post(
+        "/api/v1/ringbuffer/filtersets",
+        json={
+            "name": f"RB empty criteria {uuid.uuid4()}",
+            "filter": {"q": "   "},
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 422, resp.text
+    assert "at least one criterion" in resp.text
+
+
 async def test_filterset_color_validation_accepts_hex_variants(client, auth_headers):
     for color in ("#abc", "#abcdef", "#3b82f6", "#3B82F6FF"):
         created = await _create_filterset(
@@ -361,6 +403,33 @@ async def test_patch_order_batch(client, auth_headers):
 # ---------------------------------------------------------------------------
 
 
+async def test_multi_query_adapter_only_filter_matches_source_adapter_independent_of_casing(client, auth_headers):
+    dp = await _create_dp(client, auth_headers, f"RB1077 adapter-only {uuid.uuid4()}")
+    await _write_value(client, auth_headers, dp["id"], 1077.0)
+    created = await _create_filterset(
+        client,
+        auth_headers,
+        {
+            "name": f"RB1077 adapter-only {uuid.uuid4()}",
+            "filter": {"adapters": ["API"]},
+        },
+    )
+    try:
+        resp = await client.post(
+            "/api/v1/ringbuffer/filtersets/query",
+            json={"set_ids": [created["id"]], "limit": 500},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        rows = resp.json()
+        target_rows = [row for row in rows if row["datapoint_id"] == dp["id"]]
+        assert target_rows
+        assert all(row["source_adapter"].lower() == "api" for row in rows)
+        assert all(row["matched_set_ids"] == [created["id"]] for row in rows)
+    finally:
+        await _delete_filterset(client, auth_headers, created["id"])
+
+
 async def test_multi_query_or_union_with_matched_set_ids(client, auth_headers):
     tag_a = f"rb431a-{uuid.uuid4().hex[:8]}"
     tag_b = f"rb431b-{uuid.uuid4().hex[:8]}"
@@ -435,6 +504,81 @@ async def test_multi_query_unknown_set_id_is_skipped(client, auth_headers):
         assert resp.status_code == 200, resp.text
     finally:
         await _delete_filterset(client, auth_headers, set_a["id"])
+
+
+async def test_multi_query_unknown_hierarchy_node_returns_no_entries(client, auth_headers):
+    dp = await _create_dp(client, auth_headers, f"RB1061 unknown hierarchy {uuid.uuid4()}")
+    await _write_value(client, auth_headers, dp["id"], 10.0)
+    created = await _create_filterset(
+        client,
+        auth_headers,
+        {
+            "name": f"RB1061 unknown hierarchy set {uuid.uuid4()}",
+            "filter": {
+                "hierarchy_nodes": [
+                    {
+                        "tree_id": str(uuid.uuid4()),
+                        "node_id": str(uuid.uuid4()),
+                        "include_descendants": True,
+                    }
+                ]
+            },
+        },
+    )
+    try:
+        resp = await client.post(
+            "/api/v1/ringbuffer/filtersets/query",
+            json={"set_ids": [created["id"]], "limit": 100},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == []
+    finally:
+        await _delete_filterset(client, auth_headers, created["id"])
+
+
+async def test_multi_query_empty_hierarchy_set_does_not_widen_or_union(client, auth_headers):
+    tag = f"rb1061-valid-{uuid.uuid4().hex[:8]}"
+    included = await _create_dp(client, auth_headers, f"RB1061 included {uuid.uuid4()}", tags=[tag])
+    unrelated = await _create_dp(client, auth_headers, f"RB1061 unrelated {uuid.uuid4()}")
+    await _write_value(client, auth_headers, included["id"], 11.0)
+    await _write_value(client, auth_headers, unrelated["id"], 12.0)
+    tree_id, node_id = await _seed_empty_hierarchy_node()
+    empty_set = await _create_filterset(
+        client,
+        auth_headers,
+        {
+            "name": f"RB1061 empty hierarchy set {uuid.uuid4()}",
+            "filter": {
+                "hierarchy_nodes": [
+                    {
+                        "tree_id": tree_id,
+                        "node_id": node_id,
+                        "include_descendants": True,
+                    }
+                ]
+            },
+        },
+    )
+    valid_set = await _create_filterset(
+        client,
+        auth_headers,
+        {"name": f"RB1061 valid set {uuid.uuid4()}", "filter": {"tags": [tag]}},
+    )
+    try:
+        resp = await client.post(
+            "/api/v1/ringbuffer/filtersets/query",
+            json={"set_ids": [empty_set["id"], valid_set["id"]], "limit": 500},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        matched = {row["datapoint_id"]: row["matched_set_ids"] for row in resp.json()}
+        assert matched[included["id"]] == [valid_set["id"]]
+        assert unrelated["id"] not in matched
+    finally:
+        await _delete_filterset(client, auth_headers, empty_set["id"])
+        await _delete_filterset(client, auth_headers, valid_set["id"])
+        await _delete_hierarchy_tree(tree_id)
 
 
 async def test_multi_query_inactive_set_is_skipped(client, auth_headers):
@@ -656,11 +800,11 @@ async def test_filterset_query_combines_devices_with_other_criteria_using_and(cl
 
 
 # ---------------------------------------------------------------------------
-# Access control hardening (#590): filterset mutation routes are admin-only.
+# Central filterset authorization (#629).
 # ---------------------------------------------------------------------------
 
 
-async def test_non_admin_cannot_create_filterset(client, auth_headers):
+async def test_non_admin_can_create_owned_filterset(client, auth_headers):
     username = f"rb-na-{uuid.uuid4().hex[:8]}"
     user_headers = await _create_non_admin_user_and_headers(client, auth_headers, username=username, password="pw-12345678")
     try:
@@ -669,7 +813,12 @@ async def test_non_admin_cannot_create_filterset(client, auth_headers):
             json={"name": f"Owned by user {uuid.uuid4()}", "filter": {"adapters": ["api"]}},
             headers=user_headers,
         )
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 201, resp.text
+        created = resp.json()
+        assert created["created_by"] == username
+        assert created["can_write"] is True
+        delete = await client.delete(f"/api/v1/ringbuffer/filtersets/{created['id']}", headers=user_headers)
+        assert delete.status_code == 204, delete.text
     finally:
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
 
@@ -688,7 +837,7 @@ async def test_non_admin_cannot_update_filterset(client, auth_headers):
             json={"name": "hijacked", "filter": {"adapters": ["api"]}},
             headers=user_headers,
         )
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 404, resp.text
     finally:
         await _delete_filterset(client, auth_headers, created["id"])
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
@@ -707,7 +856,7 @@ async def test_non_admin_cannot_delete_filterset(client, auth_headers):
             f"/api/v1/ringbuffer/filtersets/{created['id']}",
             headers=user_headers,
         )
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 404, resp.text
     finally:
         await _delete_filterset(client, auth_headers, created["id"])
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
@@ -727,13 +876,13 @@ async def test_non_admin_cannot_clone_filterset(client, auth_headers):
             json={"name": "forbidden clone"},
             headers=user_headers,
         )
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 404, resp.text
     finally:
         await _delete_filterset(client, auth_headers, created["id"])
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
 
 
-async def test_non_admin_can_patch_filterset_topbar(client, auth_headers):
+async def test_future_user_cannot_patch_out_of_scope_filterset_topbar(client, auth_headers):
     created = await _create_filterset(
         client,
         auth_headers,
@@ -747,14 +896,13 @@ async def test_non_admin_can_patch_filterset_topbar(client, auth_headers):
             json={"topbar_active": True},
             headers=user_headers,
         )
-        assert resp.status_code == 200, resp.text
-        assert resp.json()["topbar_active"] is True
+        assert resp.status_code == 404, resp.text
     finally:
         await _delete_filterset(client, auth_headers, created["id"])
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
 
 
-async def test_non_admin_can_patch_filterset_order(client, auth_headers):
+async def test_future_user_order_ignores_out_of_scope_filtersets(client, auth_headers):
     created = await _create_filterset(
         client,
         auth_headers,
@@ -769,8 +917,7 @@ async def test_non_admin_can_patch_filterset_order(client, auth_headers):
             headers=user_headers,
         )
         assert resp.status_code == 200, resp.text
-        by_id = {row["id"]: row for row in resp.json()}
-        assert by_id[created["id"]]["topbar_order"] == 5
+        assert resp.json() == []
     finally:
         await _delete_filterset(client, auth_headers, created["id"])
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)

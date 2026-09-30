@@ -28,7 +28,10 @@
 
       <!-- Zeitzone -->
       <div class="card" :class="{ 'pointer-events-none select-none opacity-60': isDemo }">
-        <div class="card-header"><h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.general.title') }}</h3></div>
+        <div class="card-header">
+          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.general.title') }}</h3>
+          <HelpButton help-id="settings-general" />
+        </div>
         <div class="card-body flex flex-col gap-4">
           <div class="form-group">
             <label class="label">{{ $t('settings.general.timezone') }}</label>
@@ -65,6 +68,34 @@
               </div>
             </div>
           </div>
+          <div class="form-group">
+            <label class="label">{{ $t('settings.general.dateFormat') }}</label>
+            <input v-model="dateFormatSelected" class="input text-sm font-mono" type="text" />
+            <p class="text-xs text-slate-500 mt-1">{{ $t('settings.general.formatHint') }}</p>
+          </div>
+          <div class="form-group">
+            <label class="label">{{ $t('settings.general.timeFormat') }}</label>
+            <input v-model="timeFormatSelected" class="input text-sm font-mono" type="text" />
+          </div>
+          <div class="form-group">
+            <label class="label">{{ $t('settings.general.regionFormat') }}</label>
+            <p class="text-xs text-slate-500 mb-2">{{ $t('settings.general.regionFormatHint') }}</p>
+            <select v-model="regionFormatSelected" class="input text-sm" data-testid="region-format-select">
+              <option v-for="opt in regionFormatOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="label">{{ $t('settings.general.currency') }}</label>
+            <select v-model="currencySelected" class="input text-sm" data-testid="currency-select">
+              <option v-for="opt in currencyOptions" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
+            </select>
+          </div>
+          <div class="rounded-lg bg-slate-100 dark:bg-slate-800/60 p-3 text-xs text-slate-600 dark:text-slate-300 flex flex-col gap-1"
+            data-testid="region-format-preview">
+            <span class="uppercase tracking-wide text-[10px] text-slate-400">{{ $t('settings.general.formatPreview') }}</span>
+            <span class="font-mono">{{ regionFormatPreview.number }}</span>
+            <span class="font-mono">{{ regionFormatPreview.currency }}</span>
+          </div>
           <div v-if="tzMsg" :class="['p-3 rounded-lg text-sm', tzMsg.ok ? 'bg-green-500/10 text-green-400 border border-green-500/30' : 'bg-red-500/10 text-red-400 border border-red-500/30']">{{ tzMsg.text }}</div>
           <button @click="saveTz" class="btn-primary" :disabled="tzSaving">
             <Spinner v-if="tzSaving" size="sm" color="white" />
@@ -77,6 +108,7 @@
       <div class="card">
         <div class="card-header">
           <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.general.appearance') }}</h3>
+          <HelpButton help-id="settings-appearance" />
         </div>
         <div class="card-body flex flex-col gap-3">
           <p class="text-sm text-slate-500">{{ $t('settings.general.appearanceHint') }}</p>
@@ -105,7 +137,10 @@
 
     <!-- ── Passwort ── -->
     <div v-if="activeTab === 'password'" class="card max-w-md" :class="{ 'pointer-events-none select-none opacity-60': isDemo }">
-      <div class="card-header"><h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.password.title') }}</h3></div>
+      <div class="card-header">
+        <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.password.title') }}</h3>
+        <HelpButton help-id="settings-password" />
+      </div>
       <div class="card-body">
         <form @submit.prevent="changePassword" class="flex flex-col gap-4">
           <div class="form-group">
@@ -133,36 +168,93 @@
     <div v-if="activeTab === 'users' && (auth.isAdmin || isDemo)" :class="{ 'pointer-events-none select-none opacity-60': isDemo }">
       <div class="flex items-center gap-3 mb-4">
         <span class="flex-1 text-sm text-slate-400">{{ $t('settings.users.count', { n: users.length }) }}</span>
+        <HelpButton help-id="settings-users" />
         <button @click="openCreateUser" class="btn-primary btn-sm">{{ $t('settings.users.addButton') }}</button>
       </div>
-      <div class="card overflow-hidden">
+      <div class="card">
         <div v-if="usersLoading" class="flex justify-center py-8"><Spinner /></div>
-        <table v-else class="table">
-          <thead><tr><th>{{ $t('settings.users.colUsername') }}</th><th>{{ $t('settings.users.colAdmin') }}</th><th>{{ $t('settings.users.colMqtt') }}</th><th>{{ $t('settings.users.colCreated') }}</th><th class="w-20"></th></tr></thead>
-          <tbody>
-            <tr v-for="u in users" :key="u.id">
-              <td class="font-medium">{{ u.username }}</td>
-              <td><Badge :variant="u.is_admin ? 'warning' : 'muted'" size="xs">{{ u.is_admin ? 'Admin' : 'User' }}</Badge></td>
-              <td>
-                <div class="flex items-center gap-1">
-                  <Badge :variant="u.mqtt_enabled ? 'success' : 'muted'" size="xs">{{ u.mqtt_enabled ? $t('settings.users.mqttActive') : $t('settings.users.mqttOff') }}</Badge>
-                  <button @click="openMqttPassword(u)" class="btn-icon text-slate-400 hover:text-blue-400" :title="$t('settings.users.mqttSetTitle')">
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536M9 13l6.586-6.586a2 2 0 112.828 2.828L11.828 15.828a2 2 0 01-1.414.586H9v-2a2 2 0 01.586-1.414z"/></svg>
-                  </button>
-                  <button v-if="u.mqtt_enabled" @click="doDeleteMqttPassword(u)" class="btn-icon text-red-400 hover:text-red-300" :title="$t('settings.users.mqttDisableTitle')">
-                    <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
-                  </button>
-                </div>
-              </td>
-              <td class="text-xs text-slate-500">{{ fmtDate(u.created_at) }}</td>
-              <td>
-                <button v-if="u.username !== auth.username" @click="confirmDeleteUser(u)" class="btn-icon text-red-400">
-                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                </button>
-              </td>
-            </tr>
-          </tbody>
-        </table>
+        <div v-else-if="!ownerFirstUsers.length" class="text-sm text-slate-500 text-center py-8" data-testid="users-empty">
+          {{ $t('settings.users.empty') }}
+        </div>
+        <div v-else class="divide-y divide-slate-200 dark:divide-slate-700/60" role="table" data-testid="owner-first-users">
+          <div
+            class="hidden gap-3 px-4 py-2 text-[10px] uppercase tracking-wide text-slate-400 xl:grid xl:grid-cols-[minmax(12rem,1fr)_minmax(10rem,1fr)_7rem_7rem_8rem_13rem]"
+            role="row"
+            data-testid="users-list-header"
+          >
+            <span role="columnheader">{{ $t('settings.users.colUsername') }}</span>
+            <span role="columnheader">{{ $t('settings.users.rights.steps.scopes') }}</span>
+            <span role="columnheader">{{ $t('settings.users.status') }}</span>
+            <span role="columnheader">{{ $t('settings.users.colMqtt') }}</span>
+            <span role="columnheader">{{ $t('settings.users.colCreated') }}</span>
+            <span role="columnheader">{{ $t('common.edit') }}</span>
+          </div>
+          <div
+            v-for="u in ownerFirstUsers"
+            :key="u.id"
+            class="grid gap-3 p-4 xl:grid-cols-[minmax(12rem,1fr)_minmax(10rem,1fr)_7rem_7rem_8rem_13rem] xl:items-center"
+            role="row"
+            :data-testid="`user-card-${u.username}`"
+          >
+            <div class="flex min-w-0 flex-wrap items-center gap-2" role="cell">
+              <span
+                :class="[
+                  'h-2.5 w-2.5 rounded-full shrink-0',
+                  userStatus(u).tone === 'warning' ? 'bg-amber-400' :
+                  userStatus(u).tone === 'success' ? 'bg-green-500' : 'bg-slate-400'
+                ]"
+              >
+                <span class="sr-only">{{ userStatus(u).label }}</span>
+              </span>
+              <span class="truncate font-semibold text-slate-800 dark:text-slate-100">{{ u.username }}</span>
+              <Badge v-if="u.username === auth.username" variant="info" size="xs">{{ $t('settings.users.currentAccount') }}</Badge>
+              <Badge :variant="u.is_admin ? 'warning' : 'muted'" size="xs">{{ u.is_admin ? $t('settings.users.roleAdmin') : $t('settings.users.roleUser') }}</Badge>
+            </div>
+            <div class="min-w-0 text-xs text-slate-500" role="cell">
+              <span class="block uppercase tracking-wide text-[10px] text-slate-400 xl:hidden">{{ $t('settings.users.rights.steps.scopes') }}</span>
+              <span class="text-xs text-slate-500" :data-testid="`user-rights-summary-${u.username}`">
+                {{ userRightsSummary(u) }}
+              </span>
+            </div>
+            <div class="text-xs text-slate-500" role="cell">
+              <span class="block uppercase tracking-wide text-[10px] text-slate-400 xl:hidden">{{ $t('settings.users.status') }}</span>
+              <span class="font-medium text-slate-700 dark:text-slate-300">{{ userStatus(u).label }}</span>
+            </div>
+            <div class="text-xs" role="cell">
+              <span class="block uppercase tracking-wide text-[10px] text-slate-400 xl:hidden">{{ $t('settings.users.colMqtt') }}</span>
+              <span :class="u.mqtt_enabled ? 'text-green-600 dark:text-green-400' : 'text-slate-500'">
+                {{ u.mqtt_enabled ? $t('settings.users.mqttActive') : $t('settings.users.mqttOff') }}
+              </span>
+              <span v-if="u.mqtt_enabled" class="text-slate-400">
+                · {{ u.mqtt_password_set ? $t('settings.users.mqttPasswordSetShort') : $t('settings.users.mqttPasswordMissing') }}
+              </span>
+            </div>
+            <div class="text-xs text-slate-500" role="cell">
+              <span class="block uppercase tracking-wide text-[10px] text-slate-400 xl:hidden">{{ $t('settings.users.colCreated') }}</span>
+              <span>{{ fmtDate(u.created_at) }}</span>
+            </div>
+            <div class="flex items-center gap-1 xl:w-full" role="cell">
+              <button
+                v-if="users.length >= 2"
+                type="button"
+                class="btn-secondary btn-sm"
+                :data-testid="`user-rights-${u.username}`"
+                @click="openRightsEditor(u)"
+              >
+                {{ $t('settings.users.rights.openButton') }}
+              </button>
+              <button @click="openMqttPassword(u)" class="btn-icon text-slate-400 hover:text-blue-400" :title="$t('settings.users.mqttSetTitle')" :data-testid="`user-mqtt-set-${u.username}`">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.232 5.232l3.536 3.536M9 13l6.586-6.586a2 2 0 112.828 2.828L11.828 15.828a2 2 0 01-1.414.586H9v-2a2 2 0 01.586-1.414z"/></svg>
+              </button>
+              <button v-if="u.mqtt_enabled" @click="doDeleteMqttPassword(u)" class="btn-icon text-red-400 hover:text-red-300" :title="$t('settings.users.mqttDisableTitle')" :data-testid="`user-mqtt-delete-${u.username}`">
+                <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>
+              </button>
+              <button v-if="u.username !== auth.username" @click="confirmDeleteUser(u)" class="btn-icon text-red-400" :title="$t('common.delete')" :data-testid="`user-delete-${u.username}`">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -170,17 +262,25 @@
     <div v-if="activeTab === 'apikeys'" :class="{ 'pointer-events-none select-none opacity-60': isDemo }">
       <div class="flex items-center gap-3 mb-4">
         <span class="flex-1 text-sm text-slate-400">{{ $t('settings.apikeys.count', { n: apiKeys.length }) }}</span>
+        <HelpButton help-id="settings-apikeys" />
         <button @click="createApiKey" class="btn-primary btn-sm">{{ $t('settings.apikeys.addButton') }}</button>
       </div>
       <div class="card overflow-hidden mb-4">
         <div v-if="keysLoading" class="flex justify-center py-8"><Spinner /></div>
         <table v-else class="table">
-          <thead><tr><th>{{ $t('settings.apikeys.colName') }}</th><th>{{ $t('settings.apikeys.colCreated') }}</th><th class="w-20"></th></tr></thead>
+          <thead><tr><th>{{ $t('settings.apikeys.colName') }}</th><th>{{ $t('settings.apikeys.colCreated') }}</th><th class="w-28"></th></tr></thead>
           <tbody>
             <tr v-for="k in apiKeys" :key="k.id">
               <td class="font-medium">{{ k.name }}</td>
               <td class="text-xs text-slate-500">{{ fmtDate(k.created_at) }}</td>
-              <td><button @click="deleteApiKey(k.id)" class="btn-icon text-red-400"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button></td>
+              <td class="flex justify-end gap-1">
+                <button v-if="auth.isAdmin" type="button" class="btn-icon text-blue-400"
+                  :title="$t('settings.apikeys.capabilities.open')" :data-testid="`apikey-capabilities-${k.id}`"
+                  @click="openApiKeyCapabilities(k)">
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>
+                </button>
+                <button @click="deleteApiKey(k.id)" class="btn-icon text-red-400" :data-testid="`apikey-delete-${k.id}`"><svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg></button>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -195,7 +295,10 @@
     <!-- ── Sicherheit ── -->
     <div v-if="activeTab === 'security' && (auth.isAdmin || isDemo)" class="flex flex-col gap-4 max-w-3xl" :class="{ 'pointer-events-none select-none opacity-60': isDemo }">
       <div class="card">
-        <div class="card-header"><h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.security.title') }}</h3></div>
+        <div class="card-header">
+          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.security.title') }}</h3>
+          <HelpButton help-id="settings-security" />
+        </div>
         <div class="card-body flex flex-col gap-4">
           <p class="text-sm text-slate-500">{{ $t('settings.security.description') }}</p>
           <div class="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 text-sm text-amber-700 dark:text-amber-300">{{ $t('settings.security.warning') }}</div>
@@ -206,7 +309,10 @@
       </div>
 
       <div class="card">
-        <div class="card-header"><h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.security.checkTitle') }}</h3></div>
+        <div class="card-header">
+          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.security.checkTitle') }}</h3>
+          <HelpButton help-id="settings-security-check" />
+        </div>
         <div class="card-body flex flex-col gap-3">
           <div class="grid gap-3 md:grid-cols-[1fr_auto]">
             <input v-model="urlTargetCheckInput" class="input text-sm font-mono" placeholder="http://10.38.113.23/api/v1/status" @keydown.enter.prevent="checkUrlTarget" data-testid="security-url-target-check-input" />
@@ -233,7 +339,10 @@
       <div class="card overflow-hidden">
         <div class="card-header flex items-center justify-between">
           <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.security.allowlistTitle') }}</h3>
-          <button class="btn-secondary btn-sm" @click="loadUrlTargets">{{ $t('settings.security.reload') }}</button>
+          <div class="flex items-center gap-1">
+            <HelpButton help-id="settings-security-entries" />
+            <button class="btn-secondary btn-sm" @click="loadUrlTargets">{{ $t('settings.security.reload') }}</button>
+          </div>
         </div>
         <div class="card-body flex flex-col gap-4">
           <form class="grid gap-3 md:grid-cols-[1fr_1fr_auto]" @submit.prevent="addManualUrlTarget">
@@ -267,6 +376,7 @@
       <div class="card">
         <div class="card-header">
           <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.support.debugSettingsTitle') }}</h3>
+          <HelpButton help-id="settings-support-debug" />
         </div>
         <div class="card-body flex flex-col gap-4">
           <p class="text-sm text-slate-500">{{ $t('settings.support.debugDescription') }}</p>
@@ -300,6 +410,7 @@
       <div class="card">
         <div class="card-header">
           <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.support.packageTitle') }}</h3>
+          <HelpButton help-id="settings-support-package" />
         </div>
         <div class="card-body flex flex-col gap-4">
           <p class="text-sm text-slate-500">{{ $t('settings.support.description') }}</p>
@@ -325,6 +436,7 @@
       <div class="card">
         <div class="card-header">
           <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.support.viewerTitle') }}</h3>
+          <HelpButton help-id="settings-support-viewer" />
         </div>
         <div class="card-body flex flex-col gap-4">
           <p class="text-sm text-slate-500">{{ $t('settings.support.viewerDescription') }}</p>
@@ -515,7 +627,10 @@
 
       <!-- Sicherung erstellen (download) -->
       <div class="card p-5 flex flex-col gap-3">
-        <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.importexport.exportTitle') }}</h3>
+        <div class="flex items-center justify-between">
+          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.importexport.exportTitle') }}</h3>
+          <HelpButton help-id="settings-importexport-config" />
+        </div>
         <p class="text-sm text-slate-400">{{ $t('settings.importexport.exportDesc') }}</p>
         <button @click="doExport" class="btn-secondary">{{ $t('settings.importexport.exportButton') }}</button>
       </div>
@@ -534,7 +649,10 @@
 
       <!-- Datenbanksicherung erstellen (download) -->
       <div class="card p-5 flex flex-col gap-3">
-        <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.importexport.dbExportTitle') }}</h3>
+        <div class="flex items-center justify-between">
+          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.importexport.dbExportTitle') }}</h3>
+          <HelpButton help-id="settings-importexport-db" />
+        </div>
         <p class="text-sm text-slate-400">{{ $t('settings.importexport.dbExportDesc') }}</p>
         <button @click="doExportDb" class="btn-secondary">{{ $t('settings.importexport.dbExportButton') }}</button>
       </div>
@@ -560,9 +678,41 @@
         <div v-if="importDbResult" :class="['p-3 rounded-lg text-sm', importDbResult.ok ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400']">{{ importDbResult.text }}</div>
       </div>
 
+      <!-- Meldungsarchiv-Datenbanksicherung erstellen (download) -->
+      <div class="card p-5 flex flex-col gap-3">
+        <div class="flex items-center justify-between">
+          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.importexport.messageArchiveDbExportTitle') }}</h3>
+          <HelpButton help-id="settings-importexport-messagearchive" />
+        </div>
+        <p class="text-sm text-slate-400">{{ $t('settings.importexport.messageArchiveDbExportDesc') }}</p>
+        <button @click="doExportMessageArchiveDb" class="btn-secondary">{{ $t('settings.importexport.messageArchiveDbExportButton') }}</button>
+      </div>
+
+      <!-- Meldungsarchiv-Datenbank wiederherstellen (upload) -->
+      <div class="card p-5 flex flex-col gap-3">
+        <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.importexport.messageArchiveDbImportTitle') }}</h3>
+        <p class="text-sm text-slate-400">{{ $t('settings.importexport.messageArchiveDbImportDesc') }}</p>
+        <div class="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg text-sm text-amber-600 dark:text-amber-400 flex flex-col gap-1">
+          <p class="font-semibold">{{ $t('settings.importexport.messageArchiveDbImportWarning') }}</p>
+          <ul class="list-disc list-inside text-xs mt-1 space-y-0.5">
+            <li>{{ $t('settings.importexport.messageArchiveDbImportWarning1') }}</li>
+            <li>{{ $t('settings.importexport.messageArchiveDbImportWarning2') }}</li>
+          </ul>
+        </div>
+        <div class="flex items-center gap-3">
+          <button type="button" class="btn-secondary btn-sm" @click="importMessageArchiveDbFileInput.click()">{{ $t('common.chooseFile') }}</button>
+          <span class="text-sm text-slate-400">{{ importMessageArchiveDbFileName || $t('common.noFileSelected') }}</span>
+          <input ref="importMessageArchiveDbFileInput" type="file" accept=".sqlite,.sqlite3,.db" @change="onImportMessageArchiveDbFile" class="hidden" />
+        </div>
+        <div v-if="importMessageArchiveDbResult" :class="['p-3 rounded-lg text-sm', importMessageArchiveDbResult.ok ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400']">{{ importMessageArchiveDbResult.text }}</div>
+      </div>
+
       <!-- Autobackup -->
       <div class="card p-5 flex flex-col gap-3">
-        <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.importexport.autobackupTitle') }}</h3>
+        <div class="flex items-center justify-between">
+          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.importexport.autobackupTitle') }}</h3>
+          <HelpButton help-id="settings-importexport-autobackup" />
+        </div>
         <p class="text-sm text-slate-400">{{ $t('settings.importexport.autobackupDesc') }}</p>
         <div class="flex flex-col gap-3">
           <label class="flex items-center gap-2 cursor-pointer select-none">
@@ -627,10 +777,13 @@
       </div>
 
       <!-- KNX Projekt Import -->
-      <div class="card p-5 flex flex-col gap-3">
-        <div class="flex items-center gap-2">
-          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.importexport.knxTitle') }}</h3>
-          <span class="text-xs text-slate-500 bg-slate-700/50 px-2 py-0.5 rounded">.knxproj</span>
+      <div id="knx-project-import" class="card p-5 flex flex-col gap-3">
+        <div class="flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.importexport.knxTitle') }}</h3>
+            <span class="text-xs text-slate-500 bg-slate-700/50 px-2 py-0.5 rounded">.knxproj</span>
+          </div>
+          <HelpButton help-id="settings-importexport-knx" />
         </div>
         <p class="text-sm text-slate-400">{{ $t('settings.importexport.knxDesc') }}</p>
         <div class="flex flex-col gap-2">
@@ -737,6 +890,7 @@
       <div class="card">
         <div class="card-header">
           <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.history.dbTitle') }}</h3>
+          <HelpButton help-id="settings-history-db" />
         </div>
         <div class="card-body flex flex-col gap-4">
           <p class="text-sm text-slate-500">{{ $t('settings.history.dbDesc') }}</p>
@@ -863,7 +1017,10 @@
       <div class="card" data-testid="history-filter-card">
         <div class="card-header">
           <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.history.filterTitle') }}</h3>
-          <span class="text-xs text-slate-500">{{ $t('settings.history.filterCount', { excluded: histFilterExcludedCount, total: histAllDps.length }) }}</span>
+          <div class="flex items-center gap-2">
+            <span class="text-xs text-slate-500">{{ $t('settings.history.filterCount', { excluded: histFilterExcludedCount, total: histAllDps.length }) }}</span>
+            <HelpButton help-id="settings-history-filter" />
+          </div>
         </div>
         <div class="card-body flex flex-col gap-3">
           <p class="text-sm text-slate-500">{{ $t('settings.history.filterDesc') }}</p>
@@ -927,6 +1084,9 @@
 
     <!-- ── Hierarchie ── -->
     <div v-if="activeTab === 'hierarchy'" class="flex flex-col gap-4" data-testid="hierarchy-tab">
+      <div class="flex justify-end">
+        <HelpButton help-id="settings-hierarchy" />
+      </div>
       <div class="card">
         <div class="card-body" :class="{ 'pointer-events-none select-none opacity-60': isDemo }">
           <HierarchyManager />
@@ -941,6 +1101,7 @@
       <div class="flex flex-wrap items-center gap-3">
         <span class="text-sm text-slate-400" data-testid="icons-count">{{ $t('settings.icons.count', { n: iconsFiltered.length }) }}</span>
         <div class="flex-1" />
+        <HelpButton help-id="settings-icons" />
         <button v-if="iconsSelected.size > 0" @click="doIconsExport" class="btn-secondary btn-sm" data-testid="btn-icons-export">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v2a2 2 0 002 2h12a2 2 0 002-2v-2M7 10l5 5 5-5M12 15V3"/></svg>
           {{ $t('settings.icons.export', { n: iconsSelected.size }) }}
@@ -991,7 +1152,10 @@
 
       <!-- Upload area -->
       <div class="card">
-        <div class="card-header"><h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.icons.importTitle') }}</h3></div>
+        <div class="card-header">
+          <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.icons.importTitle') }}</h3>
+          <HelpButton help-id="settings-icons-import" />
+        </div>
         <div class="card-body flex flex-col gap-4">
           <p class="text-sm text-slate-400">{{ $t('settings.icons.importDesc') }}</p>
 
@@ -1031,6 +1195,7 @@
       <div class="card">
         <div class="card-header">
           <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.icons.knxufTitle') }}</h3>
+          <HelpButton help-id="settings-icons-knxuf" />
         </div>
         <div class="card-body flex flex-col gap-4">
           <p class="text-sm text-slate-400">{{ $t('settings.icons.knxufDesc') }}</p>
@@ -1048,6 +1213,7 @@
       <div class="card">
         <div class="card-header">
           <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.icons.faTitle') }}</h3>
+          <HelpButton help-id="settings-icons-fontawesome" />
         </div>
         <div class="card-body flex flex-col gap-4">
           <p class="text-sm text-slate-400">{{ $t('settings.icons.faDesc') }}</p>
@@ -1116,9 +1282,12 @@
             <h3 class="font-semibold text-sm text-slate-800 dark:text-slate-100">{{ $t('settings.links.title') }}</h3>
             <p class="text-xs text-slate-500 mt-0.5">{{ $t('settings.links.desc') }}</p>
           </div>
-          <button @click="openNavLinkForm()" class="btn-primary btn-sm" data-testid="btn-add-nav-link">
-            {{ $t('settings.links.addButton') }}
-          </button>
+          <div class="flex items-center gap-1">
+            <HelpButton help-id="settings-links" />
+            <button @click="openNavLinkForm()" class="btn-primary btn-sm" data-testid="btn-add-nav-link">
+              {{ $t('settings.links.addButton') }}
+            </button>
+          </div>
         </div>
         <div class="card-body flex flex-col gap-2">
 
@@ -1196,11 +1365,14 @@
     <!-- ── Danger Zone ── -->
     <div v-if="activeTab === 'dangerzone'" class="flex flex-col gap-4 max-w-lg" :class="{ 'pointer-events-none select-none opacity-60': isDemo }">
       <div class="rounded-lg border border-red-500/40 bg-red-500/5 overflow-hidden">
-        <div class="px-5 py-3 border-b border-red-500/30 flex items-center gap-2">
-          <svg class="w-4 h-4 text-red-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
-          </svg>
-          <h3 class="font-semibold text-sm text-red-400">{{ $t('settings.dangerzone.title') }}</h3>
+        <div class="px-5 py-3 border-b border-red-500/30 flex items-center justify-between">
+          <div class="flex items-center gap-2">
+            <svg class="w-4 h-4 text-red-400 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+            </svg>
+            <h3 class="font-semibold text-sm text-red-400">{{ $t('settings.dangerzone.title') }}</h3>
+          </div>
+          <HelpButton help-id="settings-dangerzone" />
         </div>
         <div class="divide-y divide-red-500/20">
 
@@ -1329,9 +1501,75 @@
       </form>
     </Modal>
 
-    <ConfirmDialog v-model="showUserConfirm" :title="$t('settings.users.deleteUser')"
-      :message="$t('settings.users.deleteUserConfirm', { name: deleteUserTarget?.username })"
-      :confirm-label="$t('common.delete')" @confirm="doDeleteUser" />
+    <Modal v-model="showUserConfirm" :title="$t('settings.users.deleteUser')" max-width="lg">
+      <div class="space-y-4" data-testid="user-deletion-impact">
+        <p>{{ $t('settings.users.deleteUserConfirm', { name: deleteUserTarget?.username }) }}</p>
+        <Spinner v-if="deletePreflightLoading" />
+        <template v-else-if="deletePreflight">
+          <p class="text-sm text-slate-500">{{ $t('settings.users.deleteImpact') }}</p>
+          <ul class="text-sm list-disc pl-5">
+            <li>{{ $t('settings.users.deletePages', { n: deletePreflight.visu_page_ids.length }) }}</li>
+            <li>{{ $t('settings.users.deleteGraphs', { n: deletePreflight.logic_graph_ids.length }) }}</li>
+            <li>{{ $t('settings.users.deleteFiltersets', { n: deletePreflight.filterset_ids.length }) }}</li>
+            <li>{{ $t('settings.users.deleteKeys', { n: deletePreflight.api_key_ids.length }) }}</li>
+            <li>{{ $t('settings.users.deleteReferences', { n: deletionReferenceCount }) }}</li>
+          </ul>
+          <div v-if="deletionNeedsSuccessor" class="form-group">
+            <label class="label">{{ $t('settings.users.successor') }}</label>
+            <select v-model="deleteSuccessor" class="input" data-testid="user-deletion-successor">
+              <option value="">{{ $t('settings.users.selectSuccessor') }}</option>
+              <option v-for="u in deletionSuccessors" :key="u.id" :value="u.username">{{ u.username }}</option>
+            </select>
+          </div>
+          <p class="text-sm text-amber-600">{{ $t('settings.users.deleteKeyWarning') }}</p>
+        </template>
+        <p v-if="deletePreflightError" class="text-sm text-red-500">{{ deletePreflightError }}</p>
+        <div class="flex justify-end gap-3">
+          <button class="btn-secondary" @click="showUserConfirm = false">{{ $t('common.cancel') }}</button>
+          <button class="btn-danger" data-testid="user-deletion-confirm" :disabled="!deletePreflight || (deletionNeedsSuccessor && !deleteSuccessor)" @click="doDeleteUser">
+            {{ $t('common.delete') }}
+          </button>
+        </div>
+      </div>
+    </Modal>
+
+    <Modal v-model="showApiKeyCapabilities" :title="$t('settings.apikeys.capabilities.title')" max-width="lg">
+      <div v-if="capabilitiesLoading" class="flex justify-center py-8"><Spinner /></div>
+      <form v-else class="flex flex-col gap-4" @submit.prevent="saveApiKeyCapabilities">
+        <p class="text-sm text-slate-500">
+          {{ $t('settings.apikeys.capabilities.target', { name: capabilityTarget?.name }) }}
+        </p>
+        <div class="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+          {{ $t('settings.apikeys.capabilities.warning') }}
+        </div>
+        <label v-for="capability in capabilityOptions" :key="capability" class="flex items-start gap-3 rounded-lg border border-slate-200 p-3 dark:border-slate-700">
+          <input v-model="selectedCapabilities" type="checkbox" :value="capability" class="mt-1"
+            :data-testid="`apikey-capability-${capability}`" />
+          <span>
+            <span class="block font-medium">{{ $t(`settings.apikeys.capabilities.effects.${capability}.title`) }}</span>
+            <span class="block text-xs text-slate-500">{{ $t(`settings.apikeys.capabilities.effects.${capability}.description`) }}</span>
+          </span>
+        </label>
+        <label class="flex items-start gap-3 text-sm">
+          <input v-model="capabilitiesConfirmed" type="checkbox" class="mt-1" data-testid="apikey-capabilities-confirm" />
+          <span>{{ $t('settings.apikeys.capabilities.confirm', { name: capabilityTarget?.name }) }}</span>
+        </label>
+        <p v-if="capabilitiesError" class="text-sm text-red-400">{{ capabilitiesError }}</p>
+        <div class="flex justify-end gap-3">
+          <button type="button" class="btn-secondary" @click="showApiKeyCapabilities = false">{{ $t('common.cancel') }}</button>
+          <button type="submit" class="btn-primary" :disabled="capabilitiesSaving || !capabilitiesConfirmed || !!capabilitiesError" data-testid="apikey-capabilities-save">
+            {{ $t('settings.apikeys.capabilities.save') }}
+          </button>
+        </div>
+      </form>
+    </Modal>
+
+    <UserRightsEditor
+      v-if="rightsTarget"
+      v-model="showRightsEditor"
+      :username="rightsTarget.username"
+      @saved="loadUsers"
+    />
 
     <ConfirmDialog v-model="showDzConfirm" :title="dzConfirmTitle"
       :message="dzConfirmMessage" :confirm-label="dzConfirmLabel" @confirm="doDzAction" />
@@ -1340,7 +1578,9 @@
 
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
-import { authApi, adapterApi, configApi, autobackupApi, knxprojApi, historySettingsApi, iconsApi, dpApi, securityApi, supportApi } from '@/api/client'
+import { authApi, adapterApi, configApi, autobackupApi, knxprojApi, historySettingsApi, iconsApi, dpApi, securityApi, supportApi, messageArchivesApi } from '@/api/client'
+import { accountAdminApi } from '@/api/accountAdmin'
+import { authzApi } from '@/api/authz'
 import { useI18n } from 'vue-i18n'
 import { useNavLinksStore } from '@/stores/navLinks'
 import { useAuthStore } from '@/stores/auth'
@@ -1349,11 +1589,15 @@ import { useTz } from '@/composables/useTz'
 import Badge            from '@/components/ui/Badge.vue'
 import Spinner          from '@/components/ui/Spinner.vue'
 import HierarchyManager from '@/components/HierarchyManager.vue'
+import UserRightsEditor from '@/components/settings/UserRightsEditor.vue'
 import Modal          from '@/components/ui/Modal.vue'
 import ConfirmDialog  from '@/components/ui/ConfirmDialog.vue'
 import IconPicker     from '@/components/ui/IconPicker.vue'
 import VisuIcon       from '@/components/ui/VisuIcon.vue'
 import LocaleSwitcher from '@/components/ui/LocaleSwitcher.vue'
+import HelpButton     from '@/components/ui/HelpButton.vue'
+import { formatCurrency, formatNumber } from '@/utils/numberFormat'
+import { resolveCurrency, resolveRegionFormat, useRegionalFormat } from '@/composables/useRegionalFormat'
 
 const { t, te } = useI18n()
 const auth     = useAuthStore()
@@ -1388,6 +1632,12 @@ const ALL_TIMEZONES = (() => {
 
 const tzSearch         = ref('')
 const tzSelected       = ref(settings.timezone)
+const dateFormatSelected = ref(settings.dateFormat)
+const timeFormatSelected = ref(settings.timeFormat)
+// Numbers on this page follow the *saved* regional format, not the pending selection.
+const { regionFormat: activeRegionFormat } = useRegionalFormat()
+const regionFormatSelected = ref(settings.regionFormat)
+const currencySelected = ref(settings.currency)
 const tzSaving         = ref(false)
 const tzMsg            = ref(null)
 const tzDropdownOpen   = ref(false)
@@ -1427,14 +1677,35 @@ function onOutsideClick(e) {
 }
 
 onMounted(async () => {
+  activateTabFromRoute()
   if (!settings.loaded) await settings.load()
   tzSelected.value = settings.timezone
+  dateFormatSelected.value = settings.dateFormat
+  timeFormatSelected.value = settings.timeFormat
+  regionFormatSelected.value = settings.regionFormat
+  currencySelected.value = settings.currency
   document.addEventListener('mousedown', onOutsideClick)
   if (auth.isAdmin) {
     loadHistorySettings()
     loadHistoryFilterDps()
   }
 })
+
+function activateTabFromRoute() {
+  const tab = new URLSearchParams(window.location.search).get('tab') || ''
+  if (tab && tabs.value.some((item) => item.id === tab)) {
+    activeTab.value = tab
+    scrollToRouteHash()
+  }
+}
+
+async function scrollToRouteHash() {
+  const hash = window.location.hash || ''
+  if (!hash) return
+  await nextTick()
+  const target = document.getElementById(decodeURIComponent(hash.slice(1)))
+  target?.scrollIntoView({ block: 'start' })
+}
 
 watch(activeTab, (tab) => {
   if (tab === 'history') {
@@ -1452,10 +1723,64 @@ onUnmounted(() => {
   stopSupportDebugTick()
 })
 
+// Regional format is its own setting, independent of the UI language (issue #1073).
+// Option labels mix runtime locale data with translated text, so they are built in
+// local variables and translated via t() — never as hardcoded literals.
+const REGION_FORMAT_FALLBACK = ['auto', 'de-DE', 'de-AT', 'de-CH', 'en-US', 'en-GB', 'fr-FR', 'fr-CH', 'it-IT', 'it-CH', 'es-ES']
+const CURRENCY_FALLBACK = ['auto', 'EUR', 'CHF', 'USD', 'GBP']
+const SAMPLE_AMOUNT = 1234.5
+
+function regionDisplayName(code) {
+  try {
+    return new Intl.DisplayNames([settings.language], { type: 'language' }).of(code) ?? code
+  } catch {
+    return code
+  }
+}
+
+const regionFormatOptions = computed(() => {
+  const codes = settings.supportedRegionFormats.length ? settings.supportedRegionFormats : REGION_FORMAT_FALLBACK
+  return codes.map((code) => {
+    const resolved = resolveRegionFormat(code, settings.language)
+    const sample = formatNumber(SAMPLE_AMOUNT, resolved, { decimals: 2 })
+    const optionLabel = code === 'auto'
+      ? t('settings.general.regionFormatAuto', { format: resolved, sample })
+      : `${regionDisplayName(code)} · ${code} · ${sample}`
+    return { value: code, label: optionLabel }
+  })
+})
+
+const currencyOptions = computed(() => {
+  const codes = settings.supportedCurrencies.length ? settings.supportedCurrencies : CURRENCY_FALLBACK
+  const resolvedRegion = resolveRegionFormat(regionFormatSelected.value, settings.language)
+  return codes.map((code) => {
+    const resolved = resolveCurrency(code, resolvedRegion)
+    const optionLabel = code === 'auto'
+      ? t('settings.general.currencyAuto', { currency: resolved })
+      : `${code} · ${formatCurrency(SAMPLE_AMOUNT, resolvedRegion, code)}`
+    return { value: code, label: optionLabel }
+  })
+})
+
+const regionFormatPreview = computed(() => {
+  const resolvedRegion = resolveRegionFormat(regionFormatSelected.value, settings.language)
+  return {
+    number: formatNumber(SAMPLE_AMOUNT, resolvedRegion, { decimals: 3 }),
+    currency: formatCurrency(SAMPLE_AMOUNT, resolvedRegion, resolveCurrency(currencySelected.value, resolvedRegion)),
+  }
+})
+
 async function saveTz() {
   tzSaving.value = true; tzMsg.value = null
   try {
-    await settings.save(tzSelected.value)
+    await settings.save(
+      tzSelected.value,
+      dateFormatSelected.value,
+      timeFormatSelected.value,
+      settings.language,
+      regionFormatSelected.value,
+      currencySelected.value,
+    )
     tzMsg.value = { ok: true, text: t('settings.general.tzSaved', { tz: tzSelected.value }) }
   } catch (e) {
     tzMsg.value = { ok: false, text: e.response?.data?.detail ?? t('common.saveError') }
@@ -1478,6 +1803,11 @@ const tabs = computed(() => [
   { id: 'history',      label: t('settings.tabs.history') },
   { id: 'dangerzone',   label: t('settings.tabs.dangerzone') },
 ])
+
+watch(
+  () => tabs.value.map((tab) => tab.id).join('|'),
+  () => activateTabFromRoute(),
+)
 
 // ── URL Target Allowlist ──────────────────────────────────────────────────
 const urlTargetsLoading = ref(false)
@@ -1747,7 +2077,8 @@ function supportFormat(value) {
 
 function supportFormatNumber(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
-  return value.toLocaleString()
+  // `toLocaleString()` semantics: at most three fraction digits, no padding.
+  return formatNumber(value, activeRegionFormat.value, { maxDecimals: 3 })
 }
 
 function supportFormatBytes(value) {
@@ -1761,7 +2092,7 @@ function supportFormatCpu(resources) {
   if (typeof cpuCount !== 'number' && typeof load !== 'number') return '—'
   const parts = []
   if (typeof cpuCount === 'number') parts.push(`${cpuCount} ${t('settings.support.viewerCpuUnit')}`)
-  if (typeof load === 'number') parts.push(`${t('settings.support.viewerLoad')} ${load.toFixed(2)}`)
+  if (typeof load === 'number') parts.push(`${t('settings.support.viewerLoad')} ${formatNumber(load, activeRegionFormat.value, { decimals: 2 })}`)
   return parts.join(' / ')
 }
 
@@ -1800,7 +2131,7 @@ function supportFormatTopMemory(resources) {
 
 function supportFormatPercent(value) {
   if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
-  return `${value.toFixed(1)}%`
+  return `${formatNumber(value, activeRegionFormat.value, { decimals: 1 })}%`
 }
 
 function supportDuration(seconds) {
@@ -2072,12 +2403,56 @@ const usersLoading = ref(false)
 const showCreateUser = ref(false)
 const showUserConfirm = ref(false)
 const deleteUserTarget = ref(null)
+const deletePreflight = ref(null)
+const deletePreflightLoading = ref(false)
+const deletePreflightError = ref('')
+const deleteSuccessor = ref('')
+const showRightsEditor = ref(false)
+const rightsTarget = ref(null)
+const userGrants = ref({})
 const userForm    = reactive({ username: '', password: '', is_admin: false, mqtt_enabled: false, mqtt_password: '' })
+const ownerFirstUsers = computed(() => {
+  return [...users.value].sort((a, b) => {
+    const aCurrent = a.username === auth.username
+    const bCurrent = b.username === auth.username
+    if (aCurrent !== bCurrent) return aCurrent ? -1 : 1
+    if (a.is_admin !== b.is_admin) return a.is_admin ? -1 : 1
+    return (a.username || '').localeCompare(b.username || '')
+  })
+})
 
 async function loadUsers() {
   usersLoading.value = true
-  try { const { data } = await authApi.listUsers(); users.value = data }
+  try {
+    const { data } = await authApi.listUsers()
+    users.value = data
+    const grants = await Promise.all(data.map(async (user) => {
+      try {
+        const response = await authzApi.getUserGrants(user.username)
+        return [user.username, response.data?.grants || []]
+      } catch {
+        return [user.username, []]
+      }
+    }))
+    userGrants.value = Object.fromEntries(grants)
+  }
   finally { usersLoading.value = false }
+}
+function userRightsSummary(u) {
+  const hierarchyGrants = (userGrants.value[u.username] || [])
+    .filter(grant => grant.node_type === 'hierarchy' && grant.effect !== 'deny')
+  if (!hierarchyGrants.length) return t('settings.users.rights.summaryNone')
+  const roles = [...new Set(hierarchyGrants.map(grant => t(`settings.users.rights.roles.${grant.role}.label`)))]
+  return t('settings.users.rights.summary', { roles: roles.join(', '), n: hierarchyGrants.length })
+}
+function userStatus(u) {
+  if (u.mqtt_enabled && !u.mqtt_password_set) {
+    return { tone: 'warning', label: t('settings.users.statusWarning') }
+  }
+  if (u.username === auth.username) {
+    return { tone: 'success', label: t('settings.users.statusCurrent') }
+  }
+  return { tone: 'muted', label: t('settings.users.statusReady') }
 }
 function openCreateUser() {
   userForm.username = ''; userForm.password = ''; userForm.is_admin = false
@@ -2093,8 +2468,38 @@ async function doCreateUser() {
   await authApi.createUser(payload)
   showCreateUser.value = false; await loadUsers()
 }
-function confirmDeleteUser(u) { deleteUserTarget.value = u; showUserConfirm.value = true }
-async function doDeleteUser() { await authApi.deleteUser(deleteUserTarget.value.username); await loadUsers() }
+const deletionNeedsSuccessor = computed(() => !!deletePreflight.value && (
+  deletePreflight.value.visu_page_ids.length + deletePreflight.value.logic_graph_ids.length + deletePreflight.value.filterset_ids.length > 0
+))
+const deletionReferenceCount = computed(() => deletePreflight.value
+  ? deletePreflight.value.grant_count + deletePreflight.value.visu_acl_count + deletePreflight.value.filterset_state_count
+  : 0)
+const deletionSuccessors = computed(() => users.value.filter(u => u.username !== deleteUserTarget.value?.username))
+async function confirmDeleteUser(u) {
+  deleteUserTarget.value = u
+  deletePreflight.value = null
+  deleteSuccessor.value = ''
+  deletePreflightError.value = ''
+  deletePreflightLoading.value = true
+  showUserConfirm.value = true
+  try {
+    const { data } = await accountAdminApi.userDeletionPreflight(u.username)
+    deletePreflight.value = data
+  } catch (e) {
+    deletePreflightError.value = e.response?.data?.detail ?? t('common.error')
+  } finally {
+    deletePreflightLoading.value = false
+  }
+}
+async function doDeleteUser() {
+  await accountAdminApi.deleteUser(deleteUserTarget.value.username, {
+    revision: deletePreflight.value.revision,
+    successor_username: deleteSuccessor.value || null,
+  })
+  showUserConfirm.value = false
+  await loadUsers()
+}
+function openRightsEditor(u) { rightsTarget.value = u; showRightsEditor.value = true }
 
 // ── MQTT Password ──────────────────────────────────────────────────────────
 const showMqttPassword = ref(false)
@@ -2131,6 +2536,15 @@ const keysLoading   = ref(false)
 const newKeySecret  = ref('')
 const newKeyName    = ref('')
 const showNewKeyName = ref(false)
+const showApiKeyCapabilities = ref(false)
+const capabilitiesLoading = ref(false)
+const capabilitiesSaving = ref(false)
+const capabilitiesConfirmed = ref(false)
+const capabilitiesError = ref('')
+const capabilityTarget = ref(null)
+const capabilityRevision = ref(0)
+const capabilityOptions = ref([])
+const selectedCapabilities = ref([])
 
 async function loadKeys() {
   keysLoading.value = true
@@ -2145,14 +2559,54 @@ async function doCreateKey() {
   showNewKeyName.value = false; await loadKeys()
 }
 async function deleteApiKey(id) { await authApi.deleteApiKey(id); await loadKeys() }
+async function openApiKeyCapabilities(key) {
+  capabilityTarget.value = key
+  capabilitiesConfirmed.value = false
+  capabilitiesError.value = ''
+  capabilitiesLoading.value = true
+  showApiKeyCapabilities.value = true
+  try {
+    const { data } = await accountAdminApi.getApiKeyCapabilities(key.id)
+    capabilityRevision.value = data.revision
+    capabilityOptions.value = data.available_capabilities
+    selectedCapabilities.value = [...data.capabilities]
+  } catch (e) {
+    capabilitiesError.value = e.response?.data?.detail ?? t('settings.apikeys.capabilities.loadError')
+  } finally {
+    capabilitiesLoading.value = false
+  }
+}
+async function saveApiKeyCapabilities() {
+  if (!capabilitiesConfirmed.value || !capabilityTarget.value || capabilitiesError.value) return
+  capabilitiesSaving.value = true
+  capabilitiesError.value = ''
+  try {
+    await accountAdminApi.replaceApiKeyCapabilities(
+      capabilityTarget.value.id,
+      capabilityRevision.value,
+      selectedCapabilities.value,
+    )
+    showApiKeyCapabilities.value = false
+  } catch (e) {
+    capabilitiesError.value = e.response?.status === 409
+      ? t('settings.apikeys.capabilities.concurrentChange')
+      : (e.response?.data?.detail ?? t('settings.apikeys.capabilities.saveError'))
+    capabilitiesConfirmed.value = false
+  } finally {
+    capabilitiesSaving.value = false
+  }
+}
 
 // ── Sicherung / Wiederherstellung ──────────────────────────────────────────
 const importResult    = ref(null)
 const importDbResult  = ref(null)
+const importMessageArchiveDbResult = ref(null)
 const importFileName  = ref('')
 const importDbFileName = ref('')
+const importMessageArchiveDbFileName = ref('')
 const importFileInput  = ref(null)
 const importDbFileInput = ref(null)
+const importMessageArchiveDbFileInput = ref(null)
 
 function _ts() {
   const now = new Date()
@@ -2174,6 +2628,14 @@ async function doExportDb() {
   const { data: blob } = await configApi.exportDb()
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a'); a.href = url; a.download = `obs_DB_${_ts()}.sqlite`; a.click()
+  URL.revokeObjectURL(url)
+}
+
+async function doExportMessageArchiveDb() {
+  if (!auth.isAdmin) return
+  const { data: blob } = await messageArchivesApi.exportDb()
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a'); a.href = url; a.download = `obs_Meldungsarchiv_${_ts()}.sqlite`; a.click()
   URL.revokeObjectURL(url)
 }
 
@@ -2206,6 +2668,18 @@ async function onImportDbFile(e) {
     importDbResult.value = { ok: true, text: t('settings.importexport.dbImportResultOk', { message: data.message ?? '', adapters: data.adapters_restarted ?? 0 }) }
   } catch (err) {
     importDbResult.value = { ok: false, text: err.response?.data?.detail ?? t('settings.importexport.dbImportFailed') }
+  }
+}
+
+async function onImportMessageArchiveDbFile(e) {
+  const file = e.target.files[0]; if (!file) return
+  importMessageArchiveDbFileName.value = file.name
+  importMessageArchiveDbResult.value = null
+  try {
+    const { data } = await messageArchivesApi.importDb(file)
+    importMessageArchiveDbResult.value = { ok: true, text: t('settings.importexport.messageArchiveDbImportResultOk', { message: data.message ?? '' }) }
+  } catch (err) {
+    importMessageArchiveDbResult.value = { ok: false, text: err.response?.data?.detail ?? t('settings.importexport.messageArchiveDbImportFailed') }
   }
 }
 
@@ -2264,8 +2738,9 @@ function formatAutobackupName(name) {
 
 function formatBytes(bytes) {
   if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  const region = activeRegionFormat.value
+  if (bytes < 1024 * 1024) return `${formatNumber(bytes / 1024, region, { decimals: 1 })} KB`
+  return `${formatNumber(bytes / 1024 / 1024, region, { decimals: 1 })} MB`
 }
 
 // ── KNX Projekt Import ──────────────────────────────────────────────────────

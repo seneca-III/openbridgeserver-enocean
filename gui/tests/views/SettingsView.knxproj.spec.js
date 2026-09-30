@@ -10,9 +10,11 @@ let authApi
 let dpApi
 let historySettingsApi
 let adapterApi
+let messageArchivesApi
 
 beforeEach(() => {
   vi.resetModules()
+  window.history.pushState({}, '', '/')
   const storage = {
     getItem: vi.fn().mockImplementation(key => (key === 'access_token' ? 'token' : 'de')),
     setItem: vi.fn(),
@@ -65,6 +67,10 @@ beforeEach(() => {
     importDb: vi.fn().mockResolvedValue({
       data: { message: 'DB restored', adapters_restarted: 2 },
     }),
+  }
+  messageArchivesApi = {
+    exportDb: vi.fn().mockResolvedValue({ data: new Blob(['message-archive-db']) }),
+    importDb: vi.fn().mockResolvedValue({ data: { message: 'Message archive restored' } }),
   }
   autobackupApi = {
     getConfig: vi.fn().mockResolvedValue({ data: { enabled: true, hour: 3, retention_days: 7 } }),
@@ -160,6 +166,7 @@ beforeEach(() => {
     authApi,
     adapterApi,
     configApi,
+    messageArchivesApi,
     autobackupApi,
     knxprojApi,
     iconsApi,
@@ -173,13 +180,14 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.doUnmock('@/api/client')
+  window.history.pushState({}, '', '/')
 })
 
-async function mountSettingsView() {
+async function mountSettingsView({ authUser = { id: 'u1', username: 'admin', is_admin: true } } = {}) {
   const pinia = createPinia()
   setActivePinia(pinia)
   const { useAuthStore } = await import('@/stores/auth')
-  useAuthStore().user = { id: 'u1', username: 'admin', is_admin: true }
+  useAuthStore().user = authUser
 
   const mod = await import('@/views/SettingsView.vue')
   const wrapper = mount(mod.default, {
@@ -256,6 +264,27 @@ function findReplaceExistingCheckbox(wrapper) {
 }
 
 describe('SettingsView KNX project import', () => {
+  it('opens the import/export tab from the query after admin auth becomes available', async () => {
+    window.history.pushState({}, '', '/settings?tab=importexport#knx-project-import')
+    const scrollIntoView = vi.fn()
+    Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', {
+      value: scrollIntoView,
+      configurable: true,
+    })
+
+    const wrapper = await mountSettingsView({ authUser: null })
+    expect(wrapper.find('input[accept=".knxproj"]').exists()).toBe(false)
+
+    const { useAuthStore } = await import('@/stores/auth')
+    useAuthStore().user = { id: 'u1', username: 'admin', is_admin: true }
+    await flushPromises()
+
+    expect(wrapper.find('input[accept=".knxproj"]').exists()).toBe(true)
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'start' })
+
+    wrapper.unmount()
+  })
+
   it('sends hierarchy_replace_existing by default and shows replaced tree counts', async () => {
     const wrapper = await mountSettingsView()
     await openImportExportTab(wrapper)
@@ -432,6 +461,16 @@ describe('SettingsView import/export coverage', () => {
     expect(wrapper.text()).toContain('Datenbankwiederherstellung OK')
     expect(wrapper.text()).toContain('2 Adapter neu gestartet')
 
+    await findButton(wrapper, 'Meldungsarchiv-SQLite herunterladen').trigger('click')
+    await flushPromises()
+    expect(messageArchivesApi.exportDb).toHaveBeenCalled()
+
+    const messageArchiveDbInput = wrapper.find('input[accept=".sqlite,.sqlite3,.db"]')
+    await selectFile(messageArchiveDbInput, new File(['sqlite'], 'messages.sqlite3', { type: 'application/octet-stream' }))
+    expect(messageArchivesApi.importDb).toHaveBeenCalled()
+    expect(wrapper.text()).toContain('Meldungsarchiv-Wiederherstellung OK')
+    expect(wrapper.text()).toContain('Message archive restored')
+
     const enableAutobackup = wrapper
       .findAll('label')
       .find(label => label.text().includes('Autobackup aktivieren'))
@@ -472,6 +511,17 @@ describe('SettingsView account and admin coverage', () => {
     await timezoneSearch.trigger('keydown.enter')
     await flushPromises()
     expect(wrapper.text()).toContain('Europe/Berlin')
+
+    const { useSettingsStore } = await import('@/stores/settings')
+    const settings = useSettingsStore()
+    const saveSettings = vi.spyOn(settings, 'save').mockResolvedValue()
+    const formatInputs = wrapper.findAll('input.font-mono').filter(input => input.attributes('type') === 'text')
+    await formatInputs[0].setValue('yyyy/MM/dd')
+    await formatInputs[1].setValue('H:mm')
+    const saveTimezone = wrapper.findAll('button').find(button => button.text() === 'Speichern')
+    await saveTimezone.trigger('click')
+    await flushPromises()
+    expect(saveSettings).toHaveBeenCalledWith('Europe/Berlin', 'yyyy/MM/dd', 'H:mm', 'de', 'auto', 'auto')
 
     const darkTheme = wrapper.findAll('input[type="radio"]').find(input => input.element.value === 'dark')
     await darkTheme.setValue()
@@ -545,7 +595,7 @@ describe('SettingsView account and admin coverage', () => {
     expect(authApi.createApiKey).toHaveBeenCalledWith('Automation')
     expect(wrapper.text()).toContain('obs_secret_key')
 
-    await wrapper.find('.table button').trigger('click')
+    await wrapper.get('[data-testid="apikey-delete-key-1"]').trigger('click')
     await flushPromises()
     expect(authApi.deleteApiKey).toHaveBeenCalledWith('key-1')
 

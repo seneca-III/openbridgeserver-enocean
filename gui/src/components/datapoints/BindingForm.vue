@@ -111,6 +111,14 @@
       <BindingFormOnewire
         v-if="selectedAdapterType === 'ONEWIRE'"
           :cfg="cfg"
+          :selected-instance-id="selectedInstanceId"
+          :onewire-sensors="onewireSensors"
+          :onewire-browse-loading="onewireBrowseLoading"
+          :onewire-browse-error="onewireBrowseError"
+          @onewire-browse="browseOnewireSensors"
+          @select-onewire-sensor="selectOnewireSensor"
+          @update-onewire-alias-draft="onOnewireAliasDraft"
+          @save-onewire-alias="saveOnewireAlias"
         />
 
       <!-- Home Assistant -->
@@ -139,6 +147,8 @@
       <BindingFormTimer
         v-if="selectedAdapterType === 'ZEITSCHALTUHR'"
           :cfg="cfg"
+          :dp-data-type="props.dpDataType"
+          :dp-unit="props.dpUnit"
           :zt-holidays="ztHolidays"
           :zt-holidays-loading="ztHolidaysLoading"
           :zt-holidays-error="ztHolidaysError"
@@ -332,12 +342,14 @@ import BindingFormTimer from '@/components/datapoints/binding-form/BindingFormTi
 import BindingFormPresenceSimulation from '@/components/datapoints/binding-form/BindingFormPresenceSimulation.vue'
 import BindingFormSnmp from '@/components/datapoints/binding-form/BindingFormSnmp.vue'
 import BindingFormMessage from '@/components/datapoints/binding-form/BindingFormMessage.vue'
+import { timerValueDefault, validateTimerValue } from '@/utils/timerValue'
 
 const props = defineProps({
   dpId:           { type: String,  required: true },
   initial:        { type: Object,  default: null },
   dpPersistValue: { type: Boolean, default: false },
   dpDataType:     { type: String,  default: 'UNKNOWN' },  // DataPoint.data_type for compat check
+  dpUnit:         { type: String,  default: '' },         // DataPoint.unit, shown next to typed value inputs
 })
 const emit = defineEmits(['save', 'cancel'])
 const { t } = useI18n()
@@ -390,7 +402,7 @@ const cfg = reactive({
   topic: '', publish_topic: '', retain: false, payload_template: '',
   source_data_type: '', json_key: '', xml_path: '',
   datapoint_id: '', device_id: '',
-  sensor_id: '', sensor_type: 'DS18B20',
+  sensor_id: '', property: 'temperature',
   // HOME_ASSISTANT
   entity_id: '', attribute: '', service_domain: '', service_name: '', service_data_key: '',
   // IOBROKER
@@ -415,6 +427,8 @@ const cfg = reactive({
   priority: null,
   cooldown_seconds: 0,
   send_on_change: true,
+  archive_id: '',
+  archive_strategy: 'send_only',
   // ZEITSCHALTUHR
   timer_type: 'daily', meta_type: 'none',
   weekdays: [0,1,2,3,4,5,6], months: [], day_of_month: 0,
@@ -426,7 +440,10 @@ const cfg = reactive({
   date_window_enabled: false,
   date_window_from: '',
   date_window_to: '',
-  value: '1',
+  // Typgerechter Startwert: der Adapter setzt für einen fehlenden Wert "1" ein,
+  // was ein DATE/TIME/DATETIME-Objekt nicht halten kann — die API weist einen
+  // solchen Schaltpunkt beim Speichern ab (siehe `timerValueDefault()`).
+  value: timerValueDefault(props.dpDataType),
 })
 
 // MQTT source data type constants + compatibility map
@@ -482,6 +499,12 @@ const iobrokerStates = ref([])
 const iobrokerBrowseLoading = ref(false)
 const iobrokerBrowseError = ref(null)
 let iobrokerBrowseTimer = null
+
+// 1-Wire sensor browser state
+const onewireSensors = ref([])
+const onewireBrowseLoading = ref(false)
+const onewireBrowseError = ref(null)
+const onewireAliasDrafts = reactive({})
 
 // SNMP Walk state
 const snmpWalkResults = ref([])
@@ -669,7 +692,7 @@ watch(() => props.initial, val => {
   if (cfg.date_window_to      == null) cfg.date_window_to      = ''
   if (cfg.date_window_from) parseWinExprInto(cfg.date_window_from, winFrom)
   if (cfg.date_window_to)   parseWinExprInto(cfg.date_window_to,   winTo)
-  if (cfg.value             == null) cfg.value             = '1'
+  if (cfg.value             == null) cfg.value             = timerValueDefault(props.dpDataType)
   // ANWESENHEITSSIMULATION defaults + select sync
   if (cfg.offset_override      === undefined) cfg.offset_override      = null
   if (cfg.on_presence_override === undefined) cfg.on_presence_override = null
@@ -690,6 +713,8 @@ watch(() => props.initial, val => {
   if (cfg.priority === undefined) cfg.priority = null
   if (cfg.cooldown_seconds == null) cfg.cooldown_seconds = 0
   if (cfg.send_on_change == null) cfg.send_on_change = true
+  if (cfg.archive_id == null) cfg.archive_id = ''
+  if (cfg.archive_strategy == null) cfg.archive_strategy = 'send_only'
   {
     const ANW_PRESETS = ['1', '7', '14']
     if (cfg.offset_override != null) {
@@ -880,6 +905,56 @@ function selectIoBrokerState(state) {
   iobrokerBrowseError.value = null
 }
 
+async function browseOnewireSensors() {
+  const instanceId = selectedInstanceId.value
+  if (!instanceId) {
+    onewireBrowseError.value = t('adapters.bindingForm.errors.selectOnewireInstanceFirst')
+    return
+  }
+  onewireBrowseLoading.value = true
+  onewireBrowseError.value = null
+  try {
+    const { data } = await adapterApi.onewireBrowseSensors(instanceId)
+    // The selected instance may have changed while this scan was in flight —
+    // discard a late response for an instance that's no longer selected.
+    if (selectedInstanceId.value !== instanceId) return
+    onewireSensors.value = data
+    if (data.length === 0) onewireBrowseError.value = t('adapters.bindingForm.errors.noSensorsFound')
+  } catch (e) {
+    if (selectedInstanceId.value !== instanceId) return
+    onewireBrowseError.value = e.response?.data?.detail ?? t('adapters.bindingForm.errors.onewireScanFailed')
+  } finally {
+    if (selectedInstanceId.value === instanceId) onewireBrowseLoading.value = false
+  }
+}
+
+function selectOnewireSensor({ rom_id, property }) {
+  cfg.sensor_id = rom_id
+  cfg.property = property
+}
+
+function onOnewireAliasDraft({ romId, label }) {
+  onewireAliasDrafts[romId] = label
+}
+
+async function saveOnewireAlias(romId) {
+  const instanceId = selectedInstanceId.value
+  const label = onewireAliasDrafts[romId]
+  if (!instanceId || label === undefined) return
+  try {
+    await adapterApi.onewireSetAlias(instanceId, romId, label)
+    // The selected instance may have changed while this PATCH was in flight —
+    // don't apply the saved label to whatever scan list is now displayed, since
+    // a same-rom_id sensor on the newly selected instance would get the wrong alias.
+    if (selectedInstanceId.value !== instanceId) return
+    const sensor = onewireSensors.value.find(s => s.rom_id === romId)
+    if (sensor) sensor.alias = label
+  } catch (e) {
+    if (selectedInstanceId.value !== instanceId) return
+    onewireBrowseError.value = e.response?.data?.detail ?? t('adapters.bindingForm.errors.onewireAliasSaveFailed')
+  }
+}
+
 async function snmpWalk(append = false) {
   const instanceId = selectedInstanceId.value
   if (!instanceId || !cfg.host) return
@@ -981,7 +1056,7 @@ watch(() => form.direction, () => {
 })
 
 watch(selectedInstanceId, (newId, oldId) => {
-  if (oldId && newId !== oldId && selectedAdapterType.value === 'MESSAGE') {
+  if (oldId && selectedAdapterType.value === 'MESSAGE') {
     cfg.providers = []
   }
   if (oldId && newId !== oldId && selectedAdapterType.value === 'ENOCEAN') {
@@ -992,6 +1067,18 @@ watch(selectedInstanceId, (newId, oldId) => {
     enoceanDevicesError.value = null
     enoceanDatapointsError.value = null
   }
+  // Discard the previous instance's 1-Wire scan — otherwise its sensors stay
+  // visible/selectable after switching instances, and a slow in-flight scan
+  // for the old instance could still overwrite this once it resolves (see
+  // the selectedInstanceId re-check in browseOnewireSensors()).
+  onewireSensors.value = []
+  onewireBrowseError.value = null
+  // Also unblock the Scan button immediately — otherwise a still-pending
+  // scan for the previous instance leaves it disabled until that request
+  // eventually settles (its own "finally" skips clearing this, since by
+  // then selectedInstanceId no longer matches the instance it was for).
+  onewireBrowseLoading.value = false
+  for (const key of Object.keys(onewireAliasDrafts)) delete onewireAliasDrafts[key]
 })
 
 // Zeitschaltuhr helpers
@@ -1264,7 +1351,7 @@ function buildConfig() {
     return c
   }
   if (type === 'ONEWIRE') {
-    return { sensor_id: cfg.sensor_id, sensor_type: cfg.sensor_type || 'DS18B20' }
+    return { sensor_id: cfg.sensor_id, property: cfg.property || 'temperature' }
   }
   if (type === 'HOME_ASSISTANT') {
     const c = { entity_id: cfg.entity_id }
@@ -1345,6 +1432,7 @@ function buildConfig() {
     return c
   }
   if (type === 'MESSAGE') {
+    const strategy = cfg.archive_strategy || 'send_only'
     const c = {
       operator: cfg.operator || '==',
       compare_value: cfg.compare_value,
@@ -1352,6 +1440,10 @@ function buildConfig() {
       providers: [...(cfg.providers ?? [])],
       send_on_change: cfg.send_on_change ?? true,
       cooldown_seconds: cfg.cooldown_seconds ?? 0,
+      archive_strategy: strategy,
+    }
+    if (['archive_only', 'send_and_archive'].includes(strategy) && cfg.archive_id?.trim()) {
+      c.archive_id = cfg.archive_id.trim().toLowerCase()
     }
     if (cfg.title?.trim()) c.title = cfg.title.trim()
     if (cfg.priority != null) c.priority = cfg.priority
@@ -1365,6 +1457,18 @@ async function submit() {
   saving.value = true
   try {
     const config     = buildConfig()
+    // Zeitschaltuhr: Schaltwert muss zum Objekttyp passen (Issue #1008) —
+    // sonst antwortet die API mit 422.
+    if (selectedAdapterType.value === 'ZEITSCHALTUHR' && config.timer_type !== 'meta') {
+      // Bewusst `cfg.value` und nicht `config.value`: `buildConfig()` setzt für
+      // einen leeren Wert den Default "1" ein, sodass die Prüfung sonst den
+      // Ersatzwert absegnet und ein getipptes Objekt mit einem Schaltwert
+      // gespeichert würde, den niemand eingegeben hat.
+      const valueErrorKey = validateTimerValue(cfg.value, props.dpDataType)
+      if (valueErrorKey) {
+        error.value = t(valueErrorKey); saving.value = false; return
+      }
+    }
     const effectiveDirection = ['ANWESENHEITSSIMULATION', 'MESSAGE'].includes(selectedAdapterType.value) ? 'SOURCE' : form.direction
     const throttleMs = form.throttle_value > 0
       ? Math.round(form.throttle_value * THROTTLE_FACTORS[form.throttle_unit]) : null

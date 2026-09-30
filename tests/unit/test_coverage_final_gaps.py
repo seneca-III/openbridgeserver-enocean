@@ -2,19 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from contextlib import asynccontextmanager
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import asyncio
 import pytest
-
+from fastapi import HTTPException
 
 # ===========================================================================
 # obs/api/v1/camera.py — _check_ssrf, _camera_auth
 # ===========================================================================
-
-from obs.api.v1.camera import _build_fetch_targets as _check_ssrf, _camera_auth
-from fastapi import HTTPException
+from obs.api.v1.camera import _build_fetch_targets as _check_ssrf
+from obs.api.v1.camera import _camera_auth
 from obs.security.url_targets import UrlTargetDecision
 
 
@@ -83,7 +84,9 @@ async def test_camera_auth_bearer_header(monkeypatch):
     monkeypatch.setattr("obs.api.v1.camera.decode_token", lambda t: "admin")
     req = MagicMock()
     req.headers = {"Authorization": "Bearer mytoken"}
-    result = await _camera_auth(req, _token="")
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value={"exists": 1})
+    result = await _camera_auth(req, _token="", db=db)
     assert result == "admin"
 
 
@@ -92,17 +95,18 @@ async def test_camera_auth_query_token(monkeypatch):
     monkeypatch.setattr("obs.api.v1.camera.decode_token", lambda t: "admin")
     req = MagicMock()
     req.headers = {}
-    result = await _camera_auth(req, _token="querytoken")
+    db = MagicMock()
+    db.fetchone = AsyncMock(return_value={"exists": 1})
+    result = await _camera_auth(req, _token="querytoken", db=db)
     assert result == "admin"
 
 
 @pytest.mark.asyncio
-async def test_camera_auth_missing_raises_401():
+async def test_camera_auth_missing_returns_anonymous_identity():
     req = MagicMock()
     req.headers = {}
-    with pytest.raises(HTTPException) as exc_info:
-        await _camera_auth(req, _token="")
-    assert exc_info.value.status_code == 401
+    result = await _camera_auth(req, _token="")
+    assert result is None
 
 
 # ===========================================================================
@@ -111,15 +115,31 @@ async def test_camera_auth_missing_raises_401():
 
 import obs.api.v1.autobackup as ab_api
 from obs.api.v1.autobackup import (
-    _load_config,
-    _save_config,
-    _list_backups,
-    _prune_old_backups,
     AutobackupConfig,
+    _list_backups,
+    _load_config,
+    _prune_old_backups,
+    _save_config,
 )
 
 
-class _DbStub:
+class _AuditTxMixin:
+    _transaction_depth = 0
+
+    @property
+    def in_transaction(self):
+        return self._transaction_depth > 0
+
+    @asynccontextmanager
+    async def transaction(self):
+        self._transaction_depth += 1
+        try:
+            yield
+        finally:
+            self._transaction_depth -= 1
+
+
+class _DbStub(_AuditTxMixin):
     def __init__(self, rows=None, one=None):
         self._rows = rows or []
         self._one = one
@@ -132,6 +152,9 @@ class _DbStub:
         return self._one
 
     async def execute_and_commit(self, query, params=()):
+        self.committed.append((query, params))
+
+    async def execute(self, query, params=()):
         self.committed.append((query, params))
 
 
@@ -241,7 +264,7 @@ async def test_list_autobackups_endpoint(tmp_path, monkeypatch):
 async def test_delete_autobackup_not_found(tmp_path, monkeypatch):
     monkeypatch.setattr(ab_api, "_autobackup_dir", lambda: tmp_path)
     with pytest.raises(HTTPException) as exc_info:
-        await ab_api.delete_autobackup(name="20260601-0300", _admin="admin")
+        await ab_api.delete_autobackup(name="20260601-0300", _admin="admin", db=_DbStub())
     assert exc_info.value.status_code == 404
 
 
@@ -249,7 +272,7 @@ async def test_delete_autobackup_not_found(tmp_path, monkeypatch):
 async def test_delete_autobackup_invalid_name(tmp_path, monkeypatch):
     monkeypatch.setattr(ab_api, "_autobackup_dir", lambda: tmp_path)
     with pytest.raises(HTTPException) as exc_info:
-        await ab_api.delete_autobackup(name="../../etc/passwd", _admin="admin")
+        await ab_api.delete_autobackup(name="../../etc/passwd", _admin="admin", db=_DbStub())
     assert exc_info.value.status_code == 400
 
 
@@ -257,7 +280,7 @@ async def test_delete_autobackup_invalid_name(tmp_path, monkeypatch):
 async def test_delete_autobackup_success(tmp_path, monkeypatch):
     monkeypatch.setattr(ab_api, "_autobackup_dir", lambda: tmp_path)
     (tmp_path / "20260601-0300.json").write_text("{}")
-    result = await ab_api.delete_autobackup(name="20260601-0300", _admin="admin")
+    result = await ab_api.delete_autobackup(name="20260601-0300", _admin="admin", db=_DbStub())
     assert result["ok"] is True
 
 
@@ -265,7 +288,7 @@ async def test_delete_autobackup_success(tmp_path, monkeypatch):
 # obs/api/v1/icons.py — FA import path, export path coverage
 # ===========================================================================
 
-from obs.api.v1.icons import _secure_filename, _safe_name
+from obs.api.v1.icons import _safe_name, _secure_filename
 
 
 def test_secure_filename_strips_slashes():
@@ -440,6 +463,7 @@ async def test_proxy_camera_rejects_non_http(monkeypatch):
 @pytest.mark.asyncio
 async def test_proxy_camera_head_returns_redirect(monkeypatch):
     monkeypatch.setattr("obs.api.v1.camera._build_fetch_targets", AsyncMock(return_value=(["http://camera.local/stream"], {}, {})))
+    monkeypatch.setattr("obs.api.v1.camera._ensure_camera_page_scope", AsyncMock(return_value=None))
     mock_head = MagicMock(status_code=301, headers={})
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -453,6 +477,7 @@ async def test_proxy_camera_head_returns_redirect(monkeypatch):
             password="",
             apikey_param="",
             apikey_value="",
+            page_id="page-camera",
             _user="admin",
         )
     assert exc_info.value.status_code == 400
@@ -461,6 +486,7 @@ async def test_proxy_camera_head_returns_redirect(monkeypatch):
 @pytest.mark.asyncio
 async def test_proxy_camera_head_returns_401(monkeypatch):
     monkeypatch.setattr("obs.api.v1.camera._build_fetch_targets", AsyncMock(return_value=(["http://camera.local/stream"], {}, {})))
+    monkeypatch.setattr("obs.api.v1.camera._ensure_camera_page_scope", AsyncMock(return_value=None))
     mock_head = MagicMock(status_code=401, headers={})
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -474,6 +500,7 @@ async def test_proxy_camera_head_returns_401(monkeypatch):
             password="",
             apikey_param="",
             apikey_value="",
+            page_id="page-camera",
             _user="admin",
         )
     assert exc_info.value.status_code == 502
@@ -484,6 +511,7 @@ async def test_proxy_camera_head_request_error(monkeypatch):
     import httpx
 
     monkeypatch.setattr("obs.api.v1.camera._build_fetch_targets", AsyncMock(return_value=(["http://camera.local/stream"], {}, {})))
+    monkeypatch.setattr("obs.api.v1.camera._ensure_camera_page_scope", AsyncMock(return_value=None))
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
     mock_client.__aexit__ = AsyncMock(return_value=False)
@@ -496,6 +524,7 @@ async def test_proxy_camera_head_request_error(monkeypatch):
             password="",
             apikey_param="",
             apikey_value="",
+            page_id="page-camera",
             _user="admin",
         )
     assert exc_info.value.status_code == 502
@@ -506,6 +535,7 @@ async def test_proxy_camera_success_returns_streaming_response(monkeypatch):
     from fastapi.responses import StreamingResponse
 
     monkeypatch.setattr("obs.api.v1.camera._build_fetch_targets", AsyncMock(return_value=(["http://camera.local/stream"], {}, {})))
+    monkeypatch.setattr("obs.api.v1.camera._ensure_camera_page_scope", AsyncMock(return_value=None))
     mock_head = MagicMock(status_code=200, headers={"content-type": "video/mjpeg"})
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -518,6 +548,7 @@ async def test_proxy_camera_success_returns_streaming_response(monkeypatch):
         password="pw",
         apikey_param="key",
         apikey_value="abc",
+        page_id="page-camera",
         _user="admin",
     )
     assert isinstance(result, StreamingResponse)
@@ -530,6 +561,7 @@ async def test_proxy_camera_head_405_optimistic(monkeypatch):
     from fastapi.responses import StreamingResponse
 
     monkeypatch.setattr("obs.api.v1.camera._build_fetch_targets", AsyncMock(return_value=(["http://camera.local/stream"], {}, {})))
+    monkeypatch.setattr("obs.api.v1.camera._ensure_camera_page_scope", AsyncMock(return_value=None))
     mock_head = MagicMock(status_code=405, headers={})
     mock_client = AsyncMock()
     mock_client.__aenter__ = AsyncMock(return_value=mock_client)
@@ -542,6 +574,7 @@ async def test_proxy_camera_head_405_optimistic(monkeypatch):
         password="",
         apikey_param="",
         apikey_value="",
+        page_id="page-camera",
         _user="admin",
     )
     assert isinstance(result, StreamingResponse)
@@ -581,7 +614,7 @@ async def test_import_db_saves_to_tmp_and_calls_restore(monkeypatch, tmp_path):
     try:
         # Non-SQLite content triggers validation error
         await config_api.import_db(file=fake_file, _admin="admin", db=MagicMock())
-    except (HTTPException, Exception):
+    except (HTTPException, TypeError):
         pass  # expected
 
 
@@ -606,7 +639,7 @@ async def test_init_autobackup_scheduler_and_get(tmp_path, monkeypatch):
             scheduler._task.cancel()
             try:
                 await scheduler._task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
                 pass
     finally:
         ab_api_2._scheduler = original
@@ -623,12 +656,11 @@ def test_get_autobackup_scheduler_raises_when_none():
 
 
 def test_list_backups_with_unparseable_stem(tmp_path, monkeypatch):
-    """_list_backups handles stems that don't match date format."""
+    """_list_backups ignores stems that don't match the backup date format."""
     monkeypatch.setattr(ab_api_2, "_autobackup_dir", lambda: tmp_path)
     (tmp_path / "notadate.json").write_text("{}")
     result = _list_backups()
-    assert len(result) == 1
-    assert result[0].name == "notadate"
+    assert result == []
 
 
 @pytest.mark.asyncio
@@ -682,8 +714,8 @@ async def test_run_autobackup_now_when_disabled(tmp_path, monkeypatch):
 from obs.api.v1.visu import (
     _now_iso,
     _row_to_node,
-    get_tree,
     get_children,
+    get_tree,
 )
 
 
@@ -696,11 +728,14 @@ def _make_node_row(**kw):
         "icon": None,
         "node_order": 0,
         "access": "public",
+        "access_mode": "public",
         "page_config": None,
         "created_at": "2026-01-01T00:00:00",
         "updated_at": "2026-01-01T00:00:00",
     }
     defaults.update(kw)
+    if "access" in kw and "access_mode" not in kw:
+        defaults["access_mode"] = kw["access"]
 
     class R(dict):
         def __getitem__(self, k):
@@ -727,20 +762,8 @@ def test_row_to_node_converts_row():
 
 @pytest.mark.asyncio
 async def test_get_visu_tree_empty():
-    class _FakeCursor:
-        async def fetchall(self):
-            return []
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            pass
-
-    conn = MagicMock()
-    conn.execute = MagicMock(return_value=_FakeCursor())
     db = MagicMock()
-    db.conn = conn
+    db.fetchall = AsyncMock(return_value=[])
     result = await get_tree(db=db)
     assert result == []
 
@@ -748,21 +771,9 @@ async def test_get_visu_tree_empty():
 @pytest.mark.asyncio
 async def test_list_nodes_returns_nodes():
     row = _make_node_row(type="PAGE", label="Home")
-
-    class _FakeCursor:
-        async def fetchall(self):
-            return [row]
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            pass
-
-    conn = MagicMock()
-    conn.execute = MagicMock(return_value=_FakeCursor())
     db = MagicMock()
-    db.conn = conn
+    db.fetchone = AsyncMock(return_value=None)
+    db.fetchall = AsyncMock(return_value=[row])
     result = await get_children(node_id="root", db=db)
     assert len(result) >= 0  # just verify it runs
 
@@ -775,12 +786,12 @@ import obs.api.v1.adapters as adapters_api
 
 
 def test_iobroker_obs_type_known():
-    data_type, unit = adapters_api._iobroker_obs_type("number")
+    data_type, _unit = adapters_api._iobroker_obs_type("number")
     assert data_type == "FLOAT"
 
 
 def test_iobroker_obs_type_unknown():
-    data_type, unit = adapters_api._iobroker_obs_type("unknown_type_xyz")
+    _data_type, unit = adapters_api._iobroker_obs_type("unknown_type_xyz")
     assert unit is None
 
 
@@ -850,7 +861,7 @@ async def test_restore_autobackup_valid_config(tmp_path, monkeypatch):
         patch("obs.adapters.registry.start_all", new_callable=AsyncMock),
         patch("obs.adapters.registry.get_all_instances", return_value={}),
         patch("obs.core.event_bus.get_event_bus", return_value=MagicMock()),
-        patch("obs.api.v1.config.get_registry", return_value=MagicMock(all=lambda: [])),
+        patch("obs.api.v1.config.get_registry", return_value=MagicMock(all=list)),
         patch("obs.api.v1.icons._icons_dir") as mock_dir,
     ):
         mock_dir.return_value = tmp_path
@@ -894,27 +905,14 @@ async def test_anwesenheit_handle_control_event_wrong_dp():
 # obs/api/v1/visu.py — _get_node_or_404, _check_user_access
 # ===========================================================================
 
-from obs.api.v1.visu import _get_node_or_404, _check_user_access
+from obs.api.v1.visu import _check_user_access, _get_node_or_404
 
 
 @pytest.mark.asyncio
 async def test_get_node_or_404_not_found():
     """_get_node_or_404 raises 404 when node doesn't exist."""
-
-    class _FakeCursor:
-        async def fetchone(self):
-            return None
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            pass
-
-    conn = MagicMock()
-    conn.execute = MagicMock(return_value=_FakeCursor())
     db = MagicMock()
-    db.conn = conn
+    db.fetchone = AsyncMock(return_value=None)
     with pytest.raises(HTTPException) as exc_info:
         await _get_node_or_404(db, "nonexistent")
     assert exc_info.value.status_code == 404
@@ -956,7 +954,7 @@ async def test_check_user_access_empty():
 @pytest.mark.asyncio
 async def test_clear_bindings_and_restart(monkeypatch):
     """clear_bindings stops + restarts adapters."""
-    monkeypatch.setattr(config_api, "get_registry", lambda: MagicMock(all=lambda: []))
+    monkeypatch.setattr(config_api, "get_registry", lambda: MagicMock(all=list))
 
     class _Db:
         async def fetchone(self, q, p=()):
@@ -981,7 +979,7 @@ async def test_clear_bindings_and_restart(monkeypatch):
 @pytest.mark.asyncio
 async def test_export_config_with_icon_dir(monkeypatch, tmp_path):
     """export_config includes icons from icon dir."""
-    monkeypatch.setattr(config_api, "get_registry", lambda: MagicMock(all=lambda: []))
+    monkeypatch.setattr(config_api, "get_registry", lambda: MagicMock(all=list))
     (tmp_path / "test_icon.svg").write_text('<svg><path d="M0 0"/></svg>')
     monkeypatch.setattr("obs.api.v1.icons._icons_dir", lambda: tmp_path)
 
@@ -1060,7 +1058,7 @@ async def test_check_history_access_public_page(monkeypatch):
     """Public page allows unauthenticated access."""
     from obs.api.v1 import history as hist_api
 
-    monkeypatch.setattr(hist_api, "_resolve_page_access", AsyncMock(return_value="public"))
+    monkeypatch.setattr(hist_api, "_resolve_page_access_with_node", AsyncMock(return_value=("public", None)))
     req = MagicMock()
     req.headers = {"X-Page-Id": "page-1"}
     await _check_history_access(req, user=None, db=MagicMock())  # should not raise
@@ -1071,7 +1069,7 @@ async def test_check_history_access_private_page(monkeypatch):
     """Private page without user raises 401."""
     from obs.api.v1 import history as hist_api
 
-    monkeypatch.setattr(hist_api, "_resolve_page_access", AsyncMock(return_value="private"))
+    monkeypatch.setattr(hist_api, "_resolve_page_access_with_node", AsyncMock(return_value=("private", "page-1")))
     req = MagicMock()
     req.headers = {"X-Page-Id": "page-1"}
     with pytest.raises(HTTPException) as exc_info:
@@ -1160,8 +1158,9 @@ def test_registry_get_value_missing(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_get_bindings_for_dp_empty():
-    from obs.api.v1.bindings import _get_bindings_for_dp
     import uuid
+
+    from obs.api.v1.bindings import _get_bindings_for_dp
 
     class _Db:
         async def fetchall(self, q, p=()):
@@ -1179,8 +1178,8 @@ async def test_get_bindings_for_dp_empty():
 @pytest.mark.asyncio
 async def test_broadcast_nowait_no_manager(monkeypatch):
     """_broadcast_nowait silently drops when WS manager not initialized."""
-    from obs.log_buffer import _broadcast_nowait
     import obs.api.v1.websocket as ws_mod
+    from obs.log_buffer import _broadcast_nowait
 
     monkeypatch.setattr(ws_mod, "get_ws_manager", lambda: (_ for _ in ()).throw(RuntimeError("not init")))
     _broadcast_nowait({"level": "INFO", "message": "test"})  # should not raise
@@ -1190,6 +1189,7 @@ def test_log_buffer_handler_install():
     """LogBufferHandler.install attaches to root logger."""
     import asyncio
     import logging
+
     from obs.log_buffer import LogBufferHandler
 
     loop = asyncio.new_event_loop()
@@ -1213,20 +1213,8 @@ async def test_get_breadcrumb_empty():
     """get_breadcrumb returns empty list for non-existent node."""
     from obs.api.v1.visu import get_breadcrumb
 
-    class _FakeCursor:
-        async def fetchone(self):
-            return None
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            pass
-
-    conn = MagicMock()
-    conn.execute = MagicMock(return_value=_FakeCursor())
     db = MagicMock()
-    db.conn = conn
+    db.fetchone = AsyncMock(return_value=None)
     result = await get_breadcrumb(node_id="nonexistent", db=db)
     assert result == []
 
@@ -1235,21 +1223,8 @@ async def test_get_breadcrumb_empty():
 async def test_get_node_found():
     """_get_node_or_404 returns node when found."""
     node_row = _make_node_row(type="PAGE", name="Found")
-
-    class _FakeCursor:
-        async def fetchone(self):
-            return node_row
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            pass
-
-    conn = MagicMock()
-    conn.execute = MagicMock(return_value=_FakeCursor())
     db = MagicMock()
-    db.conn = conn
+    db.fetchone = AsyncMock(return_value=node_row)
     result = await _get_node_or_404(db, "some-id")
     assert result.name == "Found"
 
@@ -1262,8 +1237,9 @@ async def test_get_node_found():
 @pytest.mark.asyncio
 async def test_reload_mosquitto_permission_error(monkeypatch):
     """reload_mosquitto handles PermissionError on SIGHUP."""
-    from obs.core.mqtt_passwd import reload_mosquitto
     import os
+
+    from obs.core.mqtt_passwd import reload_mosquitto
 
     monkeypatch.setattr(os, "kill", lambda pid, sig: (_ for _ in ()).throw(PermissionError("denied")))
     await reload_mosquitto(reload_pid=1)  # should not raise
@@ -1310,8 +1286,9 @@ def test_build_tls_context_insecure():
 
 
 def _make_zs_adapter_for_fire():
-    from obs.adapters.zeitschaltuhr.adapter import ZeitschaltuhrAdapter
     from zoneinfo import ZoneInfo
+
+    from obs.adapters.zeitschaltuhr.adapter import ZeitschaltuhrAdapter
 
     adapter = ZeitschaltuhrAdapter.__new__(ZeitschaltuhrAdapter)
     adapter._instance_id = "test"
@@ -1332,8 +1309,9 @@ def _make_zs_adapter_for_fire():
 async def test_fire_binding_bool_true():
     """_fire_binding converts 'true' string to bool True."""
     adapter = _make_zs_adapter_for_fire()
-    from obs.adapters.zeitschaltuhr.adapter import ZeitschaltuhrBindingConfig, TimerType
     from datetime import time as dt_time
+
+    from obs.adapters.zeitschaltuhr.adapter import TimerType, ZeitschaltuhrBindingConfig
 
     cfg = ZeitschaltuhrBindingConfig(timer_type=TimerType.DAILY, time=dt_time(8, 0), value="true")
     binding = MagicMock(datapoint_id=uuid.uuid4(), id="b1")
@@ -1347,8 +1325,9 @@ async def test_fire_binding_bool_true():
 async def test_fire_binding_numeric_value():
     """_fire_binding converts numeric string to int."""
     adapter = _make_zs_adapter_for_fire()
-    from obs.adapters.zeitschaltuhr.adapter import ZeitschaltuhrBindingConfig, TimerType
     from datetime import time as dt_time
+
+    from obs.adapters.zeitschaltuhr.adapter import TimerType, ZeitschaltuhrBindingConfig
 
     cfg = ZeitschaltuhrBindingConfig(timer_type=TimerType.DAILY, time=dt_time(8, 0), value="42")
     binding = MagicMock(datapoint_id=uuid.uuid4(), id="b2")
@@ -1361,8 +1340,9 @@ async def test_fire_binding_numeric_value():
 async def test_fire_binding_float_value():
     """_fire_binding converts float string to float."""
     adapter = _make_zs_adapter_for_fire()
-    from obs.adapters.zeitschaltuhr.adapter import ZeitschaltuhrBindingConfig, TimerType
     from datetime import time as dt_time
+
+    from obs.adapters.zeitschaltuhr.adapter import TimerType, ZeitschaltuhrBindingConfig
 
     cfg = ZeitschaltuhrBindingConfig(timer_type=TimerType.DAILY, time=dt_time(8, 0), value="3.14")
     binding = MagicMock(datapoint_id=uuid.uuid4(), id="b3")
@@ -1375,8 +1355,9 @@ async def test_fire_binding_float_value():
 async def test_fire_binding_string_value():
     """_fire_binding passes through non-numeric strings as-is."""
     adapter = _make_zs_adapter_for_fire()
-    from obs.adapters.zeitschaltuhr.adapter import ZeitschaltuhrBindingConfig, TimerType
     from datetime import time as dt_time
+
+    from obs.adapters.zeitschaltuhr.adapter import TimerType, ZeitschaltuhrBindingConfig
 
     cfg = ZeitschaltuhrBindingConfig(timer_type=TimerType.DAILY, time=dt_time(8, 0), value="on_scene_2")
     binding = MagicMock(datapoint_id=uuid.uuid4(), id="b4")
@@ -1388,22 +1369,24 @@ async def test_fire_binding_string_value():
 def test_get_sun_event_returns_none_on_error():
     """_get_sun_event returns None when astral raises."""
     adapter = _make_zs_adapter_for_fire()
-    from obs.adapters.zeitschaltuhr.adapter import TimeRef
     from datetime import date
 
+    from obs.adapters.zeitschaltuhr.adapter import TimeRef
+
     with patch("obs.adapters.zeitschaltuhr.adapter.ZeitschaltuhrAdapter._get_sun_event", return_value=None):
-        result = adapter._get_sun_event(TimeRef.SUNRISE, date.today())
+        result = adapter._get_sun_event(TimeRef.SUNRISE, date(2026, 1, 1))
     assert result is None
 
 
 def test_get_solar_altitude_exception():
     """_get_solar_altitude_time returns None on exception."""
     adapter = _make_zs_adapter_for_fire()
-    from obs.adapters.zeitschaltuhr.adapter import SunDirection
     from datetime import date
 
+    from obs.adapters.zeitschaltuhr.adapter import SunDirection
+
     with patch("obs.adapters.zeitschaltuhr.adapter.ZeitschaltuhrAdapter._get_solar_altitude_time", return_value=None):
-        result = adapter._get_solar_altitude_time(10.0, SunDirection.RISING, date.today())
+        result = adapter._get_solar_altitude_time(10.0, SunDirection.RISING, date(2026, 1, 1))
     assert result is None
 
 
@@ -1491,6 +1474,19 @@ def _make_visu_db(row=None):
     db.conn = conn
     db.fetchone = AsyncMock(return_value=node_row)
     db.fetchall = AsyncMock(return_value=[node_row])
+    db.execute = AsyncMock(return_value=None)
+    db.execute_and_commit = AsyncMock(return_value=None)
+    db.in_transaction = False
+
+    @asynccontextmanager
+    async def transaction():
+        db.in_transaction = True
+        try:
+            yield
+        finally:
+            db.in_transaction = False
+
+    db.transaction = MagicMock(side_effect=transaction)
     return db
 
 
@@ -1498,7 +1494,7 @@ def _make_visu_db(row=None):
 # obs/api/v1/visu.py — create_node with dual-mode cursor
 # ===========================================================================
 
-from obs.api.v1.visu import create_node, delete_node, update_node, get_breadcrumb
+from obs.api.v1.visu import create_node, delete_node, get_breadcrumb, update_node
 from obs.models.visu import VisuNodeCreate, VisuNodeUpdate
 
 
@@ -1510,7 +1506,7 @@ async def test_visu_create_node_success():
     body = VisuNodeCreate(name="New Page", type="PAGE", parent_id=None)
     result = await create_node(body=body, db=db, _user="admin")
     assert result.name == "New Page"
-    assert db.conn.commit.called
+    assert db.transaction.called
 
 
 @pytest.mark.asyncio
@@ -1520,7 +1516,6 @@ async def test_visu_delete_node_success():
     db = _make_visu_db(row=node_row)
     await delete_node(node_id="del-1", db=db, _user="admin")
     assert db.conn.execute.call_count >= 2
-    assert db.conn.commit.called
 
 
 @pytest.mark.asyncio
@@ -1547,7 +1542,7 @@ async def test_visu_get_breadcrumb_with_node():
 # obs/api/v1/visu.py — get_page, save_page, get_node, update_node more paths
 # ===========================================================================
 
-from obs.api.v1.visu import get_page, get_node, save_page
+from obs.api.v1.visu import get_node, get_page, save_page
 from obs.models.visu import PageConfig
 
 
@@ -1592,9 +1587,9 @@ async def test_visu_save_page_success(monkeypatch):
     node_row = _make_node_row(id="p1", type="PAGE", name="Page")
     db = _make_visu_db(row=node_row)
     cfg = PageConfig(grid_cols=12, grid_row_height=80, background=None, widgets=[])
-    await save_page(node_id="p1", config=cfg, db=db, _user="admin")
+    await save_page(node_id="p1", config=cfg, request=None, db=db, _user="admin")
     assert db.conn.execute.called
-    assert db.conn.commit.called
+    assert db.transaction.called
 
 
 @pytest.mark.asyncio
@@ -1617,7 +1612,7 @@ async def test_visu_update_node_access_pin(monkeypatch):
     """update_node with access_pin hashes it."""
     node_row = _make_node_row(id="n1", type="PAGE", name="PinPage")
     db = _make_visu_db(row=node_row)
-    body = VisuNodeUpdate(access_pin="1234")
+    body = VisuNodeUpdate(access="protected", access_pin="1234")
     result = await update_node(node_id="n1", body=body, db=db, _user="admin")
     assert result is not None
 
@@ -1626,8 +1621,7 @@ async def test_visu_update_node_access_pin(monkeypatch):
 # obs/api/v1/adapters.py — create_instance, update_instance, delete_instance
 # ===========================================================================
 
-from obs.api.v1.adapters import create_instance, update_instance, delete_instance
-from obs.api.v1.adapters import AdapterInstanceCreate, AdapterInstanceUpdate
+from obs.api.v1.adapters import AdapterInstanceCreate, AdapterInstanceUpdate, create_instance, delete_instance, update_instance
 
 
 @pytest.mark.asyncio
@@ -1694,7 +1688,7 @@ import obs.api.v1.system as sys_api
 @pytest.mark.asyncio
 async def test_adapters_detail_empty(monkeypatch):
     """adapters_detail returns empty list when no running instances."""
-    monkeypatch.setattr("obs.adapters.registry.get_all_instances", lambda: {})
+    monkeypatch.setattr("obs.adapters.registry.get_all_instances", dict)
     result = await sys_api.adapters_detail(_user="admin")
     assert result == []
 
@@ -1739,8 +1733,14 @@ async def test_update_app_settings(monkeypatch):
     """update_app_settings saves timezone and notifies logic manager."""
     monkeypatch.setattr("obs.logic.manager.get_logic_manager", lambda: MagicMock(update_app_config=MagicMock()))
 
-    class _Db:
-        async def execute_and_commit(self, q, p=()):
+    class _Db(_AuditTxMixin):
+        async def fetchone(self, q, p=()):
+            return None
+
+        async def execute(self, q, p=()):
+            pass
+
+        async def commit(self):
             pass
 
     from obs.api.v1.system import AppSettingsIn, update_app_settings
@@ -1753,11 +1753,10 @@ async def test_update_app_settings(monkeypatch):
 @pytest.mark.asyncio
 async def test_test_history_sqlite():
     """test_history_connection returns ok for SQLite."""
-    from obs.api.v1.system import test_history_connection
-    from obs.api.v1.system import HistorySettingsIn
+    from obs.api.v1.system import HistorySettingsIn, test_history_connection
 
     body = HistorySettingsIn(plugin="sqlite", default_window_hours=168)
-    result = await test_history_connection(body=body, _admin="admin")
+    result = await test_history_connection(body=body, _admin="admin", db=_DbStub())
     assert result.ok is True
 
 
@@ -1765,7 +1764,7 @@ async def test_test_history_sqlite():
 # obs/api/v1/visu.py — pin_auth, get_node_users
 # ===========================================================================
 
-from obs.api.v1.visu import pin_auth, get_node_users
+from obs.api.v1.visu import get_node_users, pin_auth
 
 
 @pytest.mark.asyncio
@@ -1775,6 +1774,7 @@ async def test_pin_auth_not_found(monkeypatch):
 
     db = _make_visu_db(row=None)
     db.conn.execute.return_value = _DualCursor(row=None)
+    db.fetchone = AsyncMock(return_value=None)
 
     body = PinAuthRequest(pin="1234")
     req = MagicMock()
@@ -1810,17 +1810,21 @@ async def test_delete_instance_success(monkeypatch):
             return super().__getitem__(k)
 
     class _Db:
-        committed = []
+        committed: ClassVar[list] = []
 
         async def fetchone(self, q, p=()):
-            return _Row({"id": str(uuid.uuid4())})
+            return _Row({"id": str(uuid.uuid4()), "adapter_type": "MQTT"})
 
-        async def execute_and_commit(self, q, p=()):
+        async def execute(self, q, p=()):
             _Db.committed.append(q)
+
+        @asynccontextmanager
+        async def transaction(self):
+            yield
 
     monkeypatch.setattr("obs.adapters.registry.stop_instance", AsyncMock())
     await delete_instance(instance_id=uuid.uuid4(), _user="admin", db=_Db())
-    assert len(_Db.committed) == 2  # bindings + instance delete
+    assert len(_Db.committed) == 3  # bindings + grants + instance delete
 
 
 @pytest.mark.asyncio
@@ -1846,19 +1850,22 @@ async def test_test_instance_not_found():
 @pytest.mark.asyncio
 async def test_create_nav_link():
     """create_nav_link inserts and returns the link."""
-    from obs.api.v1.system import create_nav_link, NavLinkIn
+    from obs.api.v1.system import NavLinkIn, create_nav_link
 
     class _Row(dict):
         def __getitem__(self, k):
             return super().__getitem__(k)
 
-    class _Db:
-        _created = {}
+    class _Db(_AuditTxMixin):
+        _created: ClassVar[dict] = {}
 
         async def fetchone(self, q, p=()):
             return _Row({"id": "new-link", "label": "Test", "url": "https://x.com", "icon": "", "sort_order": 0, "open_new_tab": 1})
 
         async def execute_and_commit(self, q, p=()):
+            pass
+
+        async def execute(self, q, p=()):
             pass
 
     body = NavLinkIn(label="Test", url="https://x.com")
@@ -1896,13 +1903,11 @@ async def test_set_node_users_empty():
     """set_node_users clears all users for a node."""
     node_row = _make_node_row(id="n1", type="PAGE", name="Page")
     db = _make_visu_db(row=node_row)
-    db.fetchone = AsyncMock(return_value=None)  # users don't exist
     db.fetchall = AsyncMock(return_value=[])
 
     body = VisuNodeUsersUpdate(usernames=[])
     await set_node_users(node_id="n1", body=body, db=db, _admin="admin")
     assert db.conn.execute.called
-    assert db.conn.commit.called
 
 
 @pytest.mark.asyncio
@@ -1915,7 +1920,7 @@ async def test_get_node_users_returns_usernames():
         def __getitem__(self, k):
             return super().__getitem__(k)
 
-    db.fetchall = AsyncMock(return_value=[_URow({"username": "alice"}), _URow({"username": "bob"})])
+    db.fetchall = AsyncMock(return_value=[_URow({"principal_id": "alice"}), _URow({"principal_id": "bob"})])
     result = await get_node_users(node_id="n1", db=db, _admin="admin")
     assert result == ["alice", "bob"]
 
@@ -1924,8 +1929,8 @@ async def test_get_node_users_returns_usernames():
 # obs/api/v1/visu.py — import_nodes, export_node
 # ===========================================================================
 
-from obs.api.v1.visu import import_nodes, export_node
-from obs.models.visu import VisuImportRequest, VisuExportNode
+from obs.api.v1.visu import export_node, import_nodes
+from obs.models.visu import VisuExportNode, VisuImportRequest
 
 
 @pytest.mark.asyncio
@@ -1957,14 +1962,15 @@ async def test_import_nodes_success():
     body = VisuImportRequest(obs_export="visu_subtree", version=1, nodes=[export_node_1], target_parent_id=None)
     result = await import_nodes(body=body, db=db, _user="admin")
     assert result.name == "Imported"
-    assert db.conn.commit.called
+    assert db.transaction.called
 
 
 @pytest.mark.asyncio
 async def test_export_node_not_found():
     """export_node raises 404 when node not found."""
     db = _make_visu_db(row=None)
-    db.conn.execute.return_value = _DualCursor(row=None)
+    db.fetchone = AsyncMock(return_value=None)
+    db.fetchall = AsyncMock(return_value=[])
     with pytest.raises(HTTPException) as exc_info:
         await export_node(node_id="nonexistent", db=db, _user="admin")
     assert exc_info.value.status_code == 404
@@ -1978,7 +1984,7 @@ async def test_export_node_not_found():
 @pytest.mark.asyncio
 async def test_test_history_influxdb_not_reachable():
     """test_history_connection returns error for unreachable influxdb."""
-    from obs.api.v1.system import test_history_connection, HistorySettingsIn
+    from obs.api.v1.system import HistorySettingsIn, test_history_connection
 
     body = HistorySettingsIn(
         plugin="influxdb",
@@ -1989,14 +1995,14 @@ async def test_test_history_influxdb_not_reachable():
         influx_org="org",
         influx_bucket="bucket",
     )
-    result = await test_history_connection(body=body, _admin="admin")
+    result = await test_history_connection(body=body, _admin="admin", db=_DbStub())
     assert result.ok is False
 
 
 @pytest.mark.asyncio
 async def test_update_nav_link_not_found():
     """update_nav_link returns 404 when link not found."""
-    from obs.api.v1.system import update_nav_link, NavLinkIn
+    from obs.api.v1.system import NavLinkIn, update_nav_link
 
     class _Db:
         async def fetchone(self, q, p=()):
@@ -2033,24 +2039,21 @@ async def test_copy_node_success():
             return _DualCursor(row=node_row)  # first get_node_or_404
         return _DualCursor(row=new_row)  # second get_node_or_404
 
-    conn = MagicMock()
-    conn.execute = MagicMock(side_effect=make_cursor)
-    conn.commit = AsyncMock()
-    db = MagicMock()
-    db.conn = conn
+    db = _make_visu_db(row=node_row)
+    db.conn.execute = MagicMock(side_effect=make_cursor)
     db.fetchone = AsyncMock(return_value=node_row)
 
     body = CopyNodeRequest(new_name="Copy", target_parent_id=None)
     result = await copy_node(node_id="orig", body=body, db=db, _user="admin")
     assert result.type == "PAGE"
-    assert conn.commit.called
+    assert db.transaction.called
 
 
 @pytest.mark.asyncio
 async def test_move_node_not_found():
     """move_node raises 404 when source not found."""
     db = _make_visu_db(row=None)
-    db.conn.execute.return_value = _DualCursor(row=None)
+    db.fetchone = AsyncMock(return_value=None)
     body = MoveNodeRequest(target_parent_id=None, node_order=0)
     with pytest.raises(HTTPException) as exc_info:
         await move_node(node_id="nonexistent", body=body, db=db, _user="admin")
@@ -2065,7 +2068,7 @@ async def test_move_node_not_found():
 @pytest.mark.asyncio
 async def test_update_app_settings_invalid_timezone():
     """update_app_settings rejects invalid timezone."""
-    from obs.api.v1.system import update_app_settings, AppSettingsIn
+    from obs.api.v1.system import AppSettingsIn, update_app_settings
 
     class _Db:
         async def execute_and_commit(self, q, p=()):
@@ -2080,27 +2083,30 @@ async def test_update_app_settings_invalid_timezone():
 @pytest.mark.asyncio
 async def test_test_history_unknown_plugin():
     """test_history_connection returns error for unknown plugin."""
-    from obs.api.v1.system import test_history_connection, HistorySettingsIn
+    from obs.api.v1.system import HistorySettingsIn, test_history_connection
 
     body = HistorySettingsIn(plugin="unknown_plugin", default_window_hours=168)
-    result = await test_history_connection(body=body, _admin="admin")
+    result = await test_history_connection(body=body, _admin="admin", db=_DbStub())
     assert result.ok is False
 
 
 @pytest.mark.asyncio
 async def test_update_nav_link_success():
     """update_nav_link succeeds when link exists."""
-    from obs.api.v1.system import update_nav_link, NavLinkIn
+    from obs.api.v1.system import NavLinkIn, update_nav_link
 
     class _Row(dict):
         def __getitem__(self, k):
             return super().__getitem__(k)
 
-    class _Db:
+    class _Db(_AuditTxMixin):
         async def fetchone(self, q, p=()):
             return _Row({"id": "nav-link-1", "label": "Updated", "url": "https://z.com", "icon": "", "sort_order": 0, "open_new_tab": 0})
 
         async def execute_and_commit(self, q, p=()):
+            pass
+
+        async def execute(self, q, p=()):
             pass
 
     body = NavLinkIn(label="Updated", url="https://z.com")
@@ -2116,14 +2122,14 @@ async def test_update_nav_link_success():
 @pytest.mark.asyncio
 async def test_test_history_timescaledb_not_reachable():
     """test_history_connection returns error for unreachable timescaledb."""
-    from obs.api.v1.system import test_history_connection, HistorySettingsIn
+    from obs.api.v1.system import HistorySettingsIn, test_history_connection
 
     body = HistorySettingsIn(
         plugin="timescaledb",
         default_window_hours=168,
         timescale_dsn="postgresql://nonexistent:5432/obs",
     )
-    result = await test_history_connection(body=body, _admin="admin")
+    result = await test_history_connection(body=body, _admin="admin", db=_DbStub())
     assert result.ok is False
 
 
@@ -2137,10 +2143,10 @@ async def test_visu_create_node_with_pin():
     """create_node hashes access_pin when provided."""
     node_row = _make_node_row(id="pinned", type="PAGE", name="Secured")
     db = _make_visu_db(row=node_row)
-    body = VisuNodeCreate(name="Secured", type="PAGE", parent_id=None, access_pin="5678")
+    body = VisuNodeCreate(name="Secured", type="PAGE", parent_id=None, access="protected", access_pin="5678")
     result = await create_node(body=body, db=db, _user="admin")
     assert result is not None
-    assert db.conn.commit.called
+    assert db.transaction.called
 
 
 @pytest.mark.asyncio
@@ -2188,8 +2194,9 @@ async def test_visu_get_page_unauthenticated_user_access():
 @pytest.mark.asyncio
 async def test_visu_get_page_protected_access_no_session():
     """get_page with protected access and no session raises 401."""
-    from obs.api.v1 import visu as visu_mod
     from unittest.mock import AsyncMock as _AsyncMock
+
+    from obs.api.v1 import visu as visu_mod
 
     node_row = _make_node_row(id="prot1", type="PAGE", name="Protected", access="protected")
     db = _make_visu_db(row=node_row)

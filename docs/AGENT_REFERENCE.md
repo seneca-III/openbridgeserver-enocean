@@ -1,145 +1,7 @@
-# AGENTS/CLAUDE Alias Note
+## Detailed agent reference
 
-`AGENTS.MD` is the canonical agent-instructions file in this repository.
-`CLAUDE.md` is a symlink to this same file for tool compatibility.
-You only need to read one of them; reading both is redundant.
-
-# AGENTS.MD
-
-This file provides guidance to AI coding agents when working with code in this repository.
-
-## Project Overview
-
-**open bridge server** is an open-source multiprotocol building automation server (MIT-licensed replacement for the proprietary Timberwolf Server). It bridges KNX, Modbus RTU/TCP, 1-Wire, MQTT, SNMP, Home Assistant, ioBroker, Anwesenheitssimulation (presence simulation), and Zeitschaltuhr into a unified system with a FastAPI REST/WebSocket API and a Vue-based admin GUI.
-
-## Repository Layout
-
-Two top-level directories have distinct, non-overlapping purposes — keep them that way (see issue #877):
-
-| Directory | Audience | What belongs here |
-|---|---|---|
-| `tools/` | Developers, CI, release pipeline | Dev tooling only — linting, test helpers, LXC builder, worktree helpers, venv resolver, i18n guards, coverage summary, `build-local.sh`. Nothing in `tools/` is installed on a running OBS host. |
-| `scripts/` | Running OBS host | Deployed runtime scripts — every file that gets installed onto a production or LXC host lives here. Currently: `obs-admin` and `obs-update`. |
-
-**Rule of thumb:** if a file is only needed to build, test, or check the project, it goes in `tools/`. If it ends up on the host after installation, it goes in `scripts/`. Never mix the two.
-
-## Common Commands
-
-```bash
-# Run the server
-tools/with-venv python -m obs
-
-# Run all tests
-tools/with-venv pytest tests/
-
-# Run a single test file
-tools/with-venv pytest tests/unit/test_converter.py
-
-# Run a specific test
-tools/with-venv pytest tests/unit/test_converter.py::test_float_to_int
-
-# Run only adapter + unit tests (no Docker needed)
-tools/with-venv pytest tests/adapters/ tests/unit/
-
-# Run contract tests — verify external library API surfaces (no Docker needed)
-tools/with-venv pytest tests/contracts/
-
-# Run integration tests (requires Docker for Mosquitto)
-tools/with-venv pytest tests/integration/
-
-# Run with coverage report
-tools/with-venv pytest tests/ --cov=obs --cov-report=term-missing
-
-# Lint (same checks as CI)
-tools/with-venv ./tools/lint.sh --check
-
-# Format + autofix
-tools/with-venv ./tools/lint.sh --fix
-
-# Docker Compose (full stack)
-docker compose up -d
-
-# Docker Compose (Mosquitto only — for local dev outside Docker)
-docker compose up -d mosquitto
-
-# Build release artifacts locally (only requires Docker)
-./tools/build-local.sh docker    # Docker image (via docker compose build obs + version stamp)
-./tools/build-local.sh lxc       # Proxmox LXC template (.tar.zst); rootfs cached in ~/.cache/obs-lxc-builder/
-./tools/build-local.sh bundle    # app bundle only, no rootfs (fast)
-./tools/build-local.sh all       # docker + lxc
-
-# Admin GUI dev server (proxies /api to localhost:8080)
-cd gui && npm run dev
-```
-
-## Pre-Push Gate (verbindlich)
-
-CI im PR-Workflow baut das Frontend **nicht** — `npm run build` läuft erst beim Release-Tag.
-Ein Production-Build validiert die Frontend-Abhängigkeiten (Module-Resolution, Import-Pfade,
-Typen) Ende-zu-Ende — Schwächen, die Vitest-Mocks verdecken können, fallen erst hier auf. Vor
-**jedem** Push, der Frontend-Code berührt, alle Stufen lokal grün laufen lassen:
-
-```bash
-tools/with-venv ./tools/lint.sh --check
-cd gui && npm run build     # validiert reale Abhängigkeiten/Imports, was Vitest nicht tut
-cd gui && npm run test
-cd gui && npm run test:coverage
-# bei Backend-Änderungen zusätzlich:
-tools/with-venv pytest tests/unit tests/adapters tests/contracts  # ohne Docker
-tools/with-venv pytest tests/integration                          # mit Docker
-```
-
-Wenn rot: nicht pushen, sondern fixen. Gilt für Haupt-Sessions **und** für Subagents — bitte
-explizit in den Subagent-Prompt schreiben, weil deren Kontext leer startet.
-
-Zusätzlich für i18n-Änderungen (Admin GUI + Visu) gilt ein harter Diff-Gate:
-
-```bash
-# Diff-basierter i18n Hard-Gate (Hardcoded user-facing strings + locale parity)
-./tools/check-i18n-hardcoded-strings.sh
-```
-
-Für GUI-Änderungen gilt zusätzlich ein weicher Coverage-Nachzieh-Hinweis:
-
-```bash
-node tools/gui-coverage-summary.mjs --changed-only --threshold=70
-```
-
-Wenn geänderte Dateien unter dem Schwellwert liegen, im Abschlussbericht konkret nennen
-und möglichst passende Vitests ergänzen. Der Hinweis ist bewusst kein lokaler Hard-Fail;
-`npm run test` und `npm run test:coverage` bleiben dagegen verpflichtende Gates und
-brechen bei Fehlern ab.
-
-Optional als lokaler Push-Hook aktivieren:
-
-```bash
-git config core.hooksPath .githooks
-```
-
-Danach läuft der i18n-Gate automatisch vor jedem `git push`.
-
-## Test Coverage Gate (verbindlich)
-
-**Jede neue Zeile Code muss durch Tests abgedeckt sein.** Codecov prüft die *Patch Coverage* —
-d.h. ob jede im Diff hinzugefügte Zeile durch die Testsuite ausgeführt wird. Das ist strenger als
-nur die Gesamtabdeckung zu halten: eine neue Funktion, die bestehende Zeilen nicht senkt, aber
-selbst ungetestet bleibt, fällt durch dieses Gate.
-
-- **Neuer Code → neue Tests im selben Commit.** Jede neue API-Route, jeder neue Adapter, jede
-  neue Hilfsfunktion braucht zugehörige Tests (Unit oder Integration), die genau die neuen Zeilen
-  ausführen.
-- **Refactorings** dürfen weder die Gesamtabdeckung noch die Patch Coverage senken.
-- **Vor jedem Push mit Backend-Änderungen** Coverage prüfen:
-
-```bash
-# Gesamtabdeckung (muss ≥ Baseline bleiben):
-tools/with-venv pytest tests/unit tests/adapters tests/contracts --cov=obs --cov-report=term-missing
-# mit Docker auch:
-tools/with-venv pytest tests/integration --cov=obs --cov-append --cov-report=term-missing
-```
-
-Wenn neue Zeilen im Report unter „Missing" auftauchen: Tests ergänzen, nicht pushen.
-Gilt für Haupt-Sessions **und** für Subagents — bitte explizit in den Subagent-Prompt schreiben.
+This file contains task-specific instructions routed from the root `AGENTS.md`. Read the
+applicable named sections before acting. The root file remains authoritative on conflicts.
 
 ## Local Development Setup
 
@@ -250,6 +112,24 @@ Default login: `admin` / `admin`
 - `frontend/` — Visu SPA (Vue 3 + TypeScript), built to `frontend_dist/` (served by FastAPI at `/visu`)
 - Both proxy `/api` to `localhost:8080` during dev via `vite.config`
 
+#### Logic editor node cards
+
+Every node component under `gui/src/components/logic/nodes/` must render its card on the shared
+opaque surface (issue #1074) so the configurable canvas raster (issue #1072) cannot show through
+the block body:
+
+- add the global `logic-node-surface` class (defined unlayered at the end of `gui/src/style.css`)
+  to the card element, and
+- pass the block's category colour as the inline `--node-tint` custom property, built with
+  `nodeTint()` from `gui/src/utils/logicNodeSurface.js` so all blocks share one tint alpha.
+
+The card element's own scoped styles must **not** declare `background`/`background-color` — scoped
+selectors (`.gn-card[data-v-…]`) outrank the shared class and would mask the opaque surface again.
+Card text, borders and handles use the `--node-*` / `--handle-*` theme tokens; hardcoded dark
+colours become unreadable on the light-mode surface. The spec
+`gui/tests/components/logic/nodes/nodeCardSurface.spec.js` asserts this for every node component —
+extend its `CARDS` table when adding one.
+
 ### Internationalisation (i18n)
 
 Both frontends use **vue-i18n v9** (Composition API mode, `legacy: false`).
@@ -257,8 +137,8 @@ Both frontends use **vue-i18n v9** (Composition API mode, `legacy: false`).
 | File | Purpose |
 |---|---|
 | `gui/src/i18n.js` | i18n instance; locale auto-detected from `localStorage` → browser language; `fallbackLocale: 'en'` |
-| `gui/src/locales/en.json` | English source strings (authoritative — Weblate source language; must be complete) |
-| `gui/src/locales/de.json` | German translation |
+| `gui/src/locales/de.json` | German source strings (authoritative Weblate source language; must be complete) |
+| `gui/src/locales/en.json` | English translation and runtime fallback; must be complete |
 | `gui/src/components/ui/LocaleSwitcher.vue` | Dropdown wired into Settings → Appearance |
 | `frontend/src/i18n.ts` | Same setup for the Visu SPA (TypeScript) |
 | `frontend/src/locales/{de,en}.json` | Visu locale files |
@@ -268,7 +148,11 @@ Both frontends use **vue-i18n v9** (Composition API mode, `legacy: false`).
 
 **No hardcoded user-facing strings.** Any text visible to the user — labels, button text, placeholders, tooltips, error messages, badge text, empty-state messages — must go through `$t()` / `t()`. This includes strings returned from utility functions (`utils/`, composables) that end up rendered in a template.
 
-**`en.json` is the source of truth.** English is the Weblate source language (volunteers translate *from* English) and is the i18n `fallbackLocale`, so it must be complete. Always add new keys to both `en.json` (English, authoritative) and `de.json` (German) in the same commit. Use Python (`json.dumps(..., ensure_ascii=False)`) when writing locale files programmatically — never shell heredocs, which strip non-ASCII characters.
+**`de.json` is the source of truth.** German is the configured Weblate source language; English is
+the runtime `fallbackLocale`. Both files must remain complete. Always add the German source string
+to `de.json` and its English translation to `en.json` in the same commit. Use Python
+(`json.dumps(..., ensure_ascii=False)`) when writing locale files programmatically — never shell
+heredocs, which strip non-ASCII characters.
 
 #### Key namespace conventions
 
@@ -290,6 +174,7 @@ Admin GUI (`gui/src/locales/`):
 | `settings.*` | Settings view |
 | `common.*` | Shared across views (save, cancel, delete, error, warning, …) |
 | `hierarchy.*` | Hierarchy manager |
+| `help.*` | Integrated help drawer (#896) — `HelpButton.vue`/`HelpDrawer.vue` |
 
 Visu SPA (`frontend/src/locales/`):
 
@@ -399,7 +284,58 @@ The Playwright suite lives in `tests/gui/` and requires a running full stack (ba
 2. Import it in `i18n.js` / `i18n.ts` and add to `messages` + `SUPPORTED_LOCALES`
 3. Run `wlc push gui-admin` to upload source; community translates on Weblate; `wlc pull gui-admin` to pull back
 
+**i18n-guard and non-ASCII language names:** The `label` field in `SUPPORTED_LOCALES` holds the native name of the language (e.g. `Español`, `Français`). These are intentionally hardcoded — `$t()` cannot be used here because the locale has not been bootstrapped yet when `SUPPORTED_LOCALES` is evaluated. The i18n-guard passes pure-ASCII names automatically (e.g. `Italiano`, `Schweizerdeutsch`) via its technical-token check, but **names containing non-ASCII characters** (accented letters, ñ, ç, etc.) must be added to `tools/i18n-allowlist.txt` with a short comment. Do this in the same commit that introduces the new locale.
+
 **Weblate** components are named `gui-admin` (Admin GUI) and `frontend-visu` (Visu SPA) under the `openbridgeserver` project on [hosted.weblate.org](https://hosted.weblate.org/projects/openbridgeserver/). Source language is `de`; file format is `JSON (simple)`. CLI tool: `pip install wlc`; credentials in `~/.config/weblate` or via `WLC_URL` / `WLC_KEY` env vars.
+
+#### Help site translations (Weblate) — #896
+
+The `help/` VitePress site (issue #896 — no dedicated architecture doc yet, this section is the reference) is content, not UI strings, so it doesn't fit the `de.json`/`en.json` pattern above. Weblate supports it via a different mechanism — see `.weblate` for the exact "Component discovery" add-on configuration (not wired up yet as of this writing; `.weblate` documents the plan for whoever sets up the Weblate-side component).
+
+**Unlike `gui-admin`/`frontend-visu` above, English (not German) is the Weblate source language for the help site.** Every help page is authored in both German and English by hand from the start (not translated from one into the other), so translators working on additional languages need a source they can read without German — English. German is still a completely normal Weblate *target* language for the help site (same as for `gui-admin`/`frontend-visu`), it just starts out already complete since it's hand-authored alongside English. This is why `help/*.md` content lives under `help/de/...` and `help/en/...` symmetrically — both prefixed, no unprefixed "root" locale — unlike `gui/src/locales/de.json` having no directory-prefix equivalent to worry about. The backend redirects the bare `/help/` to `/help/de/` (see `obs/main.py`) since VitePress does not pick a default locale for you once there's no root locale.
+
+**The one rule that matters for anyone editing `help/*.md` by hand or reviewing a Weblate-sourced translation:**
+
+Every `help_id` lives *inside* the heading it belongs to, as an explicit anchor:
+
+```md
+## Zeitzone, Datums- und Zeitformat {#settings-general}
+```
+
+If Weblate (or a human translator) changes or drops the `{#settings-general}` part while translating the heading text, that locale's `help_id` stops resolving — the Admin-GUI's `HelpButton` for that section would show "no help available" for that language. `help/scripts/generate-help-index.mjs` itself only *warns* (non-blocking) about this, but the help-contract gate below turns the same finding into a CI failure, so a dropped anchor cannot reach main unnoticed. When reviewing a Weblate-translated heading, always verify the `{#...}` suffix survived unchanged.
+
+#### Help contract gate — #1183
+
+`tools/check_help_contract.py` (workflow `.github/workflows/help-contract.yml`) is the completeness gate for documentation, next to `check_authz_contract.py` for routes and `check_i18n_guard.py` for strings. It enumerates the UI surfaces that must be documented from the registries that already define them, derives the `help_id` each is expected to carry, and fails CI when that id has no help page — so a new view, widget type, or skin cannot go green without either help content or an explicit, justified exemption.
+
+| Surface | Enumerated from | Expected `help_id` |
+|---|---|---|
+| Admin route | `gui/src/router/index.js` (`routes[]`, named routes only) | `route.meta.helpId` |
+| Visu widget type | `frontend/src/widgets/*/index.ts` (`WidgetRegistry.register`) | `widget-<kebab-case type>` |
+| Logic function block | `obs.logic.registry.BUILTIN_NODE_TYPES` (excluding `hidden_from_palette`) | `NodeTypeDef.help_id` |
+| Skin | `<obs-visu-skins>/packages/skins/*/manifest.json` | `skin-<kebab-case name>` |
+
+Routes and Logic blocks declare their id explicitly because it is live wiring, not gate-only metadata: `TopBar.vue` renders the page-level help button from `route.meta.helpId`, and `NodePalette.vue` renders a block's button from `nt.help_id`, served by the backend as part of the node type definition (`obs/logic/models.py::NodeTypeDef.help_id`). These ids are not computable from the type name — `scale` is documented as `logic-block-math-map`, `gate` as `logic-block-gate` — so the gate reads the declared value and checks that. A palette-visible block that declares none renders no button, so no user meets a dead link, but it ships undocumented: the gate reports it, and it needs either a help section or an allowlist entry with a reason. **Adding a Logic function block without a help section fails CI.** Widgets and skins, which have no such declaration, still follow the naming convention in the table.
+
+`hidden_from_palette` blocks are excluded by rule rather than by allowlist: the palette is the only place a block can be picked from, so one it never offers is not a surface anyone can land on (today, the two legacy notification blocks).
+
+On top of coverage the gate enforces two things the generator does not: every `help_id` literally referenced from `gui/src` or `frontend/src` must exist in the index (no broken help links — the dynamic `:help-id="expr"` form is out of reach and is skipped), and a `help_id` present in one locale but not another fails instead of warning.
+
+**Everything the gate reads, it reads from a real parse.** `tools/scan-help-declarations.mjs` parses the frontends with `@babel/parser` (JavaScript and TypeScript) and `@vue/compiler-sfc` (single-file components), and `tools/rendered-help-ids.mjs` builds the help site and reports the heading ids VitePress actually emitted, which the gate compares against the generated `help-index.json`. Neither reimplements a language: an earlier version scanned both with regexes, and review after review found the next construct it misread — quoted property keys, a comment after a closing quote, a regex holding a quote, `${…}` expressions, spreads, shorthand properties, a CSS custom property shaped like a JS one; on the Markdown side fenced code, HTML comments, raw HTML blocks, escaped braces, frontmatter, indented headings. A parser has no special cases for those, and a build has no opinion about them at all.
+
+Where a declaration cannot be resolved to a literal — a route `name`, a `children` array, or a widget registration's `type` given by a constant — the gate **fails closed** with the file and line rather than skipping it. A skipped declaration is the one outcome a coverage gate must never produce: the surface ships and the run reports success.
+
+The help build writes to a temporary directory, never to `help_dist/` — three integration tests in `tests/integration/test_visu_static_files.py` assert that directory is absent, so a stray build breaks them. (That is also why `cd help && npm run build`, used for local preview, should be followed by `rm -rf help_dist`.)
+
+Skins live in the separate `obs-visu-skins` repository. Without `--skins-dir` (or `OBS_VISU_SKINS_DIR`) pointing at a checkout, the gate reports that surface as *not checked* rather than passing it silently; CI does not check skins today.
+
+Deliberately undocumented surfaces belong in `tools/help-contract-allowlist.txt` as `<route|widget|logic-block|skin>:<name>  # reason`, mirroring `tools/i18n-allowlist.txt`. The reason is mandatory, and the list is validated back against reality: an entry for a surface that no longer exists — or for one that meanwhile *is* documented — fails too, so it cannot rot into a blanket exemption. The Visu widget types are currently listed there as tracked debt; each entry disappears as its `{#widget-<type>}` section is written.
+
+Run it before pushing anything that adds a route, a widget type, a Logic function block, or help content:
+
+```bash
+python tools/check_help_contract.py
+```
 
 ## Architecture
 
@@ -446,6 +382,25 @@ Adapters self-register at import time via `@register` (from `obs/adapters/regist
 3. Implement `connect`, `disconnect`, `read`, `write`
 4. Decorate the class with `@register`
 5. Add the import to the adapter block in `obs/main.py`
+
+### Logic Function Blocks
+
+Built-in Logic function blocks live in one module per block under `obs/logic/nodes/<category>/`,
+each exporting a single `NODE_TYPE`. The category package name always equals the node's `category`
+field, and each category `__init__.py` exports its own `NODE_TYPES` tuple. `obs/logic/registry.py`
+combines those tuples into the public catalogue (`BUILTIN_NODE_TYPES`, `NODE_TYPE_REGISTRY`,
+`get_node_type`, `list_node_types`); `obs/logic/node_types.py` is a deprecated compatibility facade
+that only re-exports them.
+
+Node behaviour stays in the two documented shared handlers — `GraphExecutor._eval_node`
+(`obs/logic/executor.py`, per-tick evaluation) and `LogicManager` (`obs/logic/manager.py`,
+scheduling and side-effect orchestration). Node-specific branches elsewhere are not allowed.
+
+**Adding a new block** touches its own module, one category `__init__.py`, `obs/logic/capabilities.py`,
+the dispatcher and its focused tests under `tests/unit/logic/nodes/<category>/`. The complete
+contract, dependency rules and step-by-step procedure are in
+[`docs/architecture/logic-nodes.md`](architecture/logic-nodes.md); the guardrails are enforced by
+`tests/unit/logic/test_node_architecture.py` and `tests/unit/logic/test_node_registry.py`.
 
 ### Configuration
 
@@ -560,7 +515,7 @@ RCs never receive the `latest` tag.
 - Three release assets are produced:
   - `openbridgeserver-lxc_<version>_amd64.tar.zst` — full Proxmox CT template (x86-64)
   - `openbridgeserver-lxc_<version>_arm64.tar.zst` — full Proxmox CT template (ARM64)
-  - `openbridgeserver-app-bundle_<version>.tar.gz` — arch-agnostic app archive (`obs/`, `gui_dist/`, `frontend_dist/`, `requirements.txt`, `obs-update`) used for in-place updates; built once from the amd64 job
+  - `openbridgeserver-app-bundle_<version>.tar.gz` — arch-agnostic app archive (`obs/`, `gui_dist/`, `frontend_dist/`, `help_dist/`, `requirements.txt`, `obs-update`) used for in-place updates; built once from the amd64 job
 - App installs to `/opt/obs/`, Python venv at `/opt/obs/venv/`, data volume at `/data/`
 - Installed version tracked in `/opt/obs/version` (written by `obs-update` after each install)
 - `obs-update` script at `/usr/local/bin/obs-update` presents an interactive version picker (all RCs + up to two stable releases, sorted semantically). It self-updates on every install by copying the `obs-update` from the extracted bundle.
@@ -580,6 +535,46 @@ Mosquitto is installed as a systemd service alongside OBS. Key paths:
 
 OBS reloads Mosquitto after passwd file changes via `OBS_MOSQUITTO__RELOAD_COMMAND=systemctl reload mosquitto`.
 
+#### owserver (1-Wire) in the LXC template — issue #1040
+
+`owserver` (the OWFS 1-Wire bus server the `ONEWIRE` adapter talks to via `pyownet`, see #6) is
+installed alongside Mosquitto but, unlike Mosquitto, is **opt-in**: an idle, unconfigured `owserver`
+wastes resources on the small hosts OBS often runs on, so the packaged `owserver.service` only
+actually starts once an admin has configured a 1-Wire bus master.
+
+| Path | Purpose |
+|---|---|
+| `/etc/systemd/system/owserver.service.d/override.conf` | Drop-in that gates the packaged unit — does not replace its `ExecStart=`, so package upgrades keep working |
+| `scripts/obs-onewire-should-run.sh` | `ExecCondition=` — exits 0 only if `OBS_ONEWIRE__USB_ALL=true` or `OBS_ONEWIRE__PBM_DEVICES` is set in `/etc/obs.env` |
+| `scripts/obs-onewire-configure.sh` | `ExecStartPre=` — (re)generates `/etc/owfs.conf` from those same env vars on every start attempt |
+| `/etc/obs.env` | Same file as the MQTT credentials; `OBS_ONEWIRE__*` lines ship commented out |
+
+Both scripts are shared verbatim with the Docker sidecar image (`tools/docker/owserver.Dockerfile`)
+— one script, two consumers. To enable 1-Wire on an installed LXC: uncomment/add the relevant
+`OBS_ONEWIRE__*` lines in `/etc/obs.env`, then `systemctl restart owserver` (systemd re-evaluates
+`ExecCondition` on every start attempt, so there is no first-boot-only flag file to worry about).
+
+**Env vars:**
+- `OBS_ONEWIRE__USB_ALL=true` → `server: usb = all` (plain USB busmasters, e.g. DS9490)
+- `OBS_ONEWIRE__PBM_DEVICES=/dev/serial/by-id/...` → one `server: pbm = <path>` line per
+  comma-separated entry (ElabNET PBM). Use a stable `/dev/serial/by-id/...` path, not
+  `/dev/ttyUSB0` — the latter can shift across reboots or when other serial devices are attached.
+- `OBS_ONEWIRE__PORT` → optional, defaults to `4304` (owserver's own historical default, matches the
+  `ONEWIRE` adapter's default `port` config field)
+
+**Proxmox host-side USB/serial passthrough** (not automatable from inside the container — hardware
+topology is host-specific): both a `lxc.mount.entry` **and** the matching `lxc.cgroup2.devices.allow`
+cgroup rule are required — the mount alone is not sufficient and this is easy to forget. Confirmed
+against real hardware: a plain USB busmaster needs its `/dev/bus/usb/BBB/DDD` node passed through; the
+ElabNET PBM enumerates as an FTDI serial device and needs its `/dev/serial/by-id/...` path passed
+through (mapped to e.g. `/dev/ttyUSB0` inside the container).
+
+**Docker Compose equivalent:** the `owserver` service in `docker-compose.yml` is gated by a Compose
+profile (`profiles: ["onewire"]`) instead of `ExecCondition`, activated via
+`COMPOSE_PROFILES=onewire`. See the comments in `docker-compose.yml` and `.env.example`.
+
 ### Release Notes
 
 `RELEASENOTES_FOOTER.md` contains an invisible HTML comment `<!-- LXC_INSERT -->` that marks where the LXC checksum block is injected by `lxc-template.yml`. Do not remove this marker.
+
+Within each section of a version's changelog (`### Breaking changes`, `### New features`, `### Fixes`, etc.), entries must be sorted alphabetically by their leading component label (e.g. `Admin GUI/Visu:` before `Logic Engine/Admin GUI:`). When adding a new entry, insert it at the alphabetically correct position rather than appending it at the end.

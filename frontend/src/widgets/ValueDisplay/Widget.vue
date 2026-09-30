@@ -5,8 +5,10 @@ import { useI18n } from 'vue-i18n'
 import { history } from '@/api/client'
 import { useIcons } from '@/composables/useIcons'
 import { useDatapointsStore } from '@/stores/datapoints'
+import { useFormatStore } from '@/stores/format'
 import { useWebSocket } from '@/composables/useWebSocket'
 import type { DataPointValue } from '@/types'
+import type { WriteContext } from '@/api/client'
 import { TIME_RANGE_PRESETS, DEFAULT_TIME_RANGE, resolveTimeRange } from '@/widgets/Chart/timeRangePresets'
 
 Chart.register(LineController, LineElement, PointElement, LinearScale, Filler, Tooltip)
@@ -32,12 +34,17 @@ const props = defineProps<{
   datapointId: string | null
   value: DataPointValue | null
   editorMode: boolean
+  pageId?: string | null
+  sessionToken?: string | null
   w?: number
   h?: number
 }>()
 
 const { t } = useI18n()
 const dpStore = useDatapointsStore()
+// Anzeige folgt dem konfigurierten Regionalformat (Issue #1073) — der rohe
+// Datenpunktwert und alle Berechnungen bleiben locale-neutral.
+const format = useFormatStore()
 const { getSvg, isSvgIcon, svgIconName } = useIcons()
 
 const gaugeGradId = `gg-${getCurrentInstance()?.uid ?? Math.random().toString(36).slice(2)}`
@@ -226,7 +233,7 @@ const mainDisplay = computed<DisplayParts>(() => {
   if (!rule) {
     const v = rawValue.value
     if (typeof v === 'boolean') return { prefix: '', value: v ? 'EIN' : 'AUS', postfix: '' }
-    if (typeof v === 'number') return { prefix: '', value: v.toFixed(1), postfix: props.value?.u ?? '' }
+    if (typeof v === 'number') return { prefix: '', value: format.fmtNumber(v, { decimals: 1 }), postfix: props.value?.u ?? '' }
     return { prefix: '', value: String(v ?? '—'), postfix: '' }
   }
   if (rule.output_type === 'text') {
@@ -235,7 +242,7 @@ const mainDisplay = computed<DisplayParts>(() => {
   let v: unknown = rawValue.value
   if (typeof v === 'number' && rule.calculation) v = applyCalc(v, rule.calculation)
   if (typeof v === 'boolean') return { prefix: rule.prefix, value: v ? 'EIN' : 'AUS', postfix: rule.postfix }
-  const formatted = typeof v === 'number' ? (v as number).toFixed(rule.decimals ?? 1) : String(v ?? '—')
+  const formatted = typeof v === 'number' ? format.fmtNumber(v, { decimals: rule.decimals ?? 1 }) : String(v ?? '—')
   return { prefix: rule.prefix, value: formatted, postfix: rule.postfix || (props.value?.u ?? '') }
 })
 
@@ -246,7 +253,7 @@ const secondaryDisplay = computed(() => {
   const dp = dpStore.getValue(secondaryDpId.value)
   if (dp === null) return '…'
   const v = typeof dp.v === 'number' ? dp.v : parseFloat(String(dp.v))
-  const formatted = isNaN(v) ? String(dp.v ?? '—') : v.toFixed(secDecimals.value)
+  const formatted = isNaN(v) ? String(dp.v ?? '—') : format.fmtNumber(v, { decimals: secDecimals.value })
   const unit = dp.u ?? ''
   return [secLabel.value, formatted, unit].filter(Boolean).join('\u202F')
 })
@@ -265,7 +272,7 @@ let reloadTimer:  ReturnType<typeof setTimeout> | null = null
 let histUnit = ''
 
 function fmtMs(ms: number): string {
-  return new Date(ms).toLocaleString(undefined, {
+  return format.fmtDateTime(ms, {
     month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
   })
 }
@@ -282,10 +289,19 @@ function makeDataset(color: string) {
   }
 }
 
+function readContext(): WriteContext | undefined {
+  if (!props.pageId && !props.sessionToken) return undefined
+  return {
+    ...(props.pageId ? { pageId: props.pageId } : {}),
+    ...(props.sessionToken ? { sessionToken: props.sessionToken } : {}),
+  }
+}
+
 async function fetchPoints(timeRange: string) {
   if (!props.datapointId || props.editorMode) return { pts: [], minMs: 0, maxMs: 0 }
   const { from: fromDate, to: toDate } = resolveTimeRange(timeRange)
-  const data = await history.query(props.datapointId, fromDate.toISOString(), toDate.toISOString())
+  const context = readContext()
+  const data = await history.query(props.datapointId, fromDate.toISOString(), toDate.toISOString(), 10000, context)
   histUnit = data[0]?.u ?? ''
   return {
     pts:   data.map(d => ({ x: new Date(d.ts).getTime(), y: Number(d.v) })),
@@ -337,6 +353,9 @@ onMounted(() => {
     data: { datasets: [makeDataset(activeColor.value)] },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
+      // Chart.js formats axis ticks with Intl.NumberFormat under this locale;
+      // without it, it would silently follow the browser language (issue #1073).
+      locale: format.regionFormat,
       plugins: { legend: { display: false }, tooltip: { enabled: false } },
       scales: {
         x: { type: 'linear', ticks: { display: false }, grid: { color: '#1f293766' } },
@@ -347,6 +366,14 @@ onMounted(() => {
   updateMiniChart()
 })
 
+// See Chart/Widget.vue: the regional format arrives after the chart is built.
+watch(() => format.regionFormat, (regionFormat) => {
+  for (const instance of [miniChart, modalChart]) {
+    if (!instance) continue
+    instance.options.locale = regionFormat
+    instance.update()
+  }
+})
 watch(() => props.datapointId, updateMiniChart)
 watch(() => props.config.history_time_range, updateMiniChart)
 watch(modalTimeRange, updateModalChart)
@@ -363,13 +390,17 @@ watch(modalOpen, async (open) => {
     data: { datasets: [{ ...makeDataset(activeColor.value), data: pts }] },
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
+      locale: format.regionFormat,
       plugins: {
         legend: { display: false },
         tooltip: {
           mode: 'index', intersect: false,
           callbacks: {
             title: (items: any[]) => items[0]?.parsed.x != null ? fmtMs(items[0].parsed.x) : '',
-            label: (ctx: any) => histUnit ? `${ctx.parsed.y} ${histUnit}` : String(ctx.parsed.y),
+            label: (ctx: any) => {
+              const text = format.fmtNumber(ctx.parsed.y)
+              return histUnit ? `${text} ${histUnit}` : text
+            },
           },
         },
       },

@@ -34,6 +34,10 @@ class WidgetInstance(BaseModel):
     config: dict[str, Any] = Field(default_factory=dict)
 
 
+class WidgetRefInstance(WidgetInstance):
+    source_page_readonly: bool = False
+
+
 # ── PageConfig ────────────────────────────────────────────────────────────────
 
 
@@ -62,6 +66,20 @@ class VisuNode(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
+class VisuNodeSummary(BaseModel):
+    """Navigation metadata without page configuration or credentials."""
+
+    id: str
+    parent_id: str | None = None
+    name: str
+    type: NodeType
+    order: int = 0
+    icon: str | None = None
+    access: AccessLevel | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 # ── Request-Schemas ───────────────────────────────────────────────────────────
 
 
@@ -81,6 +99,7 @@ class VisuNodeUpdate(BaseModel):
     icon: str | None = None
     access: AccessLevel | None = None
     access_pin: str | None = None  # Klartext — wird im Endpoint gehasht
+    usernames: list[str] | None = None  # atomare Zielgruppen-Aktualisierung
 
 
 class PinAuthRequest(BaseModel):

@@ -48,7 +48,7 @@ Zielgruppe: Bestehende Timberwolf Server (TWS) Anwender und Neueinsteiger in der
 11. KNX Adapter (`xknx`) + DPT Registry (Basis-DPTs)
 12. Modbus TCP Adapter (`pymodbus`)
 13. Modbus RTU Adapter (`pymodbus`)
-14. 1-Wire Adapter (`w1thermsensor`)
+14. 1-Wire Adapter (`pyownet` — Client von externem `owserver`/OWFS)
 
 ### Phase 4 — API
 15. FastAPI Setup + Authentifizierung (JWT + API Key)
@@ -94,14 +94,14 @@ Zielgruppe: Bestehende Timberwolf Server (TWS) Anwender und Neueinsteiger in der
 
 ```python
 # Kern-Datentypen — beim Start in DataTypeRegistry registriert
-UNKNOWN    # Fallback für unbekannte Typen, speichert Raw-Bytes
-BOOLEAN    # bool
-INTEGER    # int
-FLOAT      # float
-STRING     # str
-DATE       # datetime.date, ISO 8601
-TIME       # datetime.time, ISO 8601
-DATETIME   # datetime.datetime, ISO 8601 mit Timezone
+UNKNOWN  # Fallback für unbekannte Typen, speichert Raw-Bytes
+BOOLEAN  # bool
+INTEGER  # int
+FLOAT  # float
+STRING  # str
+DATE  # datetime.date, ISO 8601
+TIME  # datetime.time, ISO 8601
+DATETIME  # datetime.datetime, ISO 8601 mit Timezone
 ```
 
 Neue Datentypen werden über `DataTypeRegistry.register()` hinzugefügt — kein Core-Code nötig.

@@ -98,6 +98,7 @@
     "hintDrag": "Ziehen → verschieben",
     "hintResize": "↘ Handle → Größe ändern",
     "hintDelete": "Entf → Widget löschen",
+    "hintMultiSelect": "Umschalt/Strg+Klick oder Ziehen auf freier Fläche → Mehrfachauswahl",
     "removeWidget": "Entfernen",
     "widgetName": "Name",
     "widgetNamePlaceholder": "z.B. Wohnzimmer Dimmer",
@@ -108,8 +109,14 @@
     "statusDatapoint": "Status-Objekt",
     "statusDatapointHint": "Optional: separates Rückmelde-Objekt. Falls leer, wird das Schreib-Objekt für die Anzeige verwendet.",
     "configuration": "Konfiguration",
+    "resizeConfigPanel": "Ziehen, um die Panel-Breite zu ändern",
     "hintEmpty": "Widget aus der Palette links einfügen",
     "hintNoSelection": "Widget auf dem Canvas anklicken\noder aus der Palette einfügen",
+    "multiSelect": {
+      "count": "{n} Widgets ausgewählt",
+      "removeAll": "Alle löschen",
+      "hint": "Die Konfiguration kann nicht für mehrere Widgets gleichzeitig bearbeitet werden. Wähle nur eines aus, um dessen Einstellungen zu bearbeiten."
+    },
     "widgetCountSingular": "Widget auf dieser Seite",
     "widgetCountPlural": "Widgets auf dieser Seite",
     "brokenDpRef": "Mindestens ein Datenpunkt-Verweis wurde nicht gefunden",
@@ -176,6 +183,9 @@
     "pinMismatch": "PINs stimmen nicht überein",
     "allowedUsers": "Zugelassene Benutzer (Admins haben immer Zugriff)",
     "noNonAdminUsers": "Keine nicht-Admin Benutzer vorhanden. Benutzer können in den Einstellungen angelegt werden.",
+    "targetDatapointsDenied": "{username} kann nicht zugewiesen werden: Zugriff auf {count} Datenpunkt(e) fehlt: {datapoints}",
+    "targetUsersInvalid": "Diese Benutzer können nicht zugewiesen werden: {usernames}",
+    "targetUsersRequireUserAccess": "Zugewiesene Benutzer erfordern die Berechtigung Benutzer.",
     "saved": "Gespeichert",
     "furtherActions": "Weitere Aktionen",
     "newNode": "Neuer Knoten",
@@ -377,7 +387,30 @@
     "heiligabend": "Heiligabend",
     "adventOffset": "1. Advent {sign}{offset} Tage",
     "switchValue": "Schalt-Wert",
-    "switchValueHint": "z.B. 1 / 0 / true / false",
+    "switchValueHint_boolean": "Schaltet den Wert auf Ein (true) bzw. Aus (false).",
+    "switchValueHint_integer": "Ganzzahl, z.B. 50 oder 0.",
+    "switchValueHint_float": "Dezimalzahl, z.B. 21.5 oder 0.",
+    "switchValueHint_date": "Datum im Format JJJJ-MM-TT, z.B. 2026-12-24.",
+    "switchValueHint_time": "Uhrzeit im Format HH:MM:SS, z.B. 08:00:00.",
+    "switchValueHint_datetime": "Datum und Uhrzeit (ISO 8601), z.B. 2026-12-24T08:00:00.",
+    "switchValueHint_text": "Wird unverändert übernommen — auch 1, 0, on oder ein.",
+    "switchValueOn": "Ein (true)",
+    "switchValueOff": "Aus (false)",
+    "switchValueErrorRequired": "Bitte einen Schaltwert angeben.",
+    "switchValueErrorBoolean": "Kein gültiger Ja/Nein-Wert — erlaubt sind 1/0, true/false, on/off, ein/aus.",
+    "switchValueErrorInteger": "Kein gültiger Ganzzahl-Wert.",
+    "switchValueErrorFloat": "Kein gültiger Zahlenwert.",
+    "switchValueErrorDate": "Kein gültiges Datum (erwartet JJJJ-MM-TT).",
+    "switchValueErrorTime": "Keine gültige Uhrzeit (erwartet HH:MM oder HH:MM:SS).",
+    "switchValueErrorDatetime": "Kein gültiger Zeitstempel (erwartet JJJJ-MM-TTTHH:MM:SS).",
+    "qualityBad": "Qualität: schlecht",
+    "qualityUncertain": "Qualität: undefiniert",
+    "noSchedulePoints": "Keine Schaltpunkte",
+    "timerActive": "Zeitschaltuhr aktiv",
+    "timerInactive": "Zeitschaltuhr inaktiv",
+    "editSchedulePoints": "Schaltpunkte bearbeiten",
+    "confirmActivate": "Zeitschaltuhr aktivieren?",
+    "confirmDeactivate": "Zeitschaltuhr deaktivieren?",
     "labelSunrise": "Sonnenaufgang",
     "labelSunset": "Sonnenuntergang",
     "labelSolarNoon": "Sonnenmittag",
@@ -401,7 +434,9 @@
       "nodeTypePage": "Seite",
       "searchPage": "Seitenname suchen …",
       "selectPage": "Seite wählen …",
-      "type": "Typ"
+      "type": "Typ",
+      "qualityBad": "Qualität: schlecht",
+      "qualityUncertain": "Qualität: undefiniert"
     },
     "chart": {
       "title": "Verlauf",
@@ -436,7 +471,9 @@
       "defaultTimeRange": "Standard-Zeitbereich",
       "selectTimeRange": "Zeitbereich wählen",
       "editorPlaceholder": "Verlaufs-Chart",
-      "seriesFallback": "Serie {n}"
+      "seriesFallback": "Serie {n}",
+      "primaryLabel": "Bezeichnung (optional)",
+      "labelPlaceholder": "z.B. Temperaturverlauf"
     },
     "energiefluss": {
       "title": "Energiefluss",
@@ -719,8 +756,18 @@
     "stufenschalter": {
       "title": "Stufenschalter",
       "stepsCount": "Stufen ({n}/{max})",
+      "optionsCount": "Optionen ({n}/{max})",
       "addStep": "+ Stufe",
+      "addOption": "+ Option",
+      "mode": "Bedienart",
+      "modeSequence": "Sequenz",
+      "modeSelectSave": "Auswahl mit Speichern",
+      "modeSelectDirect": "Auswahl direkt",
+      "save": "Speichern",
+      "writeError": "Schreiben fehlgeschlagen",
       "hint": "Beim Drücken wird durchgeschaltet. Der Wert wird je nach Objekt als bool / int / float / string gesendet.",
+      "hintSelectSave": "Auswahl wird erst mit Speichern gesendet. Der Wert wird je nach Objekt als bool / int / float / string gesendet.",
+      "hintSelectDirect": "Auswahl wird sofort gesendet. Der Wert wird je nach Objekt als bool / int / float / string gesendet.",
       "moveUp": "Nach oben",
       "moveDown": "Nach unten",
       "remove": "Entfernen",
@@ -895,7 +942,9 @@
       "widget": "Widget (Name)",
       "selectWidget": "— Widget wählen —",
       "noNamedWidgets": "— keine benannten Widgets —",
-      "noNamedWidgetsHint": "⚠ Auf dieser Seite hat kein Widget einen Namen. Namen im Editor vergeben."
+      "noNamedWidgetsHint": "⚠ Auf dieser Seite hat kein Widget einen Namen. Namen im Editor vergeben.",
+      "reference": "Referenz",
+      "chooseReference": "Referenz wählen …"
     },
     "zeitschaltuhr": {
       "title": "Zeitschaltuhr",
@@ -951,6 +1000,7 @@
       "miniWidgetLabel": "Bezeichnung",
       "miniWidgetLabelPlaceholder": "z.B. Lampe Flur",
       "statusDatapoint": "Status-Datenpunkt (optional)",
+      "noImageConfigured": "Kein Bild konfiguriert",
       "widthPx": "Breite (px)",
       "heightPx": "Höhe (px)",
       "showInVisu": "In Visu anzeigen",
@@ -978,9 +1028,65 @@
     "horizontalbar": {
       "title": "Balkenanzeige"
     },
+    "messageArchive": {
+      "title": "Meldungsarchiv",
+      "archives": "Archive",
+      "loadArchivesError": "Archive konnten nicht geladen werden.",
+      "loadError": "Meldungen konnten nicht geladen werden.",
+      "limit": "Anzahl Einträge",
+      "severity": "Schweregrad",
+      "status": "Status",
+      "allArchives": "Alle Archive",
+      "allSeverities": "Alle Schweregrade",
+      "allStatuses": "Alle Status",
+      "allTypes": "Alle Typen",
+      "allSources": "Alle Quellen",
+      "clearFilter": "Filter zurücksetzen",
+      "selectedCount": "{count} ausgewählt",
+      "noSources": "Keine Quellen gefunden",
+      "type": "Typ",
+      "source": "Quelle",
+      "showArchive": "Archiv anzeigen",
+      "showSource": "Quelle anzeigen",
+      "allowRead": "Als gelesen markieren erlauben",
+      "allowAcknowledge": "Quittieren erlauben",
+      "refresh": "Aktualisieren",
+      "empty": "Keine Meldungen",
+      "unread": "neu",
+      "markRead": "Gelesen",
+      "acknowledge": "Quittieren",
+      "statuses": {
+        "new": "Neu",
+        "open": "Offen",
+        "acknowledged": "Quittiert",
+        "closed": "Geschlossen"
+      },
+      "types": {
+        "system": "System",
+        "security": "Sicherheit",
+        "notification": "Benachrichtigung",
+        "automation": "Automatisierung",
+        "adapter": "Adapter",
+        "diagnostic": "Diagnose"
+      },
+      "severities": {
+        "info": "Info",
+        "success": "Erfolg",
+        "warning": "Warnung",
+        "error": "Fehler",
+        "critical": "Kritisch"
+      }
+    },
     "missing": {
       "title": "Unbekannt",
       "ariaLabel": "Unbekannter Widget-Typ"
     }
+  },
+  "datetimeNames": {
+    "weekdays": "Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag",
+    "weekdaysShort": "Mo.|Di.|Mi.|Do.|Fr.|Sa.|So.",
+    "weekdaysTwo": "Mo|Di|Mi|Do|Fr|Sa|So",
+    "months": "Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember",
+    "monthsShort": "Jan.|Feb.|März|Apr.|Mai|Juni|Juli|Aug.|Sept.|Okt.|Nov.|Dez."
   }
 }

@@ -7,7 +7,7 @@ Covers:
   PUT    /api/v1/logic/graphs/{id}           full replace (success, 404)
   PATCH  /api/v1/logic/graphs/{id}           partial update (name, enabled, description, flow_data)
   DELETE /api/v1/logic/graphs/{id}           delete (success, 404)
-  POST   /api/v1/logic/graphs/{id}/run       run (empty flow, disabled 422, 404)
+  POST   /api/v1/logic/graphs/{id}/run       run (empty flow, node execution, disabled 422, 404)
   POST   /api/v1/logic/graphs/{id}/duplicate duplicate (success, 404)
   GET    /api/v1/logic/graphs/{id}/export    export JSON download (success, 404)
   POST   /api/v1/logic/graphs/import         import from JSON (success, bad format)
@@ -15,9 +15,12 @@ Covers:
 
 from __future__ import annotations
 
+import json
 import uuid
 
 import pytest
+
+from obs.logic.capabilities import LOGIC_CREATE_CAPABILITY
 
 pytestmark = pytest.mark.integration
 
@@ -123,6 +126,53 @@ async def test_validate_graph_allows_feedback_through_memory(client, auth_header
     assert resp.json()["warnings"] == []
 
 
+async def test_validate_graph_reports_invalid_enum_value(client, auth_headers):
+    flow_data = {
+        "nodes": [
+            {"id": "cmp", "type": "compare", "position": {"x": 0, "y": 0}, "data": {"operator": "greater_than"}},
+        ],
+        "edges": [],
+    }
+
+    resp = await client.post("/api/v1/logic/graphs/validate", json=flow_data, headers=auth_headers)
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["warnings"] == [
+        {
+            "node_id": "cmp",
+            "code": "config_schema_enum_invalid",
+            "message": "operator: 'greater_than' is not one of ['>', '<', '=', '>=', '<=', '!='].",
+        }
+    ]
+
+
+async def test_validate_graph_reports_unknown_node_type_and_nested_config_schema_issues(client, auth_headers):
+    flow_data = {
+        "nodes": [
+            {"id": "ghost", "type": "totally_made_up", "position": {"x": 0, "y": 0}, "data": {}},
+            {
+                "id": "dec",
+                "type": "decision",
+                "position": {"x": 200, "y": 0},
+                "data": {"conditions": [{"operator": "greater_than"}]},
+            },
+        ],
+        "edges": [],
+    }
+
+    resp = await client.post("/api/v1/logic/graphs/validate", json=flow_data, headers=auth_headers)
+
+    assert resp.status_code == 200
+    codes = {(w["node_id"], w["code"]) for w in resp.json()["warnings"]}
+    assert codes == {
+        ("ghost", "unknown_node_type"),
+        ("dec", "config_schema_missing_required_field"),
+        ("dec", "config_schema_enum_invalid"),
+    }
+
+
 # ---------------------------------------------------------------------------
 # POST /logic/graphs
 # ---------------------------------------------------------------------------
@@ -178,6 +228,68 @@ async def test_create_graph_non_admin_forbidden(client, auth_headers):
         )
         assert resp.status_code == 403, resp.text
     finally:
+        await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
+
+
+async def test_create_graph_non_admin_with_closed_capability_is_disabled_and_readable(client, auth_headers):
+    username = f"logic-create-{uuid.uuid4().hex[:8]}"
+    user_headers = await _create_non_admin_user_and_headers(client, auth_headers, username=username, password="pw-12345678")
+    graph_ids = []
+    try:
+        current = await client.get(f"/api/v1/authz/principals/user/{username}/grants", headers=auth_headers)
+        assert current.status_code == 200, current.text
+        replaced = await client.put(
+            f"/api/v1/authz/principals/user/{username}/grants",
+            json={
+                "grants": [
+                    {
+                        "node_type": "logic_capability",
+                        "node_id": LOGIC_CREATE_CAPABILITY,
+                        "role": "operator",
+                    }
+                ]
+            },
+            headers={**auth_headers, "If-Match": current.headers["etag"]},
+        )
+        assert replaced.status_code == 200, replaced.text
+
+        created = await client.post(
+            "/api/v1/logic/graphs",
+            json={
+                "name": f"LG-Delegated-{uuid.uuid4().hex[:6]}",
+                "enabled": True,
+                "flow_data": {
+                    "nodes": [
+                        {"id": "original-a", "type": "const_value", "position": {"x": 0, "y": 0}, "data": {}},
+                        {"id": "original-b", "type": "not", "position": {"x": 100, "y": 0}, "data": {}},
+                    ],
+                    "edges": [{"id": "original-edge", "source": "original-a", "target": "original-b"}],
+                },
+            },
+            headers=user_headers,
+        )
+        assert created.status_code == 201, created.text
+        graph_id = created.json()["id"]
+        graph_ids.append(graph_id)
+        assert created.json()["enabled"] is False
+
+        readable = await client.get(f"/api/v1/logic/graphs/{graph_id}", headers=user_headers)
+        assert readable.status_code == 200, readable.text
+        run = await client.post(f"/api/v1/logic/graphs/{graph_id}/run", headers=user_headers)
+        assert run.status_code == 422, run.text
+
+        duplicate = await client.post(f"/api/v1/logic/graphs/{graph_id}/duplicate", headers=user_headers)
+        assert duplicate.status_code == 201, duplicate.text
+        graph_ids.append(duplicate.json()["id"])
+        assert duplicate.json()["enabled"] is False
+        copied_ids = {node["id"] for node in duplicate.json()["flow_data"]["nodes"]}
+        assert copied_ids.isdisjoint({"original-a", "original-b"})
+        copied_edge = duplicate.json()["flow_data"]["edges"][0]
+        assert copied_edge["id"] != "original-edge"
+        assert {copied_edge["source"], copied_edge["target"]} == copied_ids
+    finally:
+        for graph_id in reversed(graph_ids):
+            await client.delete(f"/api/v1/logic/graphs/{graph_id}", headers=auth_headers)
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
 
 
@@ -237,7 +349,7 @@ async def test_full_update_graph_success(client, auth_headers):
     assert body["description"] == "updated desc"
 
 
-async def test_full_update_graph_non_admin_forbidden(client, auth_headers):
+async def test_full_update_graph_non_admin_concealed(client, auth_headers):
     graph = await _create_graph(client, auth_headers)
     username = f"logic-na-{uuid.uuid4().hex[:8]}"
     user_headers = await _create_non_admin_user_and_headers(client, auth_headers, username=username, password="pw-12345678")
@@ -247,7 +359,7 @@ async def test_full_update_graph_non_admin_forbidden(client, auth_headers):
             json={"name": "x", "description": "", "enabled": True, "flow_data": _EMPTY_FLOW},
             headers=user_headers,
         )
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 404, resp.text
     finally:
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
 
@@ -269,6 +381,23 @@ async def test_partial_update_graph_404(client, auth_headers):
 
 async def test_partial_update_graph_name(client, auth_headers):
     graph = await _create_graph(client, auth_headers)
+    new_name = f"Patched-{uuid.uuid4().hex[:6]}"
+    resp = await client.patch(f"/api/v1/logic/graphs/{graph['id']}", json={"name": new_name}, headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()["name"] == new_name
+
+
+async def test_partial_update_graph_name_manager_failure_logged(client, auth_headers, monkeypatch):
+    """Name-only PATCH refreshes the logic manager cache best-effort (#…);
+    a manager failure (e.g. not initialized) must not fail the request, only
+    log it — covers the except branch around update_cached_graph_name.
+    """
+    graph = await _create_graph(client, auth_headers)
+
+    def _boom():
+        raise RuntimeError("logic manager unavailable")
+
+    monkeypatch.setattr("obs.logic.manager.get_logic_manager", _boom)
     new_name = f"Patched-{uuid.uuid4().hex[:6]}"
     resp = await client.patch(f"/api/v1/logic/graphs/{graph['id']}", json={"name": new_name}, headers=auth_headers)
     assert resp.status_code == 200
@@ -297,7 +426,7 @@ async def test_partial_update_graph_persists(client, auth_headers):
     assert resp.json()["name"] == new_name
 
 
-async def test_partial_update_graph_non_admin_forbidden(client, auth_headers):
+async def test_partial_update_graph_non_admin_concealed(client, auth_headers):
     graph = await _create_graph(client, auth_headers)
     username = f"logic-na-{uuid.uuid4().hex[:8]}"
     user_headers = await _create_non_admin_user_and_headers(client, auth_headers, username=username, password="pw-12345678")
@@ -307,7 +436,7 @@ async def test_partial_update_graph_non_admin_forbidden(client, auth_headers):
             json={"enabled": False},
             headers=user_headers,
         )
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 404, resp.text
     finally:
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
 
@@ -335,7 +464,7 @@ async def test_delete_graph_success(client, auth_headers):
     assert get_resp.status_code == 404
 
 
-async def test_delete_graph_non_admin_forbidden(client, auth_headers):
+async def test_delete_graph_non_admin_concealed(client, auth_headers):
     graph = await _create_graph(client, auth_headers)
     username = f"logic-na-{uuid.uuid4().hex[:8]}"
     user_headers = await _create_non_admin_user_and_headers(client, auth_headers, username=username, password="pw-12345678")
@@ -344,7 +473,7 @@ async def test_delete_graph_non_admin_forbidden(client, auth_headers):
             f"/api/v1/logic/graphs/{graph['id']}",
             headers=user_headers,
         )
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 404, resp.text
     finally:
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
 
@@ -395,6 +524,43 @@ async def test_run_graph_cycle_returns_node_warnings(client, auth_headers):
     assert {warning["node_id"] for warning in body["warnings"]} == {"a", "b"}
 
 
+async def test_run_graph_applies_string_replace_rules_in_order(client, auth_headers):
+    """The rule list is persisted as JSON inside the node data — run it for real."""
+    flow_data = {
+        "nodes": [
+            {
+                "id": "src",
+                "type": "const_value",
+                "position": {"x": 0, "y": 0},
+                "data": {"value": "the cold water 12-34", "data_type": "string"},
+            },
+            {
+                "id": "rep",
+                "type": "string_replace",
+                "position": {"x": 160, "y": 0},
+                "data": {
+                    "rules": json.dumps(
+                        [
+                            {"search": "COLD", "replace": "warm", "mode": "plain", "case_sensitive": False},
+                            {"search": r"(\d+)-(\d+)", "replace": r"\2/\1", "mode": "regex"},
+                        ]
+                    )
+                },
+            },
+        ],
+        "edges": [{"id": "src-rep", "source": "src", "target": "rep", "sourceHandle": "value", "targetHandle": "text"}],
+    }
+    graph = await _create_graph(client, auth_headers, flow_data=flow_data)
+
+    resp = await client.post(f"/api/v1/logic/graphs/{graph['id']}/run", headers=auth_headers)
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["status"] == "ok"
+    assert body["outputs"]["rep"] == {"result": "the warm water 34/12"}
+    assert not body["warnings"]
+
+
 async def test_run_disabled_graph_returns_422(client, auth_headers):
     graph = await _create_graph(client, auth_headers, enabled=False)
     resp = await client.post(f"/api/v1/logic/graphs/{graph['id']}/run", headers=auth_headers)
@@ -407,7 +573,7 @@ async def test_run_graph_non_admin_forbidden(client, auth_headers):
     user_headers = await _create_non_admin_user_and_headers(client, auth_headers, username=username, password="pw-12345678")
     try:
         resp = await client.post(f"/api/v1/logic/graphs/{graph['id']}/run", headers=user_headers)
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 404, resp.text
     finally:
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
 
@@ -434,6 +600,7 @@ async def test_duplicate_graph_success(client, auth_headers):
     copy = resp.json()
     assert copy["id"] != original["id"]
     assert original["name"] in copy["name"]
+    assert copy["enabled"] is original["enabled"]
 
 
 async def test_duplicate_graph_new_id(client, auth_headers):
@@ -446,15 +613,61 @@ async def test_duplicate_graph_new_id(client, auth_headers):
     assert original["id"] in ids
 
 
-async def test_duplicate_graph_non_admin_forbidden(client, auth_headers):
+async def test_duplicate_graph_non_admin_source_is_concealed(client, auth_headers):
     original = await _create_graph(client, auth_headers)
     username = f"logic-na-{uuid.uuid4().hex[:8]}"
     user_headers = await _create_non_admin_user_and_headers(client, auth_headers, username=username, password="pw-12345678")
     try:
         resp = await client.post(f"/api/v1/logic/graphs/{original['id']}/duplicate", headers=user_headers)
-        assert resp.status_code == 403, resp.text
+        assert resp.status_code == 404, resp.text
     finally:
         await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
+
+
+async def test_duplicate_graph_non_admin_readable_source_without_create_capability_is_denied(client, auth_headers):
+    original = await _create_graph(client, auth_headers)
+    username = f"logic-duplicate-{uuid.uuid4().hex[:8]}"
+    user_headers = await _create_non_admin_user_and_headers(client, auth_headers, username=username, password="pw-12345678")
+    try:
+        current = await client.get(f"/api/v1/authz/principals/user/{username}/grants", headers=auth_headers)
+        replaced = await client.put(
+            f"/api/v1/authz/principals/user/{username}/grants",
+            json={"grants": [{"node_type": "logic_graph", "node_id": original["id"], "role": "resident"}]},
+            headers={**auth_headers, "If-Match": current.headers["etag"]},
+        )
+        assert replaced.status_code == 200, replaced.text
+
+        resp = await client.post(f"/api/v1/logic/graphs/{original['id']}/duplicate", headers=user_headers)
+        assert resp.status_code == 403, resp.text
+    finally:
+        await client.delete(f"/api/v1/logic/graphs/{original['id']}", headers=auth_headers)
+        await client.delete(f"/api/v1/auth/users/{username}", headers=auth_headers)
+
+
+async def test_duplicate_graph_api_key_denied_after_source_read_grant(client, auth_headers):
+    original = await _create_graph(client, auth_headers)
+    created_key = await client.post(
+        "/api/v1/auth/apikeys",
+        json={"name": f"logic-duplicate-{uuid.uuid4().hex[:8]}"},
+        headers=auth_headers,
+    )
+    assert created_key.status_code == 201, created_key.text
+    key_id = created_key.json()["id"]
+    api_key_headers = {"X-API-Key": created_key.json()["key"]}
+    try:
+        current = await client.get(f"/api/v1/authz/principals/api_key/{key_id}/grants", headers=auth_headers)
+        replaced = await client.put(
+            f"/api/v1/authz/principals/api_key/{key_id}/grants",
+            json={"grants": [{"node_type": "logic_graph", "node_id": original["id"], "role": "resident"}]},
+            headers={**auth_headers, "If-Match": current.headers["etag"]},
+        )
+        assert replaced.status_code == 200, replaced.text
+
+        resp = await client.post(f"/api/v1/logic/graphs/{original['id']}/duplicate", headers=api_key_headers)
+        assert resp.status_code == 403, resp.text
+    finally:
+        await client.delete(f"/api/v1/auth/apikeys/{key_id}", headers=auth_headers)
+        await client.delete(f"/api/v1/logic/graphs/{original['id']}", headers=auth_headers)
 
 
 # ---------------------------------------------------------------------------
@@ -520,6 +733,48 @@ async def test_import_graph_success(client, auth_headers):
     imported = resp.json()
     assert imported["name"] == original["name"]
     assert imported["id"] != original["id"]
+
+
+async def test_import_graph_invalid_datapoint_id_is_ignored(client, auth_headers):
+    """A node/step referencing a malformed datapoint_id must not fail the
+    import — the datapoint_name enrichment is best-effort and swallows
+    ValueError/TypeError/AttributeError from uuid.UUID() parsing.
+    """
+    resp = await client.post(
+        "/api/v1/logic/graphs/import",
+        json={
+            "obs_export": "logic_graph",
+            "version": 1,
+            "name": f"BadDpId-{uuid.uuid4().hex[:6]}",
+            "description": "",
+            "enabled": True,
+            "flow_data": {
+                "nodes": [
+                    {
+                        "id": "n1",
+                        "type": "datapoint_read",
+                        "position": {"x": 0, "y": 0},
+                        "data": {"datapoint_id": "not-a-valid-uuid"},
+                    },
+                    {
+                        "id": "n2",
+                        "type": "value_sequence",
+                        "position": {"x": 0, "y": 0},
+                        "data": {"steps": [{"datapoint_id": "also-not-a-uuid", "value": 1}]},
+                    },
+                ],
+                "edges": [],
+            },
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201, resp.text
+    imported = resp.json()
+    nodes = imported["flow_data"]["nodes"]
+    n1 = next(n for n in nodes if n["id"] == "n1")
+    n2 = next(n for n in nodes if n["id"] == "n2")
+    assert "datapoint_name" not in n1["data"]
+    assert "datapoint_name" not in n2["data"]["steps"][0]
 
 
 async def test_import_graph_non_admin_forbidden(client, auth_headers):

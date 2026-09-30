@@ -54,7 +54,8 @@
               class="flex items-center gap-2 px-2 py-1.5 rounded cursor-grab hover:bg-slate-100 dark:hover:bg-slate-700/50 transition-colors select-none"
             >
               <span class="w-2 h-2 rounded-full flex-shrink-0" :style="{ background: nt.color }"></span>
-              <span class="text-xs text-slate-700 dark:text-slate-200">{{ $te('logic.nodeTypes.' + nt.type) ? $t('logic.nodeTypes.' + nt.type) : nt.label }}</span>
+              <span class="text-xs text-slate-700 dark:text-slate-200 flex-1 min-w-0 truncate">{{ $te('logic.nodeTypes.' + nt.type) ? $t('logic.nodeTypes.' + nt.type) : nt.label }}</span>
+              <HelpButton v-if="nt.help_id" :help-id="nt.help_id" compact class="flex-shrink-0" />
             </div>
           </div>
         </div>
@@ -67,6 +68,7 @@
 <script setup>
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import HelpButton from '@/components/ui/HelpButton.vue'
 
 const props = defineProps({
   nodeTypes: { type: Array, default: () => [] },
@@ -83,7 +85,7 @@ const categories = computed(() =>
     .map(id => ({
       id,
       label: t('logic.palette.categories.' + id),
-      types: props.nodeTypes.filter(nt => nt.category === id)
+      types: props.nodeTypes.filter(nt => nt.category === id && !nt.hidden_from_palette)
     }))
     .filter(cat => cat.types.length > 0)
 )

@@ -15,27 +15,55 @@ while sort and pagination remain owned by the caller of the query endpoint.
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 import csv
 import json
+import logging
 import re
+import shutil
 import tempfile
 import time
 import uuid
+from contextlib import suppress
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
-from obs.api.auth import get_admin_user, get_current_user
+from obs.api.audit import audit_payload_sha256
+from obs.api.auth import Principal, get_admin_user, get_current_principal, get_current_user
+from obs.api.authz import AuthzAction, AuthzTarget, RoleGrant, authorize
+from obs.api.authz_service import filter_authorized_datapoints, load_role_grants
+from obs.api.v1.application_audit import audit_application_contract, write_application_success
+from obs.api.v1.services.knx_traceability import resolve_device_pas_to_group_addresses
 from obs.db.database import Database, get_db
-from obs.ringbuffer.persisted_config import load_persisted_ringbuffer_config, persist_ringbuffer_config
+from obs.ringbuffer.persisted_config import (
+    LEGACY_DECISION_DISCARDED,
+    LEGACY_DECISION_KEEP,
+    LEGACY_DECISION_MIGRATED,
+    LEGACY_DECISION_PENDING,
+    LEGACY_DECISION_SKIPPED,
+    LEGACY_DECISIONS_PROTECTED,
+    LEGACY_DECISIONS_TERMINAL,
+    ensure_legacy_migration_decision,
+    finalize_committed_migration_decision,
+    load_legacy_migration_decision,
+    load_persisted_ringbuffer_config,
+    persist_legacy_migration_decision,
+    persist_ringbuffer_config,
+    repair_pending_keep_migration_decision,
+)
 from obs.ringbuffer.ringbuffer import (
     RingBufferStorageDeleteIncompleteError,
+    RowLazyExportCursor,
+    _is_sqlite_memory_path,
     default_ringbuffer_disk_path,
     delete_ringbuffer_storage_files,
+    derive_segment_max_age,
+    derive_segment_max_bytes,
+    derive_segment_max_rows,
     get_optional_ringbuffer,
     get_ringbuffer,
     init_ringbuffer,
@@ -43,6 +71,15 @@ from obs.ringbuffer.ringbuffer import (
     reset_ringbuffer,
     set_ringbuffer_enabled,
 )
+from obs.ringbuffer.store.config import (
+    SEGMENT_MAX_AGE_MIN,
+    SegmentConfig,
+    StoreRetentionConfig,
+    validate_explicit_segment_bounds,
+    validate_store_config,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["ringbuffer"])
 
@@ -71,6 +108,11 @@ _CSV_EXPORT_HEADERS = (
 )
 
 _CONFIGURE_LOCK = asyncio.Lock()
+# Serialisiert konkurrierende Legacy-Migrations-Entscheidungen (#968, Q0qIM): sonst könnten
+# ein ``discard`` und ein ``keep`` aus zwei Admin-Tabs beide den initialen Terminal-Check
+# passieren, und der non-terminale keep-Write nach dem bereits durchgelaufenen discard die
+# terminale ``discarded``-Entscheidung wieder überschreiben.
+_LEGACY_DECISION_LOCK = asyncio.Lock()
 
 _COLOR_RE = re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
 _DEFAULT_COLOR = "#3b82f6"
@@ -100,8 +142,39 @@ def _unsubscribe_ringbuffer(rb: Any) -> None:
         pass
 
 
+def _segment_limit_source(configured: int | None, effective: int | None) -> Literal["explicit", "derived", "disabled"]:
+    if configured is not None:
+        return "explicit"
+    if effective is not None:
+        return "derived"
+    return "disabled"
+
+
+def _segment_contract_stats(
+    *,
+    max_entries: int | None,
+    max_file_size_bytes: int | None,
+    max_age: int | None,
+    segment_max_bytes: int | None,
+    segment_max_rows: int | None,
+    segment_max_age: int | None,
+) -> dict[str, Any]:
+    effective_segment_max_bytes = segment_max_bytes if segment_max_bytes is not None else derive_segment_max_bytes(max_file_size_bytes)
+    effective_segment_max_rows = segment_max_rows if segment_max_rows is not None else derive_segment_max_rows(max_entries)
+    effective_segment_max_age = segment_max_age if segment_max_age is not None else derive_segment_max_age(max_age)
+    return {
+        "effective_segment_max_bytes": effective_segment_max_bytes,
+        "effective_segment_max_rows": effective_segment_max_rows,
+        "effective_segment_max_age": effective_segment_max_age,
+        "segment_max_bytes_source": _segment_limit_source(segment_max_bytes, effective_segment_max_bytes),
+        "segment_max_rows_source": _segment_limit_source(segment_max_rows, effective_segment_max_rows),
+        "segment_max_age_source": _segment_limit_source(segment_max_age, effective_segment_max_age),
+        "retention_unbounded": max_entries is None and max_file_size_bytes is None and max_age is None,
+    }
+
+
 async def _disabled_stats(db: Database) -> RingBufferStats:
-    cfg = await load_persisted_ringbuffer_config(db)
+    cfg = await load_persisted_ringbuffer_config(db, storage_path=_ringbuffer_disk_path())
     return RingBufferStats(
         enabled=False,
         total=0,
@@ -112,7 +185,18 @@ async def _disabled_stats(db: Database) -> RingBufferStats:
         effective_retention_seconds=None,
         max_file_size_bytes=cfg["max_file_size_bytes"],
         max_age=cfg["max_age"],
+        segment_max_bytes=cfg.get("segment_max_bytes"),
+        segment_max_rows=cfg.get("segment_max_rows"),
+        segment_max_age=cfg.get("segment_max_age"),
         file_size_bytes=0,
+        **_segment_contract_stats(
+            max_entries=cfg["max_entries"],
+            max_file_size_bytes=cfg["max_file_size_bytes"],
+            max_age=cfg["max_age"],
+            segment_max_bytes=cfg.get("segment_max_bytes"),
+            segment_max_rows=cfg.get("segment_max_rows"),
+            segment_max_age=cfg.get("segment_max_age"),
+        ),
     )
 
 
@@ -122,6 +206,31 @@ def _now_iso() -> str:
 
 def _new_id() -> str:
     return str(uuid.uuid4())
+
+
+def _principal_from_dependency(value: Principal | str) -> Principal:
+    if isinstance(value, Principal):
+        return value
+    if not isinstance(value, str):
+        return Principal(subject="admin", type="user", is_admin=True)
+    return Principal(
+        subject=value,
+        type="api_key" if value.startswith("api_key:") else "user",
+        is_admin=value == "admin",
+    )
+
+
+def _is_admin_principal(principal: Principal) -> bool:
+    return principal.type == "user" and principal.is_admin
+
+
+async def _readable_datapoint_ids(db: Database, principal: Principal, datapoint_ids: list[str]) -> list[str]:
+    ordered_ids = list(dict.fromkeys(datapoint_ids))
+    if not ordered_ids:
+        return []
+    if _is_admin_principal(principal):
+        return ordered_ids
+    return await filter_authorized_datapoints(db, principal, ordered_ids, action=AuthzAction.READ)
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +263,28 @@ class RingBufferMultiEntryOut(RingBufferEntryOut):
     matched_set_ids: list[str]
 
 
+class RingBufferPrognosis(BaseModel):
+    """Datengetriebene Wachstums-/Retention-Prognose (#919).
+
+    Bis zum ersten verwertbaren geschlossenen v2-Segment stammt sie aus einer
+    vorläufigen, mindestens fünf Sekunden langen Live-Stichprobe des aktiven
+    Segments; danach aus den stabileren geschlossenen Segmenten.
+    """
+
+    sample_segment_count: int = 0
+    source: Literal["active", "closed"] | None = None
+    provisional: bool = False
+    bytes_per_hour: float | None = None
+    rows_per_hour: float | None = None
+    avg_segment_seconds: float | None = None
+    estimated_retention_seconds: float | None = None
+    effective_segment_max_bytes: float | None = None
+    observed_seconds: float | None = None
+    observed_rows: int | None = None
+    ready_after_seconds: float | None = None
+    idle_seconds: float | None = None
+
+
 class RingBufferStats(BaseModel):
     enabled: bool = True
     total: int
@@ -165,8 +296,26 @@ class RingBufferStats(BaseModel):
     max_file_size_bytes: int | None
     max_age: int | None
     file_size_bytes: int
+    # Persistierte Segment-Rotations-Config (#919/#938) — damit der Config-Dialog
+    # die GESPEICHERTEN Werte hydratisiert (nicht die runtime-abgeleiteten).
+    segment_max_bytes: int | None = None
+    segment_max_rows: int | None = None
+    segment_max_age: int | None = None
+    effective_segment_max_bytes: int | None = None
+    effective_segment_max_rows: int | None = None
+    effective_segment_max_age: int | None = None
+    segment_max_bytes_source: Literal["explicit", "derived", "disabled"] = "disabled"
+    segment_max_rows_source: Literal["explicit", "derived", "disabled"] = "disabled"
+    segment_max_age_source: Literal["explicit", "derived", "disabled"] = "disabled"
+    retention_unbounded: bool = False
     last_recovery_at: str | None = None
     last_recovery_file_count: int = 0
+    # Segmentierter Store (#919) — nur im segmentierten Modus befüllt (``common``
+    # + ``backend_extra`` aus ``store.stats()``); im Legacy-Modus ``None``, damit
+    # die bestehende Stats-Form unverändert bleibt.
+    store: dict[str, Any] | None = None
+    # Datengetriebene Prognose (#919) — nur im segmentierten Modus befüllt.
+    prognosis: RingBufferPrognosis | None = None
 
 
 class RingBufferConfig(BaseModel):
@@ -175,6 +324,22 @@ class RingBufferConfig(BaseModel):
     max_entries: int | None = Field(default=None, ge=1)
     max_file_size_bytes: int | None = Field(default=None, ge=1)
     max_age: int | None = Field(default=None, ge=0)
+    # Segmentierter Store (#919) – PARTIAL-UPDATE-Feld (Codex #951 [P2]).
+    # Der deployte Default ist segmentiert; das GUI zeigt keinen Legacy-Toggle
+    # mehr. Das Schema darf daher KEINEN ``false``-Default bewerben – sonst
+    # serialisieren generierte Clients / Admin-Skripte beim Aendern UNRELATED
+    # Config ein ``segmented:false`` mit und bauen den laufenden Monitor in den
+    # Legacy-Single-File-Pfad zurueck (v2-Segment-Historie nicht mehr lesbar).
+    # ``None`` (= nicht gesetzt) bedeutet "unveraendert lassen": der Resolver
+    # behaelt den persistierten/deployten Wert. Nur ein EXPLIZITES ``true``/``false``
+    # schaltet um (bewusster Opt-in/Opt-out). Eine Umschaltung greift beim
+    # naechsten RingBuffer-(Neu-)Start bzw. sofort via Modus-Switch-Rebuild.
+    segmented: bool | None = None
+    # Segment-Parameter (#930) – Rotation, getrennt von den Retention-Feldern
+    # oben.
+    segment_max_bytes: int | None = Field(default=None, ge=1)
+    segment_max_rows: int | None = Field(default=None, ge=1)
+    segment_max_age: int | None = Field(default=None, ge=1)
 
 
 class RingBufferTimeFilterV2(BaseModel):
@@ -304,9 +469,7 @@ def _is_empty_criteria(c: FilterCriteria | None) -> bool:
         return False
     if c.q and c.q.strip():
         return False
-    if c.value_filter and c.value_filter.operator:
-        return False
-    return True
+    return not (c.value_filter and c.value_filter.operator)
 
 
 def _color_must_be_hex(value: str) -> str:
@@ -373,8 +536,9 @@ class RingBufferFiltersetOut(BaseModel):
     filter: FilterCriteria
     created_at: str
     updated_at: str
-    # #478: NULL on rows created before V33 — treated as "shared, admin-only editable".
+    # Provenance only. Authorization is exclusively derived from central grants.
     created_by: str | None = None
+    can_write: bool = False
 
 
 class RingBufferFiltersetTopbarPatch(BaseModel):
@@ -581,11 +745,6 @@ def _normalize_nonempty(values: list[str]) -> list[str]:
     return out
 
 
-async def _table_columns(db: Database, table_name: str) -> set[str]:
-    rows = await db.fetchall(f"PRAGMA table_info({table_name})")
-    return {str(row["name"]) for row in rows if "name" in row.keys()}
-
-
 async def _resolve_device_pas_to_group_addresses(
     device_pas: list[str],
     db: Database,
@@ -595,55 +754,7 @@ async def _resolve_device_pas_to_group_addresses(
     The helper is schema-tolerant so it keeps working while the KNX device
     import tables are introduced incrementally across sub-issues.
     """
-    normalized_pas = _normalize_nonempty(device_pas)
-    if not normalized_pas:
-        return []
-
-    co_cols = await _table_columns(db, "knx_comm_objects")
-    link_cols = await _table_columns(db, "knx_co_ga_links")
-    dev_cols = await _table_columns(db, "knx_devices")
-
-    ga_col = next((c for c in ("group_address", "ga_address", "ga", "address") if c in link_cols), None)
-    if not ga_col:
-        return []
-
-    placeholders = ",".join("?" * len(normalized_pas))
-    co_id_col = next((c for c in ("id", "comm_object_id", "communication_object_id", "co_id") if c in co_cols), None)
-    link_co_col = next((c for c in ("comm_object_id", "communication_object_id", "co_id") if c in link_cols), None)
-
-    # Most direct shape: knx_comm_objects holds the device physical address.
-    co_pa_col = next(
-        (c for c in ("physical_address", "device_physical_address", "device_pa", "pa", "address") if c in co_cols),
-        None,
-    )
-    if co_id_col and link_co_col and co_pa_col:
-        rows = await db.fetchall(
-            f"""SELECT DISTINCT l.{ga_col} AS ga
-                   FROM knx_comm_objects co
-                   JOIN knx_co_ga_links l ON l.{link_co_col} = co.{co_id_col}
-                  WHERE co.{co_pa_col} IN ({placeholders})""",
-            tuple(normalized_pas),
-        )
-        resolved = _normalize_nonempty([str(row["ga"]) for row in rows if row["ga"] is not None])
-        if resolved:
-            return resolved
-
-    # Fallback shape: knx_devices linked via device_id in knx_comm_objects.
-    dev_id_col = next((c for c in ("id", "device_id") if c in dev_cols), None)
-    dev_pa_col = next((c for c in ("individual_address", "physical_address", "pa", "address") if c in dev_cols), None)
-    co_dev_id_col = next((c for c in ("device_id", "knx_device_id") if c in co_cols), None)
-    if dev_id_col and dev_pa_col and co_id_col and link_co_col and co_dev_id_col:
-        rows = await db.fetchall(
-            f"""SELECT DISTINCT l.{ga_col} AS ga
-                   FROM knx_devices d
-                   JOIN knx_comm_objects co ON co.{co_dev_id_col} = d.{dev_id_col}
-                   JOIN knx_co_ga_links l ON l.{link_co_col} = co.{co_id_col}
-                  WHERE d.{dev_pa_col} IN ({placeholders})""",
-            tuple(normalized_pas),
-        )
-        return _normalize_nonempty([str(row["ga"]) for row in rows if row["ga"] is not None])
-
-    return []
+    return await resolve_device_pas_to_group_addresses(device_pas, db)
 
 
 def _apply_group_addresses_to_filter_query(
@@ -682,9 +793,10 @@ async def _build_query_from_filter_criteria(
     effective_filter = filter_
     if filter_.hierarchy_nodes:
         resolved_dps = await _resolve_hierarchy_to_datapoints(filter_.hierarchy_nodes, db)
-        if resolved_dps:
-            merged = list({*filter_.datapoints, *resolved_dps})
-            effective_filter = filter_.model_copy(update={"datapoints": merged})
+        merged = _normalize_nonempty([*filter_.datapoints, *resolved_dps])
+        if not merged:
+            return None
+        effective_filter = filter_.model_copy(update={"datapoints": merged})
 
     query = _filter_to_query_v2(effective_filter, time_filter)
 
@@ -777,6 +889,11 @@ async def _query_v2_entries(
     *,
     limit_override: int | None = None,
     offset_override: int | None = None,
+    candidate_cap_override: int | None = None,
+    is_export: bool = False,
+    export_store_cursor: RowLazyExportCursor | None = None,
+    db: Database | None = None,
+    principal: Principal | None = None,
 ) -> list[RingBufferEntryOut]:
     if not is_ringbuffer_enabled():
         return []
@@ -843,12 +960,22 @@ async def _query_v2_entries(
 
     time_filter = body.filters.time
     datapoint_types = {str(dp.id): dp.data_type for dp in registry_entries}
+    scoped_datapoints = datapoints
+    if db is not None and principal is not None and not _is_admin_principal(principal):
+        candidate_ids = datapoints or list(name_map.keys())
+        allowed_ids = await _readable_datapoint_ids(db, principal, candidate_ids)
+        allowed_set = set(allowed_ids)
+        scoped_datapoints = [dp_id for dp_id in datapoints if dp_id in allowed_set] if datapoints else allowed_ids
+        dp_ids_by_name = [dp_id for dp_id in dp_ids_by_name if dp_id in allowed_set]
+        if not scoped_datapoints:
+            return []
+
     rb = get_ringbuffer()
     try:
         entries = await rb.query_v2(
             q=q,
             adapter_any_of=adapters or None,
-            datapoint_ids=datapoints or None,
+            datapoint_ids=scoped_datapoints or None,
             value_filters=value_filters or None,
             metadata_tags_any_of=metadata_tags or None,
             metadata_adapter_types_any_of=metadata_adapter_types or None,
@@ -868,6 +995,9 @@ async def _query_v2_entries(
             sort_field=body.sort.field,
             sort_order=body.sort.order,
             dp_ids_by_name=dp_ids_by_name or None,
+            candidate_cap_override=candidate_cap_override,
+            is_export=is_export,
+            export_store_cursor=export_store_cursor,
         )
     except ValueError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
@@ -911,17 +1041,17 @@ def _row_to_filterset(row: Any, *, user_state: tuple[bool, bool, int] | None = N
         is_active, topbar_active, topbar_order = user_state
     else:
         is_active, topbar_active, topbar_order = True, False, 0
-    created_by = row["created_by"] if "created_by" in row.keys() else None
+    created_by = row["created_by"] if "created_by" in row.keys() else None  # noqa: SIM118 -- Row.__contains__ checks values, not keys
     return RingBufferFiltersetOut(
         id=row["id"],
         name=row["name"],
         description=row["description"],
         dsl_version=int(row["dsl_version"]),
         is_active=is_active,
-        color=_normalize_color(row["color"] if "color" in row.keys() else None),
+        color=_normalize_color(row["color"] if "color" in row.keys() else None),  # noqa: SIM118 -- Row.__contains__ checks values, not keys
         topbar_active=topbar_active,
         topbar_order=topbar_order,
-        filter=_decode_filter(row["filter_json"] if "filter_json" in row.keys() else None),
+        filter=_decode_filter(row["filter_json"] if "filter_json" in row.keys() else None),  # noqa: SIM118 -- Row.__contains__ checks values, not keys
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         created_by=created_by,
@@ -947,26 +1077,84 @@ async def _fetch_filterset(db: Database, filterset_id: str, *, username: str | N
     return _row_to_filterset(row, user_state=user_state)
 
 
-async def _is_admin(db: Database, username: str) -> bool:
-    row = await db.fetchone("SELECT is_admin FROM users WHERE username=?", (username,))
-    return row is not None and bool(row["is_admin"])
+def _filterset_decision(
+    principal: Principal,
+    filterset_id: str,
+    action: AuthzAction,
+    grants: list[RoleGrant],
+):
+    return authorize(
+        principal=principal,
+        action=action,
+        targets=[AuthzTarget(node_type="ringbuffer_filterset", node_id=filterset_id)],
+        grants=grants,
+    )
 
 
-async def _require_filterset_ownership(db: Database, filterset_id: str, current_user: str) -> RingBufferFiltersetOut:
-    """Load a set or raise: 404 if missing, 403 if the caller is neither admin
-    nor the owner. Mirrors the API-key admin-or-owner pattern in ``obs/api/auth.py``.
+async def _filterset_grants(db: Database, principal: Principal) -> list[RoleGrant]:
+    if _is_admin_principal(principal):
+        return []
+    return await load_role_grants(db, principal, node_type="ringbuffer_filterset")
 
-    Rows with ``created_by IS NULL`` (pre-#478 sets) are treated as shared and
-    admin-only mutable.
-    """
-    current = await _fetch_filterset(db, filterset_id, username=current_user)
+
+async def _require_explicit_datapoint_scope(
+    db: Database,
+    principal: Principal,
+    criteria: FilterCriteria,
+) -> None:
+    """Require READ access to every explicitly referenced datapoint."""
+    datapoint_ids = list(dict.fromkeys(criteria.datapoints))
+    if not datapoint_ids:
+        return
+    allowed_ids = set(await filter_authorized_datapoints(db, principal, datapoint_ids, action=AuthzAction.READ))
+    if set(datapoint_ids) != allowed_ids:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Datapoint read scope required")
+
+
+async def _require_filterset_access(
+    db: Database,
+    filterset_id: str,
+    principal: Principal,
+    action: AuthzAction,
+) -> RingBufferFiltersetOut:
+    """Return an authorized filterset while concealing out-of-scope IDs."""
+    current = await _fetch_filterset(db, filterset_id, username=principal.subject)
     if current is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
-    if await _is_admin(db, current_user):
-        return current
-    if current.created_by != current_user:
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Nur Admin oder Eigentümer")
-    return current
+    grants = await _filterset_grants(db, principal)
+    if not _filterset_decision(principal, filterset_id, action, grants).allowed:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
+    can_write = _filterset_decision(principal, filterset_id, AuthzAction.WRITE, grants).allowed
+    return current.model_copy(update={"can_write": can_write})
+
+
+async def _visible_filtersets(
+    db: Database,
+    principal: Principal,
+    *,
+    rows: list[Any] | None = None,
+) -> list[RingBufferFiltersetOut]:
+    source_rows = rows if rows is not None else await db.fetchall("SELECT * FROM ringbuffer_filtersets")
+    grants = await _filterset_grants(db, principal)
+    states = {
+        row["filterset_id"]: (bool(row["is_active"]), bool(row["topbar_active"]), int(row["topbar_order"]))
+        for row in await db.fetchall(
+            "SELECT filterset_id, is_active, topbar_active, topbar_order FROM ringbuffer_filterset_user_state WHERE username=?",
+            (principal.subject,),
+        )
+    }
+    result: list[RingBufferFiltersetOut] = []
+    for row in source_rows:
+        filterset_id = row["id"]
+        if not _filterset_decision(principal, filterset_id, AuthzAction.READ, grants).allowed:
+            continue
+        result.append(
+            _row_to_filterset(row, user_state=states.get(filterset_id)).model_copy(
+                update={"can_write": _filterset_decision(principal, filterset_id, AuthzAction.WRITE, grants).allowed}
+            )
+        )
+    result.sort(key=lambda fs: (fs.topbar_order, fs.created_at, fs.id))
+    return result
 
 
 async def _upsert_user_state(
@@ -994,49 +1182,77 @@ async def _insert_filterset(
     db: Database,
     *,
     payload: RingBufferFiltersetIn,
-    created_by: str | None,
+    principal: Principal,
+    request: Request | None = None,
+    audit_path: str = "/api/v1/ringbuffer/filtersets",
 ) -> RingBufferFiltersetOut:
+    if principal.type != "user":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "User principal required to create filtersets")
+    await _require_explicit_datapoint_scope(db, principal, payload.filter)
     now = _now_iso()
     filterset_id = _new_id()
 
-    await db.execute(
-        """INSERT INTO ringbuffer_filtersets
-           (id, name, description, dsl_version, is_active,
-            color, topbar_active, topbar_order, filter_json, created_at, updated_at, created_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-        (
-            filterset_id,
-            payload.name,
-            payload.description,
-            payload.dsl_version,
-            int(payload.is_active),
-            payload.color,
-            int(payload.topbar_active),
-            int(payload.topbar_order),
-            _encode_filter(payload.filter),
-            now,
-            now,
-            created_by,
-        ),
-    )
-    # Seed the creator's own per-user state from the POST body so GET as that
-    # user returns is_active/topbar_active/topbar_order as requested. We only
-    # write a row when something diverges from the defaults (active+un-pinned)
-    # to keep the override table lean.
-    if created_by is not None and (not payload.is_active or payload.topbar_active or payload.topbar_order):
-        await _upsert_user_state(
-            db,
-            username=created_by,
-            filterset_id=filterset_id,
-            is_active=bool(payload.is_active),
-            topbar_active=bool(payload.topbar_active),
-            topbar_order=int(payload.topbar_order),
+    async with db.transaction():
+        await db.execute(
+            """INSERT INTO ringbuffer_filtersets
+               (id, name, description, dsl_version, is_active,
+                color, topbar_active, topbar_order, filter_json, created_at, updated_at, created_by)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                filterset_id,
+                payload.name,
+                payload.description,
+                payload.dsl_version,
+                int(payload.is_active),
+                payload.color,
+                int(payload.topbar_active),
+                int(payload.topbar_order),
+                _encode_filter(payload.filter),
+                now,
+                now,
+                # Non-authoritative provenance; no access check reads this column.
+                principal.subject,
+            ),
         )
-    await db.commit()
-    created = await _fetch_filterset(db, filterset_id, username=created_by)
+        await db.execute(
+            """INSERT INTO authz_node_roles
+               (principal_type, principal_id, node_type, node_id, role, effect)
+               VALUES ('user', ?, 'ringbuffer_filterset', ?, 'owner', 'allow')""",
+            (principal.subject, filterset_id),
+        )
+        if not payload.is_active or payload.topbar_active or payload.topbar_order:
+            await _upsert_user_state(
+                db,
+                username=principal.subject,
+                filterset_id=filterset_id,
+                is_active=bool(payload.is_active),
+                topbar_active=bool(payload.topbar_active),
+                topbar_order=int(payload.topbar_order),
+            )
+        if audit_path == "/api/v1/ringbuffer/filtersets":
+            await write_application_success(
+                db,
+                request,
+                principal,
+                "POST",
+                "/api/v1/ringbuffer/filtersets",
+                resource_id=filterset_id,
+                commit=False,
+            )
+        else:
+            await write_application_success(
+                db,
+                request,
+                principal,
+                "POST",
+                "/api/v1/ringbuffer/filtersets/{filterset_id}/clone",
+                resource_id=filterset_id,
+                commit=False,
+            )
+    created = await _fetch_filterset(db, filterset_id, username=principal.subject)
     if not created:
         raise RuntimeError("failed to create filterset")
-    return created
+    return created.model_copy(update={"can_write": True})
 
 
 # ---------------------------------------------------------------------------
@@ -1050,7 +1266,8 @@ async def query_ringbuffer(
     adapter: str = Query("", description="Exact source_adapter match"),
     from_ts: str = Query("", alias="from", description="ISO-8601 timestamp (exclusive lower bound)"),
     limit: int = Query(100, ge=1, le=10000),
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
+    db: Database = Depends(get_db),
 ) -> list[RingBufferEntryOut]:
     if not is_ringbuffer_enabled():
         return []
@@ -1064,15 +1281,29 @@ async def query_ringbuffer(
     dp_ids_by_name: list[str] = []
     if q:
         q_lower = q.lower()
-        dp_ids_by_name = [str(dp.id) for dp in registry.all() if q_lower in dp.name.lower()]
+        dp_ids_by_name = [str(dp.id) for dp in registry_entries if q_lower in dp.name.lower()]
+
+    principal = _principal_from_dependency(_user)
+    scoped_dp_ids: list[str] | None = None
+    if not _is_admin_principal(principal):
+        allowed_ids = await _readable_datapoint_ids(db, principal, list(name_map.keys()))
+        allowed_set = set(allowed_ids)
+        scoped_dp_ids = allowed_ids
+        dp_ids_by_name = [dp_id for dp_id in dp_ids_by_name if dp_id in allowed_set]
+        if not scoped_dp_ids:
+            return []
 
     rb = get_ringbuffer()
-    entries = await rb.query(
+    entries = await rb.query_v2(
         q=q,
-        adapter=adapter,
-        from_ts=from_ts,
+        adapter_any_of=[adapter] if adapter else None,
+        datapoint_ids=scoped_dp_ids or None,
+        from_ts=from_ts or None,
         limit=limit,
-        dp_ids=dp_ids_by_name or None,
+        offset=0,
+        sort_field="id",
+        sort_order="desc",
+        dp_ids_by_name=dp_ids_by_name or None,
     )
     return [
         RingBufferEntryOut(
@@ -1096,23 +1327,31 @@ async def query_ringbuffer(
 @router.post("/query", response_model=list[RingBufferEntryOut])
 async def query_ringbuffer_v2(
     body: RingBufferQueryV2,
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
+    db: Database = Depends(get_db),
 ) -> list[RingBufferEntryOut]:
-    return await _query_v2_entries(body)
+    principal = _principal_from_dependency(_user)
+    return await _query_v2_entries(body, db=db, principal=principal)
 
 
 @router.post("/export/csv")
 async def export_ringbuffer_csv(
     body: RingBufferQueryV2,
     background_tasks: BackgroundTasks,
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
+    db: Database = Depends(get_db),
 ) -> StreamingResponse:
     # CSV export always returns the full filtered result set independent of UI pagination.
     started = time.monotonic()
     offset = 0
     exported_rows = 0
+    # Row-lazy Export-Cursor (#951, Codex :1654): EIN Cursor ueber alle Chunks, damit der
+    # segmentierte row-lazy Zweig den Roh-Scan chunk-uebergreifend fortsetzt statt pro Chunk
+    # ab Store-``offset`` 0 neu zu scannen (sonst O(n²) Full-Rescans). Fuer Pushdown-/Legacy-
+    # /Nicht-row-lazy-Pfade bleibt der Cursor ungenutzt und aendert nichts.
+    export_store_cursor = RowLazyExportCursor()
 
-    spool = tempfile.SpooledTemporaryFile(
+    spool = tempfile.SpooledTemporaryFile(  # noqa: SIM115 -- closed later via background_tasks, must outlive this function
         mode="w+",
         encoding="utf-8",
         newline="",
@@ -1120,6 +1359,7 @@ async def export_ringbuffer_csv(
     )
     writer = csv.DictWriter(spool, fieldnames=list(_CSV_EXPORT_HEADERS))
     writer.writeheader()
+    principal = _principal_from_dependency(_user)
 
     try:
         while True:
@@ -1140,6 +1380,11 @@ async def export_ringbuffer_csv(
                         body,
                         limit_override=chunk_size,
                         offset_override=offset,
+                        candidate_cap_override=offset + chunk_size,
+                        is_export=True,
+                        export_store_cursor=export_store_cursor,
+                        db=db,
+                        principal=principal,
                     ),
                     timeout=_CSV_EXPORT_QUERY_TIMEOUT_SECONDS,
                 )
@@ -1168,6 +1413,11 @@ async def export_ringbuffer_csv(
                     body,
                     limit_override=1,
                     offset_override=offset,
+                    candidate_cap_override=offset + 1,
+                    is_export=True,
+                    export_store_cursor=export_store_cursor,
+                    db=db,
+                    principal=principal,
                 ),
                 timeout=_CSV_EXPORT_QUERY_TIMEOUT_SECONDS,
             )
@@ -1224,26 +1474,17 @@ async def _read_json_body(request: Request) -> dict[str, Any]:
 
 @router.get("/filtersets", response_model=list[RingBufferFiltersetOut])
 async def list_ringbuffer_filtersets(
-    current_user: str = Depends(get_current_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> list[RingBufferFiltersetOut]:
-    rows = await db.fetchall("SELECT * FROM ringbuffer_filtersets")
-    states = {
-        row["filterset_id"]: (bool(row["is_active"]), bool(row["topbar_active"]), int(row["topbar_order"]))
-        for row in await db.fetchall(
-            "SELECT filterset_id, is_active, topbar_active, topbar_order FROM ringbuffer_filterset_user_state WHERE username=?",
-            (current_user,),
-        )
-    }
-    out = [_row_to_filterset(row, user_state=states.get(row["id"])) for row in rows]
-    out.sort(key=lambda fs: (fs.topbar_order, fs.created_at, fs.id))
-    return out
+    return await _visible_filtersets(db, _principal_from_dependency(current_user))
 
 
 @router.post("/filtersets", response_model=RingBufferFiltersetOut, status_code=status.HTTP_201_CREATED)
+@audit_application_contract("POST", "/api/v1/ringbuffer/filtersets", principal_param="current_user")
 async def create_ringbuffer_filterset(
     request: Request,
-    current_user: str = Depends(get_admin_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> RingBufferFiltersetOut:
     raw = await _read_json_body(request)
@@ -1253,29 +1494,34 @@ async def create_ringbuffer_filterset(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "filterset.filter must declare at least one criterion (hierarchy_nodes, datapoints, devices, tags, adapters, q, or value_filter)",
         )
-    return await _insert_filterset(db, payload=payload, created_by=current_user)
+    return await _insert_filterset(
+        db,
+        payload=payload,
+        principal=_principal_from_dependency(current_user),
+        request=request,
+        audit_path="/api/v1/ringbuffer/filtersets",
+    )
 
 
 @router.get("/filtersets/{filterset_id}", response_model=RingBufferFiltersetOut)
 async def get_ringbuffer_filterset(
     filterset_id: str,
-    current_user: str = Depends(get_current_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> RingBufferFiltersetOut:
-    current = await _fetch_filterset(db, filterset_id, username=current_user)
-    if not current:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
-    return current
+    return await _require_filterset_access(db, filterset_id, _principal_from_dependency(current_user), AuthzAction.READ)
 
 
 @router.put("/filtersets/{filterset_id}", response_model=RingBufferFiltersetOut)
+@audit_application_contract("PUT", "/api/v1/ringbuffer/filtersets/{filterset_id}", principal_param="current_user", resource_param="filterset_id")
 async def update_ringbuffer_filterset(
     filterset_id: str,
     request: Request,
-    current_user: str = Depends(get_admin_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> RingBufferFiltersetOut:
-    current = await _require_filterset_ownership(db, filterset_id, current_user)
+    principal = _principal_from_dependency(current_user)
+    current = await _require_filterset_access(db, filterset_id, principal, AuthzAction.WRITE)
 
     raw = await _read_json_body(request)
     try:
@@ -1298,71 +1544,97 @@ async def update_ringbuffer_filterset(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "filterset.filter must declare at least one criterion (hierarchy_nodes, datapoints, devices, tags, adapters, q, or value_filter)",
         )
+    await _require_explicit_datapoint_scope(db, principal, new_filter)
 
     # is_active, topbar_active and topbar_order live in
     # ringbuffer_filterset_user_state per-user (#478); PUT only changes the
     # shared payload (name/description/filter/color/dsl_version) and never
     # touches the global is_active / topbar_* columns.
-    await db.execute(
-        """UPDATE ringbuffer_filtersets
-           SET name=?, description=?, dsl_version=?,
-               color=?, filter_json=?, updated_at=?
-           WHERE id=?""",
-        (
-            name,
-            description,
-            dsl_version,
-            color,
-            _encode_filter(new_filter),
-            now,
-            filterset_id,
-        ),
-    )
-    # Allow body.is_active/topbar_active/topbar_order to update the caller's
-    # own per-user state for backward compat with clients that still bundle
-    # these fields into a PUT.
-    if body.is_active is not None or body.topbar_active is not None or body.topbar_order is not None:
-        prior = await _fetch_user_state(db, current_user, filterset_id)
-        active = body.is_active if body.is_active is not None else (prior[0] if prior else True)
-        topbar_active = body.topbar_active if body.topbar_active is not None else (prior[1] if prior else False)
-        order = body.topbar_order if body.topbar_order is not None else (prior[2] if prior else 0)
-        await _upsert_user_state(
-            db,
-            username=current_user,
-            filterset_id=filterset_id,
-            is_active=bool(active),
-            topbar_active=bool(topbar_active),
-            topbar_order=int(order),
+    async with db.transaction():
+        await db.execute(
+            """UPDATE ringbuffer_filtersets
+               SET name=?, description=?, dsl_version=?,
+                   color=?, filter_json=?, updated_at=?
+               WHERE id=?""",
+            (
+                name,
+                description,
+                dsl_version,
+                color,
+                _encode_filter(new_filter),
+                now,
+                filterset_id,
+            ),
         )
-    await db.commit()
-    updated = await _fetch_filterset(db, filterset_id, username=current_user)
+        if body.is_active is not None or body.topbar_active is not None or body.topbar_order is not None:
+            prior = await _fetch_user_state(db, principal.subject, filterset_id)
+            active = body.is_active if body.is_active is not None else (prior[0] if prior else True)
+            topbar_active = body.topbar_active if body.topbar_active is not None else (prior[1] if prior else False)
+            order = body.topbar_order if body.topbar_order is not None else (prior[2] if prior else 0)
+            await _upsert_user_state(
+                db,
+                username=principal.subject,
+                filterset_id=filterset_id,
+                is_active=bool(active),
+                topbar_active=bool(topbar_active),
+                topbar_order=int(order),
+            )
+        await write_application_success(
+            db,
+            request,
+            principal,
+            "PUT",
+            "/api/v1/ringbuffer/filtersets/{filterset_id}",
+            resource_id=filterset_id,
+            commit=False,
+        )
+    updated = await _fetch_filterset(db, filterset_id, username=principal.subject)
     if not updated:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
-    return updated
+    return updated.model_copy(update={"can_write": True})
 
 
 @router.delete("/filtersets/{filterset_id}", status_code=status.HTTP_204_NO_CONTENT)
+@audit_application_contract("DELETE", "/api/v1/ringbuffer/filtersets/{filterset_id}", principal_param="current_user", resource_param="filterset_id")
 async def delete_ringbuffer_filterset(
     filterset_id: str,
-    current_user: str = Depends(get_admin_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> None:
-    await _require_filterset_ownership(db, filterset_id, current_user)
-    await db.execute_and_commit("DELETE FROM ringbuffer_filtersets WHERE id=?", (filterset_id,))
+    principal = _principal_from_dependency(current_user)
+    await _require_filterset_access(db, filterset_id, principal, AuthzAction.WRITE)
+    async with db.transaction():
+        await db.execute(
+            "DELETE FROM authz_node_roles WHERE node_type='ringbuffer_filterset' AND node_id=?",
+            (filterset_id,),
+        )
+        await db.execute("DELETE FROM ringbuffer_filtersets WHERE id=?", (filterset_id,))
+        await write_application_success(
+            db,
+            None,
+            principal,
+            "DELETE",
+            "/api/v1/ringbuffer/filtersets/{filterset_id}",
+            resource_id=filterset_id,
+            commit=False,
+        )
 
 
 @router.post("/filtersets/{filterset_id}/clone", response_model=RingBufferFiltersetOut, status_code=status.HTTP_201_CREATED)
+@audit_application_contract(
+    "POST", "/api/v1/ringbuffer/filtersets/{filterset_id}/clone", principal_param="current_user", resource_param="filterset_id"
+)
 async def clone_ringbuffer_filterset(
+    request: Request,
     filterset_id: str,
     body: RingBufferFiltersetCloneRequest,
-    current_user: str = Depends(get_admin_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> RingBufferFiltersetOut:
-    # Cloning stays open for everyone — that's how a non-admin gets a writable
-    # copy of an admin-curated or someone else's set (#478).
-    source = await _fetch_filterset(db, filterset_id)
-    if not source:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
+    principal = _principal_from_dependency(current_user)
+    if principal.type != "user":
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "User principal required to create filtersets")
+    source = await _require_filterset_access(db, filterset_id, principal, AuthzAction.READ)
 
     clone_name = body.name if body.name else f"{source.name} (Copy)"
     clone_payload = RingBufferFiltersetIn(
@@ -1377,7 +1649,13 @@ async def clone_ringbuffer_filterset(
         topbar_order=0,
         filter=source.filter,
     )
-    return await _insert_filterset(db, payload=clone_payload, created_by=current_user)
+    return await _insert_filterset(
+        db,
+        payload=clone_payload,
+        principal=principal,
+        request=request,
+        audit_path="/api/v1/ringbuffer/filtersets/{filterset_id}/clone",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1386,9 +1664,10 @@ async def clone_ringbuffer_filterset(
 
 
 @router.patch("/filtersets/order", response_model=list[RingBufferFiltersetOut])
+@audit_application_contract("PATCH", "/api/v1/ringbuffer/filtersets/order", principal_param="current_user")
 async def patch_ringbuffer_filtersets_order(
     body: RingBufferFiltersetOrderPatch,
-    current_user: str = Depends(get_current_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> list[RingBufferFiltersetOut]:
     """Persist a new topbar order for several sets in one batch — per-user.
@@ -1397,54 +1676,63 @@ async def patch_ringbuffer_filtersets_order(
     Unknown IDs are ignored silently — a racing delete must not break drag-and-
     drop reordering.
     """
-    known_ids = {row["id"] for row in await db.fetchall("SELECT id FROM ringbuffer_filtersets")}
-    for item in body.items:
-        if item.id not in known_ids:
-            continue
-        prior = await _fetch_user_state(db, current_user, item.id)
-        is_active = prior[0] if prior else True
-        topbar_active = prior[1] if prior else False
-        await _upsert_user_state(
+    principal = _principal_from_dependency(current_user)
+    visible = await _visible_filtersets(db, principal)
+    known_ids = {filterset.id for filterset in visible}
+    async with db.transaction():
+        for item in body.items:
+            if item.id not in known_ids:
+                continue
+            prior = await _fetch_user_state(db, principal.subject, item.id)
+            is_active = prior[0] if prior else True
+            topbar_active = prior[1] if prior else False
+            await _upsert_user_state(
+                db,
+                username=principal.subject,
+                filterset_id=item.id,
+                is_active=bool(is_active),
+                topbar_active=bool(topbar_active),
+                topbar_order=int(item.topbar_order),
+            )
+        await write_application_success(
             db,
-            username=current_user,
-            filterset_id=item.id,
-            is_active=bool(is_active),
-            topbar_active=bool(topbar_active),
-            topbar_order=int(item.topbar_order),
+            None,
+            principal,
+            "PATCH",
+            "/api/v1/ringbuffer/filtersets/order",
+            details={
+                "item_count": len(body.items),
+                "payload_sha256": audit_payload_sha256([item.model_dump() for item in body.items]),
+            },
+            commit=False,
         )
-    await db.commit()
 
-    rows = await db.fetchall("SELECT * FROM ringbuffer_filtersets")
-    states = {
-        row["filterset_id"]: (bool(row["is_active"]), bool(row["topbar_active"]), int(row["topbar_order"]))
-        for row in await db.fetchall(
-            "SELECT filterset_id, is_active, topbar_active, topbar_order FROM ringbuffer_filterset_user_state WHERE username=?",
-            (current_user,),
-        )
-    }
-    out = [_row_to_filterset(row, user_state=states.get(row["id"])) for row in rows]
-    out.sort(key=lambda fs: (fs.topbar_order, fs.created_at, fs.id))
-    return out
+    return await _visible_filtersets(db, principal)
 
 
 @router.patch("/filtersets/{filterset_id}/topbar", response_model=RingBufferFiltersetOut)
+@audit_application_contract(
+    "PATCH",
+    "/api/v1/ringbuffer/filtersets/{filterset_id}/topbar",
+    principal_param="current_user",
+    resource_param="filterset_id",
+)
 async def patch_ringbuffer_filterset_topbar(
     filterset_id: str,
     body: RingBufferFiltersetTopbarPatch,
-    current_user: str = Depends(get_current_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> RingBufferFiltersetOut:
     """Update the per-user view (``is_active``, ``topbar_active``, ``topbar_order``).
 
-    All three fields live in ``ringbuffer_filterset_user_state`` (#478) so every
-    authenticated user maintains their own active/pinned state. No ownership
-    check is required — this is the user's *own* view of the shared filterset.
+    All three fields live in ``ringbuffer_filterset_user_state`` (#478), so
+    every principal with central READ access maintains its own active/pinned
+    state. WRITE is not required because this never mutates the shared set.
     """
-    fs_row = await db.fetchone("SELECT id FROM ringbuffer_filtersets WHERE id=?", (filterset_id,))
-    if not fs_row:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
+    principal = _principal_from_dependency(current_user)
+    await _require_filterset_access(db, filterset_id, principal, AuthzAction.READ)
 
-    prior = await _fetch_user_state(db, current_user, filterset_id)
+    prior = await _fetch_user_state(db, principal.subject, filterset_id)
     cur_is_active = prior[0] if prior else True
     cur_topbar_active = prior[1] if prior else False
     cur_topbar_order = prior[2] if prior else 0
@@ -1462,25 +1750,35 @@ async def patch_ringbuffer_filterset_topbar(
         max_row = await db.fetchone(
             "SELECT COALESCE(MAX(topbar_order), -1) AS max_order FROM ringbuffer_filterset_user_state "
             "WHERE username=? AND topbar_active=1 AND filterset_id != ?",
-            (current_user, filterset_id),
+            (principal.subject, filterset_id),
         )
         max_order = int(max_row["max_order"]) if max_row else -1
         topbar_order = max_order + 1
 
-    await _upsert_user_state(
-        db,
-        username=current_user,
-        filterset_id=filterset_id,
-        is_active=bool(is_active),
-        topbar_active=bool(topbar_active),
-        topbar_order=int(topbar_order),
-    )
-    await db.commit()
+    async with db.transaction():
+        await _upsert_user_state(
+            db,
+            username=principal.subject,
+            filterset_id=filterset_id,
+            is_active=bool(is_active),
+            topbar_active=bool(topbar_active),
+            topbar_order=int(topbar_order),
+        )
+        await write_application_success(
+            db,
+            None,
+            principal,
+            "PATCH",
+            "/api/v1/ringbuffer/filtersets/{filterset_id}/topbar",
+            resource_id=filterset_id,
+            commit=False,
+        )
 
-    updated = await _fetch_filterset(db, filterset_id, username=current_user)
+    updated = await _fetch_filterset(db, filterset_id, username=principal.subject)
     if not updated:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
-    return updated
+    grants = await _filterset_grants(db, principal)
+    return updated.model_copy(update={"can_write": _filterset_decision(principal, filterset_id, AuthzAction.WRITE, grants).allowed})
 
 
 # ---------------------------------------------------------------------------
@@ -1491,9 +1789,10 @@ async def patch_ringbuffer_filterset_topbar(
 @router.post("/filtersets/query", response_model=list[RingBufferMultiEntryOut])
 async def query_ringbuffer_filtersets_multi(
     body: RingBufferMultiQueryRequest,
-    current_user: str = Depends(get_current_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> list[RingBufferMultiEntryOut]:
+    principal = _principal_from_dependency(current_user)
     if len(body.set_ids) > _FILTERSET_MULTI_QUERY_SET_CAP:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1514,15 +1813,16 @@ async def query_ringbuffer_filtersets_multi(
                 ),
             }
         )
-        entries = await _query_v2_entries(query)
+        entries = await _query_v2_entries(query, db=db, principal=principal)
         return [RingBufferMultiEntryOut(**entry.model_dump(), matched_set_ids=[]) for entry in entries]
 
     # Resolve sets — skip missing/inactive (per-user) ones rather than fail.
     # ``is_active`` is now part of the caller's per-user state, so two users may
     # see different OR-unions across the same set_ids.
+    visible_by_id = {filterset.id: filterset for filterset in await _visible_filtersets(db, principal)}
     resolved: list[RingBufferFiltersetOut] = []
     for set_id in body.set_ids:
-        current = await _fetch_filterset(db, set_id, username=current_user)
+        current = visible_by_id.get(set_id)
         if current is None:
             continue
         if not current.is_active:
@@ -1551,7 +1851,7 @@ async def query_ringbuffer_filtersets_multi(
         if query is None:
             continue
         try:
-            rows = await _query_v2_entries(query)
+            rows = await _query_v2_entries(query, db=db, principal=principal)
         except HTTPException:
             # An empty-but-present filter criterion (e.g. tags=[]) reduces to a
             # no-op match — skip it instead of failing the whole multi-query.
@@ -1579,7 +1879,7 @@ async def query_ringbuffer_filtersets_multi(
 @router.post("/filtersets/{filterset_id}/query", response_model=list[RingBufferEntryOut])
 async def query_ringbuffer_filterset(
     filterset_id: str,
-    current_user: str = Depends(get_current_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> list[RingBufferEntryOut]:
     """Single-set query (back-compat for callers that target one set at a time).
@@ -1589,16 +1889,15 @@ async def query_ringbuffer_filterset(
     ``POST /filtersets/query`` with a single-element ``set_ids`` list. The
     set's ``is_active`` flag is taken from the caller's per-user state (#478).
     """
-    current = await _fetch_filterset(db, filterset_id, username=current_user)
-    if not current:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "ringbuffer filterset not found")
+    principal = _principal_from_dependency(current_user)
+    current = await _require_filterset_access(db, filterset_id, principal, AuthzAction.READ)
     if not current.is_active:
         return []
 
     query = await _build_query_from_filter_criteria(current.filter, time_filter=None, db=db)
     if query is None:
         return []
-    return await _query_v2_entries(query)
+    return await _query_v2_entries(query, db=db, principal=principal)
 
 
 # ---------------------------------------------------------------------------
@@ -1609,11 +1908,44 @@ async def query_ringbuffer_filterset(
 _EXPORT_SETTINGS_KEY = "ringbuffer.export_settings"
 
 
+async def _guarded_export_query(
+    query: RingBufferQueryV2,
+    *,
+    candidate_cap_override: int,
+    db: Database,
+    principal: Principal,
+) -> list[RingBufferEntryOut]:
+    """Fuehrt einen Filterset-Export-Scan mit dem Per-Query-Timeout des CSV-Exports aus (#951 [P2]).
+
+    Ohne Guard koennte ein pathologischer q-/metadata-/contains-/regex-/value-Filter ueber eine
+    grosse Legacy-Datei oder viele v2-Segmente bis zur Erschoepfung scannen und den API-Worker
+    blockieren, BEVOR eine Response gesendet wird. Bei Timeout dasselbe 504 wie
+    ``/ringbuffer/export/csv``.
+    """
+    try:
+        return await asyncio.wait_for(
+            _query_v2_entries(
+                query,
+                candidate_cap_override=candidate_cap_override,
+                is_export=True,
+                db=db,
+                principal=principal,
+            ),
+            timeout=_CSV_EXPORT_QUERY_TIMEOUT_SECONDS,
+        )
+    except TimeoutError as exc:
+        raise HTTPException(
+            status.HTTP_504_GATEWAY_TIMEOUT,
+            "ringbuffer CSV export timed out",
+        ) from exc
+
+
 async def _collect_multi_entries(
     body: RingBufferMultiExportRequest,
     db: Database,
     *,
     username: str | None = None,
+    principal: Principal | None = None,
 ) -> tuple[list[RingBufferEntryOut], dict[int, list[str]]]:
     """Collect the OR-union of entries across the requested filtersets.
 
@@ -1638,12 +1970,23 @@ async def _collect_multi_entries(
                 ),
             }
         )
-        entries = await _query_v2_entries(query)
+        if principal is None:
+            return [], {}
+        entries = await _guarded_export_query(
+            query,
+            candidate_cap_override=_CSV_EXPORT_MAX_ROWS,
+            db=db,
+            principal=principal,
+        )
         return entries, {e.id: [] for e in entries}
 
+    if principal is None:
+        return [], {}
+    started = time.monotonic()
+    visible_by_id = {filterset.id: filterset for filterset in await _visible_filtersets(db, principal)}
     resolved: list[RingBufferFiltersetOut] = []
     for set_id in body.set_ids:
-        current = await _fetch_filterset(db, set_id, username=username)
+        current = visible_by_id.get(set_id)
         if current is None or not current.is_active:
             continue
         # Empty FilterCriteria → the set has no real filter configured yet.
@@ -1656,6 +1999,11 @@ async def _collect_multi_entries(
     matched: dict[int, list[str]] = {}
     entries_by_id: dict[int, RingBufferEntryOut] = {}
     for fs in resolved:
+        if time.monotonic() - started > _CSV_EXPORT_TOTAL_TIMEOUT_SECONDS:
+            raise HTTPException(
+                status.HTTP_504_GATEWAY_TIMEOUT,
+                "ringbuffer CSV export timed out",
+            )
         query = await _build_query_from_filter_criteria(
             fs.filter,
             time_filter=body.time,
@@ -1666,8 +2014,15 @@ async def _collect_multi_entries(
         if query is None:
             continue
         try:
-            rows = await _query_v2_entries(query)
-        except HTTPException:
+            rows = await _guarded_export_query(
+                query,
+                candidate_cap_override=_CSV_EXPORT_MAX_ROWS,
+                db=db,
+                principal=principal,
+            )
+        except HTTPException as exc:
+            if exc.status_code == status.HTTP_504_GATEWAY_TIMEOUT:
+                raise
             continue
         for entry in rows:
             matched.setdefault(entry.id, []).append(fs.id)
@@ -1681,7 +2036,7 @@ async def _collect_multi_entries(
 @router.post("/filtersets/export/count", response_model=RingBufferMultiExportCountResponse)
 async def count_ringbuffer_filtersets_export(
     body: RingBufferMultiExportCountRequest,
-    current_user: str = Depends(get_current_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> RingBufferMultiExportCountResponse:
     """Preflight: how many rows would the corresponding CSV export produce?
@@ -1692,8 +2047,9 @@ async def count_ringbuffer_filtersets_export(
     Per-user ``is_active`` applies — a set the caller has deactivated for
     themselves is excluded from the count too (#478).
     """
+    principal = _principal_from_dependency(current_user)
     export_body = RingBufferMultiExportRequest(set_ids=body.set_ids, time=body.time)
-    entries, _ = await _collect_multi_entries(export_body, db, username=current_user)
+    entries, _ = await _collect_multi_entries(export_body, db, username=principal.subject, principal=principal)
     return RingBufferMultiExportCountResponse(row_count=len(entries))
 
 
@@ -1701,7 +2057,7 @@ async def count_ringbuffer_filtersets_export(
 async def export_ringbuffer_filtersets_csv(
     body: RingBufferMultiExportRequest,
     background_tasks: BackgroundTasks,
-    current_user: str = Depends(get_current_user),
+    current_user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(get_db),
 ) -> StreamingResponse:
     """Multi-set CSV/TSV export — OR-union of all requested active sets.
@@ -1711,7 +2067,8 @@ async def export_ringbuffer_filtersets_csv(
     persisted user defaults live behind ``GET/PUT /ringbuffer/export/settings``.
     Per-user ``is_active`` filters the OR-union to what the caller has enabled.
     """
-    entries, matched = await _collect_multi_entries(body, db, username=current_user)
+    principal = _principal_from_dependency(current_user)
+    entries, matched = await _collect_multi_entries(body, db, username=principal.subject, principal=principal)
     if len(entries) > _CSV_EXPORT_MAX_ROWS:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1730,7 +2087,7 @@ async def export_ringbuffer_filtersets_csv(
     if body.include_matched_set_ids:
         fieldnames.append("matched_set_ids")
 
-    spool = tempfile.SpooledTemporaryFile(
+    spool = tempfile.SpooledTemporaryFile(  # noqa: SIM115 -- closed later via background_tasks, must outlive this function
         mode="w+",
         encoding="utf-8",
         newline="",
@@ -1796,23 +2153,360 @@ async def get_ringbuffer_export_settings(
 
 
 @router.put("/export/settings", response_model=RingBufferExportSettings)
+@audit_application_contract("PUT", "/api/v1/ringbuffer/export/settings", principal_param="_user")
 async def put_ringbuffer_export_settings(
     body: RingBufferExportSettings,
     _user: str = Depends(get_current_user),
     db: Database = Depends(get_db),
 ) -> RingBufferExportSettings:
     payload = json.dumps(body.model_dump())
-    await db.execute(
-        "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (_EXPORT_SETTINGS_KEY, payload),
-    )
-    await db.commit()
+    async with db.transaction():
+        await db.execute(
+            "INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (_EXPORT_SETTINGS_KEY, payload),
+        )
+        await write_application_success(db, None, _user, "PUT", "/api/v1/ringbuffer/export/settings", commit=False)
     return body
 
 
 # ---------------------------------------------------------------------------
 # Stats / config
 # ---------------------------------------------------------------------------
+
+
+class LegacyMigrationDecisionIn(BaseModel):
+    """Entscheidung des Migrations-Assistenten (#964). ``migrate`` startet den Job (#965)."""
+
+    decision: Literal["keep", "discard", "skip"]
+
+
+class LegacyMigrationStatus(BaseModel):
+    """Zustand + Ist-Analyse für den Migrations-Assistenten (#964)."""
+
+    decision: str | None
+    retention_protected: bool
+    legacy: dict[str, Any] | None
+    disk_free_bytes: int | None
+    budget_bytes: int | None
+    estimated_copy_bytes: int | None
+    over_budget: bool
+    estimated_seconds_until_budget: float | None
+    job: dict[str, Any] | None
+
+
+async def _legacy_migration_status(db: Database) -> LegacyMigrationStatus:
+    """Baut den Assistenten-Status aus Decision-State, Legacy-Overview und Prognose (#964).
+
+    Eskalations-Signal: ``estimated_seconds_until_budget`` prognostiziert aus der
+    Wachstumsrate (``prognosis.bytes_per_hour``), wann das Size-Budget erschöpft ist
+    und die FIFO-Retention das Legacy-Segment zurückgewinnen MÜSSTE (0 = bereits
+    über Budget). ``None``, wenn keine Rate/kein Budget vorliegt.
+    """
+    rb = get_optional_ringbuffer()
+    # Die Post-Commit-Finalisierung (state-basiertes Nachziehen von ``migrated``) läuft NICHT mehr
+    # hier, sondern in den Aufrufern unter ``_LEGACY_DECISION_LOCK`` (#968, Q10j0): dieser Helper
+    # wird auch aus dem Decision-/Start-Pfad aufgerufen, die den Lock bereits halten – ein zweiter
+    # (nicht-reentranter) Lock-Erwerb hier würde deadlocken. Der GET-Status-Endpoint und der
+    # Config-Runtime-Init serialisieren den Finalizer daher explizit vor ihrem Aufruf dieses Helpers.
+    decision = await load_legacy_migration_decision(db)
+    legacy: dict[str, Any] | None = None
+    over_budget = False
+    budget: int | None = None
+    eta: float | None = None
+    estimated_copy: int | None = None
+    reclaimable_migrating_manifest_bytes = 0
+    reclaimable_migrating_disk_bytes = 0
+    protected = decision in LEGACY_DECISIONS_PROTECTED
+    job: dict[str, Any] | None = None
+    if rb is not None and is_ringbuffer_enabled():
+        job = rb.legacy_migration_progress()
+        legacy = await rb.legacy_migration_overview()
+        stats = await rb.stats()
+        budget = stats.get("max_file_size_bytes")
+        if legacy is not None:
+            reclaimable_migrating_manifest_bytes, reclaimable_migrating_disk_bytes = await rb.reclaimable_migrating_bytes()
+        # ``retention_over_budget`` liegt unter ``store.backend_extra`` und die Gesamt-
+        # Nutzung als Top-Level ``file_size_bytes`` (#968, Codex :1999) – nicht als
+        # Top-Level ``retention_over_budget``/``size_bytes``. Ohne die korrekten Pfade
+        # war ``over_budget`` immer False und ``size`` None, sodass genau der attachte-
+        # Legacy-Upgrade-Fall (fuer den die Eskalation gebaut wurde) nie eskalierte.
+        over_budget = bool(((stats.get("store") or {}).get("backend_extra") or {}).get("retention_over_budget"))
+        if legacy is not None and not over_budget and budget:
+            rate = (stats.get("prognosis") or {}).get("bytes_per_hour")
+            size = stats.get("file_size_bytes")
+            if rate and size is not None and rate > 0:
+                eta = max(0.0, (budget - size) / rate * 3600.0)
+        elif legacy is not None and over_budget:
+            eta = 0.0
+        # Copy-Obergrenze fuer den Disk-Precheck (#968, Codex :278/:2020): der Job kopiert
+        # nur das v2-Aequivalent der Legacy-Daten, gekappt auf das TATSAECHLICHE
+        # Ziel-Volumen des Migrators – ``budget - headroom - live_bytes`` – NICHT auf das
+        # ganze Budget. Verbrauchen vorhandene Live-Segmente bereits den Grossteil des
+        # Budgets, kopiert der Job entsprechend weniger; ein UI-Block anhand des vollen
+        # Budgets wuerde eine valide Migration grundlos verhindern. Konservativ mit
+        # ``2x Legacy-Groesse`` gedeckelt (v2-Zeilen sind groesser als ihre v1-Quelle).
+        legacy_size = (legacy or {}).get("size_bytes")
+        if isinstance(legacy_size, int) and legacy_size > 0:
+            v2_estimate = 2 * legacy_size
+            if budget:
+                headroom = ((stats.get("prognosis") or {}).get("effective_segment_max_bytes")) or 0
+                total_size = stats.get("file_size_bytes") or 0
+                # ALLE Legacy-Quellen aus den Live-Bytes herausrechnen (#968, Codex :2032), nicht
+                # nur die angezeigte: der Migrator schließt in ``_target_copy_volume`` jedes
+                # Legacy-Segment aus. Bei mehreren attachten Quellen zählten die übrigen sonst als
+                # Live-Bestand, senkten ``target_volume``/``estimated_copy`` und ließen eine
+                # Migration zu, die der Backend-Precheck dann ablehnt.
+                total_legacy_bytes = await rb.attached_legacy_total_bytes()
+                # Der nächste ``/migration/start`` verwirft Copy-Phase-Reste VOR seiner
+                # Planung. Dieselben sicher reclaimable ``migrating``-Bytes deshalb hier
+                # ebenfalls nicht als Live-Bestand zählen (#1009). Recoverbare Kopien aus
+                # einem unterbrochenen Commit-Fenster sind ausdrücklich ausgeschlossen.
+                live_bytes = max(0, total_size - total_legacy_bytes - reclaimable_migrating_manifest_bytes)
+                target_volume = max(0, budget - headroom - live_bytes)
+                estimated_copy = min(v2_estimate, target_volume)
+            else:
+                estimated_copy = v2_estimate
+    disk_free: int | None = None
+    try:
+        disk_free = shutil.disk_usage(str(Path(_ringbuffer_disk_path()).parent)).free
+        # Effektiv verfügbarer Platz nach demselben Cleanup, das ``/migration/start``
+        # vor dem Disk-Precheck ausführt (#1009).
+        disk_free += reclaimable_migrating_disk_bytes
+    except OSError:
+        disk_free = None
+    return LegacyMigrationStatus(
+        decision=decision,
+        retention_protected=protected,
+        legacy=legacy,
+        disk_free_bytes=disk_free,
+        budget_bytes=budget,
+        estimated_copy_bytes=estimated_copy,
+        over_budget=over_budget,
+        estimated_seconds_until_budget=eta,
+        job=job,
+    )
+
+
+async def _finalize_decision_under_lock(db: Database, rb) -> None:
+    """Gleicht Decision-State und Legacy-Quelle unter dem Decision-Lock ab.
+
+    Zwei entgegengesetzte Crash-/Kopierzustände werden serialisiert mit Admin-
+    Entscheidungen repariert:
+
+    * terminal + Legacy attached → Quelle wieder ``pending`` und geschützt,
+    * non-terminal + Migration committed + keine Legacy → ``migrated``.
+
+    Der zweite, rein nachziehende Finalizer bleibt best-effort. Beim ersten Pfad
+    darf der Status dagegen keinen scheinbar reparierten Zustand liefern, wenn
+    Schutz oder Persistenz fehlschlagen; der Fehler wird für einen späteren Poll
+    weitergereicht.
+    """
+    async with _LEGACY_DECISION_LOCK:
+        decision = await load_legacy_migration_decision(db)
+        if decision in LEGACY_DECISIONS_TERMINAL and await rb.has_attached_legacy():
+            # Schutz zuerst aktivieren: zwischen Decision-Write und Live-Reconfigure
+            # darf die FIFO-Retention die gerade wiederentdeckte Quelle nicht reclaimen.
+            await rb.set_legacy_retention_protected(True)
+            # Kein Rollback bei Fehlschlag: Protection bleibt in jedem Fehlerfall aktiv,
+            # die Legacy-Quelle ist noch angehängt; ein Rollback auf False wäre
+            # datenunsicher, weil die FIFO-Retention die Quelle vor dem nächsten
+            # Poll-Retry zurückgewinnen könnte. Der Fehler propagiert unverändert;
+            # der nächste Poll wiederholt.
+            await persist_legacy_migration_decision(db, LEGACY_DECISION_PENDING)
+            return
+        try:
+            await finalize_committed_migration_decision(db, rb)
+        except Exception:
+            logger.exception("RingBuffer: Finalisierung der Migrations-Entscheidung fehlgeschlagen (Retry beim nächsten Poll)")
+
+
+@router.get("/migration", response_model=LegacyMigrationStatus)
+async def legacy_migration_status(
+    _user: str = Depends(get_admin_user),
+    db: Database = Depends(get_db),
+) -> LegacyMigrationStatus:
+    """Zustand des Legacy-Migrations-Assistenten inkl. Ist-Analyse (#964)."""
+    rb = get_optional_ringbuffer()
+    if rb is not None and is_ringbuffer_enabled():
+        await _finalize_decision_under_lock(db, rb)
+    return await _legacy_migration_status(db)
+
+
+@router.post("/migration/decision", response_model=LegacyMigrationStatus)
+@audit_application_contract("POST", "/api/v1/ringbuffer/migration/decision", principal_param="_user")
+async def legacy_migration_decision(
+    body: LegacyMigrationDecisionIn,
+    request: Request = None,  # type: ignore[assignment]
+    _user: str = Depends(get_admin_user),
+    db: Database = Depends(get_db),
+) -> LegacyMigrationStatus:
+    """Setzt die Assistenten-Entscheidung (#964).
+
+    * ``skip``: später entscheiden – Legacy bleibt retention-geschützt (revidierbar).
+    * ``keep``: bewusst read-only behalten – der Schutz fällt, die FIFO-Retention
+      darf die Legacy-Quelle als global ältestes Segment zurückgewinnen (revidierbar,
+      solange die Quelle existiert).
+    * ``discard``: Alt-Historie sofort und endgültig verwerfen (terminal).
+
+    Konkurrierende Entscheidungen werden serialisiert (#968, Q0qIM): der Terminal-Check,
+    die Aktion und die Persistenz laufen atomar unter ``_LEGACY_DECISION_LOCK``, sodass ein
+    ``keep`` nach einem parallel durchgelaufenen ``discard`` den frisch persistierten,
+    terminalen ``discarded``-Zustand sieht und mit 409 abgelehnt wird, statt ihn zu überschreiben.
+    """
+    async with _LEGACY_DECISION_LOCK:
+        result = await _legacy_migration_decision_locked(body, db)
+    await write_application_success(
+        db,
+        request,
+        _user,
+        "POST",
+        "/api/v1/ringbuffer/migration/decision",
+        resource_id="global",
+        details={"decision": body.decision},
+        commit=True,
+    )
+    return result
+
+
+async def _legacy_migration_decision_locked(body: LegacyMigrationDecisionIn, db: Database) -> LegacyMigrationStatus:
+    rb = get_optional_ringbuffer()
+    if rb is not None:
+        await repair_pending_keep_migration_decision(db, rb)
+    current = await load_legacy_migration_decision(db)
+    if current in LEGACY_DECISIONS_TERMINAL:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"legacy migration already finalized ({current})")
+    # Keine Entscheidung, solange ein Migrationsjob laeuft (#968, Codex :2047/:2078): ein
+    # ``discard`` waehrend ``starting``/``copying``/``committing`` koennte die Legacy-
+    # Quelle entfernen, waehrend die Copy-Task noch laeuft und danach ``migrated``
+    # persistiert. ``legacy_migration_in_progress`` deckt auch das START-FENSTER ab
+    # (synchrone Reservierung vor den awaited Prechecks, Phase noch nicht ``starting``).
+    if rb is not None and rb.legacy_migration_in_progress():
+        raise HTTPException(status.HTTP_409_CONFLICT, "a legacy migration job is currently running")
+    # Auch einen im Commit-Fenster unterbrochenen Commit abwarten (#968, Codex :2110): eine
+    # schema-legacy Row mit fehlender Datei bedeutet, dass die (noch unsichtbaren) migrating-
+    # Kopien die einzige Quelle sind. Ein ``keep``/``discard`` würde ihren Retention-Schutz jetzt
+    # aufheben, sodass die nächste Retention die Row löscht und der Reconciler die Kopien als
+    # orphan verwirft. Erst der nächste ``/migration/start`` oder Startup vollendet den Commit.
+    if rb is not None and await rb.has_missing_file_legacy():
+        raise HTTPException(status.HTTP_409_CONFLICT, "an interrupted legacy migration commit awaits recovery; retry after it is reconciled")
+    if body.decision == "skip":
+        await persist_legacy_migration_decision(db, LEGACY_DECISION_SKIPPED)
+        if rb is not None:
+            await rb.set_legacy_retention_protected(True)
+    elif body.decision == "keep":
+        # War die gespeicherte Entscheidung NON-TERMINAL (skipped/pending) und eine Migration hat bereits
+        # die letzte Quelle entfernt (committed), aber die ``migrated``-Terminalisierung schlug fehl
+        # (#968, Q10j-), dann ist ``committed`` + keine Legacy ein eindeutiger Beleg: die Migration ist
+        # durch, nur das Bookkeeping non-terminal → direkt ``migrated`` terminalisieren (NICHT über
+        # ``finalize_committed_migration_decision``, der einen keep bewusst respektiert, Q0qIJ).
+        # War die gespeicherte Entscheidung dagegen BEREITS ``keep`` (#1010, RCOh6), ist derselbe Zustand
+        # (``keep`` + committed + keine Legacy) MEHRDEUTIG: er entsteht sowohl aus einem gescheiterten
+        # ``on_success`` ALS AUCH aus einer bewusst ge-keepten Quelle, die die Retention danach
+        # zurückgewonnen hat. Wie der Finalizer nicht raten – einen bereits expliziten ``keep`` behalten.
+        if rb is not None and current != LEGACY_DECISION_KEEP and await rb.has_committed_migration() and not await rb.has_attached_legacy():
+            await persist_legacy_migration_decision(db, LEGACY_DECISION_MIGRATED)
+        else:
+            await persist_legacy_migration_decision(db, LEGACY_DECISION_KEEP)
+            if rb is not None:
+                await rb.set_legacy_retention_protected(False)
+    else:  # discard
+        # ``discard`` ist terminal UND destruktiv (entfernt die Legacy-Dateien). Läuft
+        # der Monitor nicht (Singleton None/deaktiviert), würde ``discard_legacy()``
+        # übersprungen, aber ``discarded`` dennoch persistiert (#968, Codex :2084): die
+        # Legacy-DB bliebe auf der Platte, würde beim nächsten Start wieder attached –
+        # während der Assistent wegen der terminalen Entscheidung versteckt ist. Deshalb
+        # 409, bis der Monitor läuft und die Quelle wirklich gelöscht werden kann.
+        if rb is None or not is_ringbuffer_enabled():
+            raise HTTPException(status.HTTP_409_CONFLICT, "ringbuffer is not running; cannot discard legacy data")
+        # ZUERST verwerfen, DANN den Schutz aufheben (#968, Codex :2099): würde der Schutz
+        # vorher fallen und ``discard_legacy()`` danach fehlschlagen (Legacy-DB nicht
+        # unlinkbar), bliebe die Entscheidung ``pending``/``skipped``, aber die ungeschützte
+        # Legacy-Quelle könnte von der nächsten Retention zurückgewonnen werden, obwohl der
+        # Admin nie eine terminale ``discarded``-Entscheidung erreicht hat. discard_legacy()
+        # läuft unter dem Schutz; erst nach erfolgreichem Unlink fällt er.
+        await rb.discard_legacy()
+        # ``discarded`` nur terminal setzen + Schutz aufheben, wenn KEINE Legacy-Quelle mehr bleibt
+        # (#968, Codex :1095): ``discard_legacy`` verwirft nur die angezeigte (älteste) Quelle;
+        # bleiben weitere, muss der Assistent für sie sichtbar/entscheidbar bleiben.
+        if not await rb.has_attached_legacy():
+            await rb.set_legacy_retention_protected(False)
+            await persist_legacy_migration_decision(db, LEGACY_DECISION_DISCARDED)
+        else:
+            # Verbleibende Quelle(n) AKTIV schützen UND eine PROTECTED non-terminale Entscheidung
+            # persistieren (#968, Codex :2141/:2145): nur das in-memory-Flag zu setzen genügt nicht –
+            # der Status-Endpoint und der nächste Startup lesen die Persistenz
+            # (``legacy_retention_protected = decision in LEGACY_DECISIONS_PROTECTED``); eine
+            # ``keep``-Entscheidung ließe die verbleibende Quelle dann ungeschützt. ``skipped`` ist
+            # protected + non-terminal, sodass der Assistent für die verbleibende Quelle sichtbar und
+            # geschützt bleibt.
+            await rb.set_legacy_retention_protected(True)
+            await persist_legacy_migration_decision(db, LEGACY_DECISION_SKIPPED)
+    return await _legacy_migration_status(db)
+
+
+@router.post("/migration/start", response_model=LegacyMigrationStatus)
+@audit_application_contract("POST", "/api/v1/ringbuffer/migration/start", principal_param="_user")
+async def legacy_migration_start(
+    request: Request = None,  # type: ignore[assignment]
+    _user: str = Depends(get_admin_user),
+    db: Database = Depends(get_db),
+) -> LegacyMigrationStatus:
+    """Startet den budget-gebundenen Offline-Migrationsjob (#965).
+
+    Läuft als Hintergrund-Task; Fortschritt über ``GET /migration`` (``job``-Feld).
+    Nach erfolgreichem Commit wird die Entscheidung ``migrated`` (terminal)
+    persistiert und der Retention-Schutz aufgehoben.
+
+    Terminal-Check und Job-Reservierung laufen unter ``_LEGACY_DECISION_LOCK`` (#968, Q10j4):
+    sonst könnte ein parallel laufender ``/migration/decision``-``discard``, der seinen
+    Terminal-Check bereits passiert hat, dieselbe Quelle entfernen, während dieser Endpoint
+    die alte non-terminale Entscheidung liest und einen Job reserviert, dessen ``on_success``
+    dann ``migrated`` über das ``discarded``-Ergebnis schriebe.
+    """
+    async with _LEGACY_DECISION_LOCK:
+        result = await _legacy_migration_start_locked(db)
+    await write_application_success(
+        db,
+        request,
+        _user,
+        "POST",
+        "/api/v1/ringbuffer/migration/start",
+        resource_id="global",
+        commit=True,
+    )
+    return result
+
+
+async def _legacy_migration_start_locked(db: Database) -> LegacyMigrationStatus:
+    from obs.ringbuffer.store.offline_migration import OfflineMigrationError
+
+    rb = get_optional_ringbuffer()
+    if rb is None or not is_ringbuffer_enabled():
+        raise HTTPException(status.HTTP_409_CONFLICT, "ringbuffer is not running")
+    await repair_pending_keep_migration_decision(db, rb)
+    current = await load_legacy_migration_decision(db)
+    if current in LEGACY_DECISIONS_TERMINAL:
+        raise HTTPException(status.HTTP_409_CONFLICT, f"legacy migration already finalized ({current})")
+
+    async def _persist_migrated() -> None:
+        async with _LEGACY_DECISION_LOCK:
+            # Nur terminal ``migrated``, wenn KEINE Legacy-Quelle mehr attached ist
+            # (#968, Codex :441/:2142). Bei einem partial keep-Commit zieht der
+            # atomare Store-Beleg stattdessen ``skipped`` + Schutz nach und wird erst
+            # nach erfolgreicher App-DB-Persistenz quittiert (#1013).
+            if await rb.has_attached_legacy():
+                await repair_pending_keep_migration_decision(db, rb)
+                return
+            await persist_legacy_migration_decision(db, LEGACY_DECISION_MIGRATED)
+
+    try:
+        await rb.start_legacy_migration(
+            on_success=_persist_migrated,
+            started_from_keep=current == LEGACY_DECISION_KEEP,
+        )
+    except OfflineMigrationError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    return await _legacy_migration_status(db)
 
 
 @router.get("/stats", response_model=RingBufferStats)
@@ -1824,12 +2518,31 @@ async def ringbuffer_stats(
     if not is_ringbuffer_enabled() or rb is None:
         return await _disabled_stats(db)
     stats = await rb.stats()
-    return RingBufferStats(enabled=True, **stats)
+    # Persistierte Segment-Config mitgeben, damit der Config-Dialog die
+    # gespeicherten Werte anzeigt (``rb.stats()`` liefert nur den Store-Snapshot).
+    persisted = await load_persisted_ringbuffer_config(db, storage_path=_ringbuffer_disk_path())
+    return RingBufferStats(
+        enabled=True,
+        segment_max_bytes=persisted.get("segment_max_bytes"),
+        segment_max_rows=persisted.get("segment_max_rows"),
+        segment_max_age=persisted.get("segment_max_age"),
+        **_segment_contract_stats(
+            max_entries=stats["max_entries"],
+            max_file_size_bytes=stats["max_file_size_bytes"],
+            max_age=stats["max_age"],
+            segment_max_bytes=persisted.get("segment_max_bytes"),
+            segment_max_rows=persisted.get("segment_max_rows"),
+            segment_max_age=persisted.get("segment_max_age"),
+        ),
+        **stats,
+    )
 
 
 @router.post("/config", response_model=RingBufferStats)
+@audit_application_contract("POST", "/api/v1/ringbuffer/config", principal_param="_user")
 async def configure_ringbuffer(
     body: RingBufferConfig,
+    request: Request,
     _user: str = Depends(get_admin_user),
     db: Database = Depends(get_db),
 ) -> RingBufferStats:
@@ -1840,11 +2553,13 @@ async def configure_ringbuffer(
         )
 
     async with _CONFIGURE_LOCK:
-        return await _configure_ringbuffer_locked(body, db)
+        result = await _configure_ringbuffer_locked(body, db)
+        await write_application_success(db, request, _user, "POST", "/api/v1/ringbuffer/config", commit=True)
+        return result
 
 
 async def _configure_ringbuffer_locked(body: RingBufferConfig, db: Database) -> RingBufferStats:
-    persisted = await load_persisted_ringbuffer_config(db)
+    persisted = await load_persisted_ringbuffer_config(db, storage_path=_ringbuffer_disk_path())
     requested_enabled = body.enabled if "enabled" in body.model_fields_set else is_ringbuffer_enabled()
     rb = get_optional_ringbuffer()
     current_config = await rb.stats() if rb is not None else persisted
@@ -1852,6 +2567,120 @@ async def _configure_ringbuffer_locked(body: RingBufferConfig, db: Database) -> 
     resolved_max_entries = body.max_entries if "max_entries" in body.model_fields_set else current_config["max_entries"]
     resolved_max_file_size = body.max_file_size_bytes if "max_file_size_bytes" in body.model_fields_set else current_config["max_file_size_bytes"]
     resolved_max_age = body.max_age if "max_age" in body.model_fields_set else current_config["max_age"]
+    # Null-Retention normalisieren (#951 [P2]): ``RingBufferConfig`` erlaubt ``max_age: 0``
+    # (fuer persistierte Legacy-Configs bereits zu ``None`` normalisiert, siehe
+    # persisted_config.py:110 / 9278f0d8). ``StoreRetentionConfig`` lehnt die rohe 0 aber
+    # ab (verlangt ``>= 1`` oder ``null``) → 422 im segmentierten Pfad. Die 0 hier vor der
+    # ``StoreRetentionConfig``/``validate_store_config`` zu ``None`` (unbegrenzt) klemmen,
+    # damit der Round-trip konsistent zum Persisted-Load-Pfad gelingt.
+    if resolved_max_age == 0:
+        resolved_max_age = None
+
+    # Segment-Parameter (#930) leben nur in der persistierten Config, nicht im
+    # laufenden RingBuffer. Bei Teil-Updates die nicht gesetzten Felder aus der
+    # persistierten Config übernehmen.
+    # ``segmented`` ist ein Partial-Update-Feld (Codex #951 [P2]): ``None`` (fehlend
+    # ODER explizit ``null``) bedeutet "unveraendert lassen" und behaelt den
+    # persistierten/deployten Wert. Nur ein EXPLIZITES ``true``/``false`` schaltet um.
+    # Deshalb auf ``is not None`` pruefen statt auf ``model_fields_set`` – ein explizit
+    # gesendetes ``null`` darf NICHT als ``false`` interpretiert werden und den Store
+    # in den Legacy-Pfad zurueckbauen.
+    # Fallback fuer ein ausgelassenes Feld ist der LAUFENDE Wert (``rb.segmented``),
+    # nicht ``persisted.get(..., False)``: ein neuer Install laeuft segmentiert per
+    # Default, ohne dass ``segmented`` zwingend explizit in der persistierten Config
+    # steht. Ohne den Live-Fallback kippte ein Omit-Update einen solchen laufenden
+    # segmentierten Store faelschlich in den Legacy-Pfad (genau der Codex-Befund).
+    # Nur wenn gar kein RingBuffer laeuft, greift die persistierte Config.
+    if body.segmented is not None:
+        resolved_segmented = body.segmented
+    elif rb is not None:
+        resolved_segmented = rb.segmented
+    else:
+        resolved_segmented = bool(persisted.get("segmented", False))
+    # Segmentierung an das aufgelöste ``storage`` koppeln (Codex #951, Pkt 1):
+    # Postet ein Client eine partielle Config wie ``{"storage": "memory"}`` ohne
+    # ``segmented``, bliebe sonst das persistierte/Default-``segmented=true`` erhalten.
+    # ``RingBuffer.start()`` nähme dann den segmentierten Pfad, dessen Store-Root aus
+    # ``disk_path`` abgeleitet wird → ein als ``memory`` konfigurierter RingBuffer
+    # schriebe persistente Segment-Dateien (Widerspruch zur memory-Semantik). Löst
+    # ``storage`` zu ``memory`` auf, wird die Segmentierung daher normalisiert
+    # abgeschaltet; der ``file``-Pfad bleibt unverändert (segmentiert per Default).
+    resolved_storage = body.storage if "storage" in body.model_fields_set else current_config.get("storage", "file")
+    # Eine in-memory-DB (``storage='file'`` mit ``disk_path`` wie ``:memory:``) kann NICHT
+    # segmentiert werden – ``init_ringbuffer()`` leitete sonst ein reales
+    # ``:memory:_segments``-Verzeichnis auf die Platte ab (Widerspruch zur memory-Semantik).
+    # Wie der Startup-Pfad (``main.py``: ``not _is_sqlite_memory_path(rb_path)``) wird die
+    # Segmentierung daher IMMER abgeschaltet, auch bei explizit gepostetem ``segmented=true``
+    # (#968, Codex :2221/:2470): der implizite Default überlebte sonst beim Runtime-Enable,
+    # und Clients wie das Config-Modal senden ``segmented`` stets explizit, was einen reinen
+    # ``body.segmented is None``-Guard umginge. Die Bounds-Validierung expliziter Segment-
+    # Werte bleibt unberührt (sie hängt nicht an ``resolved_segmented``).
+    if resolved_storage == "memory" or _is_sqlite_memory_path(_ringbuffer_disk_path()):
+        resolved_segmented = False
+    resolved_segment_max_bytes = body.segment_max_bytes if "segment_max_bytes" in body.model_fields_set else persisted.get("segment_max_bytes")
+    resolved_segment_max_rows = body.segment_max_rows if "segment_max_rows" in body.model_fields_set else persisted.get("segment_max_rows")
+    resolved_segment_max_age = body.segment_max_age if "segment_max_age" in body.model_fields_set else persisted.get("segment_max_age")
+    effective_segment_max_bytes = (
+        resolved_segment_max_bytes if resolved_segment_max_bytes is not None else derive_segment_max_bytes(resolved_max_file_size)
+    )
+    effective_segment_max_rows = resolved_segment_max_rows if resolved_segment_max_rows is not None else derive_segment_max_rows(resolved_max_entries)
+    effective_segment_max_age = resolved_segment_max_age if resolved_segment_max_age is not None else derive_segment_max_age(resolved_max_age)
+
+    # Technische Grenzen NUR für EXPLIZIT gesetzte Segment-Werte durchsetzen (#919):
+    # 4 MiB…1 GiB / 300 s…30 d / >= 1000. Nicht gesetzte Felder (Auto-Ableitung)
+    # bleiben unangetastet → kein 422 im Auto-Startpfad.
+    #
+    # Migrierter Sub-300s-Round-trip (Codex #951, Pkt 1): Leitete der Loader für
+    # eine migrierte Config ein gültiges ``segment_max_age`` UNTER dem 300-s-Minimum
+    # ab (z. B. ``max_age=600`` → ``200``), bewahrt das Config-Modal (9855a69) diesen
+    # Wert und sendet ihn beim Speichern UNRELATED-Einstellungen unverändert mit. Ein
+    # solcher UNVERÄNDERTER Round-trip des bereits persistierten Werts wird NICHT als
+    # expliziter Nutzer-Input gegen das 300-s-Minimum geprüft (analog zur Modal-Logik,
+    # die das 300-s-Minimum nur bei aktiver Nutzeränderung erzwingt). Nur ein GEÄNDERTER
+    # Sub-300s-Wert läuft weiter in die 422-Ablehnung.
+    checked_segment_max_age = body.segment_max_age if "segment_max_age" in body.model_fields_set else None
+    if (
+        checked_segment_max_age is not None
+        and checked_segment_max_age < SEGMENT_MAX_AGE_MIN
+        and checked_segment_max_age == persisted.get("segment_max_age")
+    ):
+        checked_segment_max_age = None
+    try:
+        validate_explicit_segment_bounds(
+            segment_max_bytes=body.segment_max_bytes if "segment_max_bytes" in body.model_fields_set else None,
+            segment_max_age=checked_segment_max_age,
+            segment_max_rows=body.segment_max_rows if "segment_max_rows" in body.model_fields_set else None,
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+
+    # Segment-/Retention-Vertrag durchsetzen: zu grobe Segmentierung → HTTP 422
+    # (nicht auto-korrigieren, #930). NUR wenn der Request wirklich segmentiert
+    # auflöst (#951): der dokumentierte Legacy-Pfad (``segmented=false``) besitzt
+    # keine Segmente, für die die 3-Segment-Regel gälte — ein Client, der den
+    # Legacy-Store mit kurzer ``max_age`` behalten will, darf hier kein 422 gegen
+    # den (ungenutzten) Default-``segment_max_age`` bekommen.
+    if resolved_segmented:
+        if effective_segment_max_bytes is None and effective_segment_max_rows is None and effective_segment_max_age is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "At least one effective segment rotation limit is required; configure a segment limit or a matching total retention limit",
+            )
+        try:
+            validate_store_config(
+                SegmentConfig(
+                    segment_max_bytes=effective_segment_max_bytes,
+                    segment_max_rows=effective_segment_max_rows,
+                    segment_max_age=effective_segment_max_age,
+                ),
+                StoreRetentionConfig(
+                    max_file_size_bytes=resolved_max_file_size,
+                    max_entries=resolved_max_entries,
+                    max_age=resolved_max_age,
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
 
     if not requested_enabled:
         previous_enabled = is_ringbuffer_enabled()
@@ -1866,6 +2695,10 @@ async def _configure_ringbuffer_locked(body: RingBufferConfig, db: Database) -> 
                 max_entries=resolved_max_entries,
                 max_file_size_bytes=resolved_max_file_size,
                 max_age=resolved_max_age,
+                segmented=resolved_segmented,
+                segment_max_bytes=resolved_segment_max_bytes,
+                segment_max_rows=resolved_segment_max_rows,
+                segment_max_age=resolved_segment_max_age,
             )
             persisted_disabled = True
             if stopped_rb is not None:
@@ -1894,6 +2727,10 @@ async def _configure_ringbuffer_locked(body: RingBufferConfig, db: Database) -> 
                         max_entries=resolved_max_entries,
                         max_file_size_bytes=resolved_max_file_size,
                         max_age=resolved_max_age,
+                        segmented=resolved_segmented,
+                        segment_max_bytes=resolved_segment_max_bytes,
+                        segment_max_rows=resolved_segment_max_rows,
+                        segment_max_age=resolved_segment_max_age,
                     )
             raise
         if stopped_rb is not None:
@@ -1901,20 +2738,117 @@ async def _configure_ringbuffer_locked(body: RingBufferConfig, db: Database) -> 
         set_ringbuffer_enabled(False)
         return await _disabled_stats(db)
 
+    # Segmentierungs-Wechsel gegenüber der LAUFENDEN Instanz (#951): ``rb.reconfigure``
+    # kennt kein ``segmented`` und ändert ``_segmented`` nicht. Liefe der Monitor
+    # bereits im (unterstützten) Legacy-Modus und käme später ``segmented:true``
+    # (oder umgekehrt), persistierte die API den neuen Wert, während die laufende
+    # Instanz im alten Modus bliebe (Store fehlt bzw. bleibt fälschlich aktiv). Daher
+    # bei erkanntem Wechsel den RingBuffer stoppen und mit der neuen Segmentierung
+    # neu aufbauen — analog zum Model-Switch in ``RingBuffer.reconfigure``.
+    # Rollback-sicher (#951, Pkt 2): Der alte Buffer muss abgebaut werden, bevor der
+    # neue denselben Disk-Pfad öffnet. Scheitert der Neuaufbau (Segment-Root gelockt,
+    # DB nicht öffenbar), darf NICHT „kein Buffer" zurückbleiben, obwohl die Config
+    # schon umgestellt ist – sonst zeichnet der Monitor nichts mehr auf. Daher die
+    # Config des alten Buffers festhalten, damit sie im Fehlerfall im ALTEN Modus
+    # (inkl. Subscription) wiederhergestellt werden kann.
+    switch_prev_config: dict[str, Any] | None = None
+    if rb is not None and rb.segmented != resolved_segmented:
+        switch_prev_config = {
+            "storage": rb._storage,
+            "max_entries": rb._max_entries,
+            "max_file_size_bytes": rb._max_file_size_bytes,
+            "max_age": rb._max_age,
+            "segmented": rb.segmented,
+            "segment_max_bytes": rb._segment_max_bytes_config,
+            "segment_max_rows": rb._segment_max_rows_config,
+            "segment_max_age": rb._segment_max_age_config,
+            # Retention-Schutz des Legacy-Segments mitsichern (#968, Codex :2443),
+            # damit ein Rollback nach fehlgeschlagenem Rebuild den Schutz nicht verliert.
+            "legacy_retention_protected": rb._legacy_retention_protected,
+        }
+        _unsubscribe_ringbuffer(rb)
+        await rb.stop()
+        reset_ringbuffer()
+        rb = None
+        # Rebuild-Fenster deterministisch DISABLED halten (#951 [P2] "Keep ringbuffer
+        # disabled during mode rebuild"): der Singleton ist ab hier ``None``, bis das
+        # awaited ``init_ringbuffer()`` unten den Ersatz aufbaut. Ohne diese Zeile bliebe
+        # ``_enabled`` true (``reset_ringbuffer`` setzt es sogar wieder auf true), sodass
+        # nebenlaeufige query/export-Requests ``is_ringbuffer_enabled()`` → true sehen und
+        # ``get_ringbuffer()`` dann mangels Buffer wirft → transiente 500s waehrend des
+        # Speicherns der Config. Disabled liefern die Read-Pfade stattdessen deterministisch
+        # eine leere Seite. Nach erfolgreichem Neuaufbau wird unten wieder enabled.
+        set_ringbuffer_enabled(False)
+
     created_rb = False
     subscribed_new = False
+    # Vor dem Attach merken, ob die Ringbuffer-DB bereits existierte (#968, Codex :2518/:2429):
+    # ist sie pre-existing (Upgrade-Install, Monitor-Enable-aus-deaktiviert), hat ``init_ringbuffer``
+    # nur eine vorhandene DB geöffnet – NICHT erstellt. Ein Rollback nach einem transienten Save-
+    # Fehler darf sie dann nicht löschen (sonst irreversibler Verlust der Alt-Historie). UNABHÄNGIG
+    # vom Modus (#968, Codex :2429): auch der explizite Legacy-Pfad (``segmented=false``) nutzt die
+    # ``obs_ringbuffer.db`` direkt als Storage und ist gleichermaßen schützenswert. Gleiches gilt für
+    # einen bereits vorhandenen Segment-Root (#968, Codex :2527): dessen retenierte v2-Historie darf
+    # ein Rollback ebenso wenig entfernen.
+    _rb_disk_path = _ringbuffer_disk_path()
+    legacy_preexisting = Path(_rb_disk_path).exists()
+    segment_root_preexisting = Path(_rb_disk_path).with_name(f"{Path(_rb_disk_path).stem}_segments").exists()
     try:
         if rb is None:
+            # Migrations-Assistent (#968, Codex :2369): der Runtime-Init (Monitor-Enable
+            # oder Mode-Rebuild via POST /config) muss das Decision/Protection-Setup des
+            # Startups spiegeln. Sonst bliebe bei einem Upgrade, bei dem der Monitor erst
+            # zur Laufzeit aktiviert wird, die Entscheidung ``None`` (Banner versteckt) und
+            # die ersten non-legacy-Daten könnten die FIFO-Retention das Legacy-Segment
+            # zurückgewinnen lassen, bevor der Assistent den pending/skipped-Schutz greift.
+            try:
+                decision = await ensure_legacy_migration_decision(
+                    db,
+                    legacy_db_path=_ringbuffer_disk_path() if resolved_segmented else None,
+                )
+            except Exception:
+                # Ein transient gesperrtes app-DB-Setting darf den gesunden
+                # Runtime-Buffer nicht verhindern. Konservativ geschützt starten;
+                # der Finalizer unten und spätere Status-Polls wiederholen den Write.
+                logger.exception("RingBuffer: Runtime-Abgleich der Legacy-Entscheidung fehlgeschlagen (Buffer startet retention-geschützt)")
+                decision = LEGACY_DECISION_PENDING
             rb = await init_ringbuffer(
                 storage="file",
                 max_entries=resolved_max_entries,
                 disk_path=_ringbuffer_disk_path(),
                 max_file_size_bytes=resolved_max_file_size,
                 max_age=resolved_max_age,
+                segmented=resolved_segmented,
+                segment_max_bytes=resolved_segment_max_bytes,
+                segment_max_rows=resolved_segment_max_rows,
+                segment_max_age=resolved_segment_max_age,
+                legacy_retention_protected=decision in LEGACY_DECISIONS_PROTECTED,
             )
             _subscribe_ringbuffer(rb)
             subscribed_new = True
             created_rb = True
+            # Ersatz-Buffer steht: Rebuild-Fenster schliessen, wieder enabled (#951 [P2]).
+            # Nur im Switch-Pfad noetig (nur dort wurde oben disabled); der regulaere
+            # Enable-aus-deaktiviert-Pfad setzt seinen Enable-State an anderer Stelle.
+            if switch_prev_config is not None:
+                set_ringbuffer_enabled(True)
+            # Der Runtime-Init kann den Offline-Migrations-Reconciler laufen (Crash im
+            # Commit-Fenster, Monitor erst zur Laufzeit aktiviert): dann ist der Store promotet
+            # und die Legacy-Datei weg, während die Entscheidung ``pending``/``skipped`` bliebe.
+            # Wie der Startup-Finalizer state-basiert nachziehen (#968, Codex :2423) – aber NACH
+            # dem vollständigen Buffer-Setup (subscribed + enabled), serialisiert mit dem Decision-
+            # Endpoint (#968, Q10j0) und best-effort (#968, Codex :2436): schlägt die Decision-
+            # Persistenz transient fehl (app-DB locked/voll – genau der Fall, den dieser Retry-Pfad
+            # behandelt), darf das den bereits laufenden Buffer NICHT abbauen (created_rb/
+            # subscribed_new sind gesetzt, der except-Cleanup risse ihn sonst nieder). Der nächste
+            # Status-Poll zieht die Entscheidung nach.
+            try:
+                await _finalize_decision_under_lock(db, rb)
+            except Exception:
+                logger.exception(
+                    "RingBuffer: Runtime-Finalisierung der Migrations-Entscheidung fehlgeschlagen "
+                    "(Buffer bleibt aktiv, Retry beim nächsten Status-Poll)"
+                )
 
         reconfigure_kwargs: dict[str, Any] = {}
         if "max_entries" in body.model_fields_set:
@@ -1922,7 +2856,19 @@ async def _configure_ringbuffer_locked(body: RingBufferConfig, db: Database) -> 
         if "max_file_size_bytes" in body.model_fields_set:
             reconfigure_kwargs["max_file_size_bytes"] = body.max_file_size_bytes
         if "max_age" in body.model_fields_set:
-            reconfigure_kwargs["max_age"] = body.max_age
+            # Null-Retention (#951 [P2]): die normalisierte ``resolved_max_age`` (0 → None)
+            # verwenden, damit auch der Live-Reconfigure-Pfad kein rohes 0 an
+            # ``StoreRetentionConfig`` durchreicht.
+            reconfigure_kwargs["max_age"] = resolved_max_age
+        # Segment-Config live an den laufenden Store propagieren (#919/#938):
+        # gesetzte segment_max_* werden übernommen, im segmentierten Modus wirken
+        # sie sofort (Rotation/Retention/Prognose) ohne Neustart.
+        if "segment_max_bytes" in body.model_fields_set:
+            reconfigure_kwargs["segment_max_bytes"] = body.segment_max_bytes
+        if "segment_max_rows" in body.model_fields_set:
+            reconfigure_kwargs["segment_max_rows"] = body.segment_max_rows
+        if "segment_max_age" in body.model_fields_set:
+            reconfigure_kwargs["segment_max_age"] = body.segment_max_age
         await rb.reconfigure(body.storage, **reconfigure_kwargs)
         stats = await rb.stats()
         await persist_ringbuffer_config(
@@ -1931,15 +2877,101 @@ async def _configure_ringbuffer_locked(body: RingBufferConfig, db: Database) -> 
             max_entries=stats["max_entries"],
             max_file_size_bytes=stats["max_file_size_bytes"],
             max_age=stats["max_age"],
+            segmented=resolved_segmented,
+            segment_max_bytes=resolved_segment_max_bytes,
+            segment_max_rows=resolved_segment_max_rows,
+            segment_max_age=resolved_segment_max_age,
         )
-    except Exception:
+    except Exception as exc:
         if created_rb and rb is not None:
             if subscribed_new:
                 _unsubscribe_ringbuffer(rb)
             await rb.stop()
             reset_ringbuffer()
             set_ringbuffer_enabled(False)
-            with suppress(Exception):
-                delete_ringbuffer_storage_files(_ringbuffer_disk_path())
+            # Storage NUR löschen, wenn es KEIN Modus-Switch-Rollback ist (#951, Pkt 2):
+            # Bei einem Switch teilt sich der frisch erstellte Buffer denselben
+            # Disk-Pfad + Segment-Root mit dem alten Modus. ``switch_prev_config``
+            # signalisiert genau diesen Fall – die Storage-Dateien tragen die
+            # Historie, die der nachfolgende Rollback bewahren soll. Ein transienter
+            # Save-Fehler beim Switch darf sie daher NICHT löschen. Ohne aktiven
+            # Switch ist der Buffer wirklich frisch angelegt (z. B. aus dem
+            # deaktivierten Zustand) und wird sauber wieder abgebaut.
+            if switch_prev_config is None:
+                with suppress(Exception):
+                    # Pre-existing Storage NICHT löschen (#968, Codex :2518/:2527): weder die
+                    # attachte Legacy-DB noch einen bereits vorhandenen Segment-Root – nur was
+                    # dieser Request neu erzeugt hat. Ein transienter Save-Fehler darf keine
+                    # bestehende v1-/v2-Historie irreversibel entfernen.
+                    delete_ringbuffer_storage_files(
+                        _ringbuffer_disk_path(),
+                        keep_legacy_db=legacy_preexisting,
+                        keep_segment_root=segment_root_preexisting,
+                    )
+        # Modus-Switch-Rebuild gescheitert (#951, Pkt 2): der alte Buffer wurde
+        # bereits abgebaut. Damit immer ein funktionierender Buffer läuft, den
+        # vorherigen Zustand im ALTEN Modus re-initialisieren und neu subscriben.
+        if switch_prev_config is not None:
+            try:
+                restored = await init_ringbuffer(
+                    storage=switch_prev_config["storage"],
+                    max_entries=switch_prev_config["max_entries"],
+                    disk_path=_ringbuffer_disk_path(),
+                    max_file_size_bytes=switch_prev_config["max_file_size_bytes"],
+                    max_age=switch_prev_config["max_age"],
+                    segmented=switch_prev_config["segmented"],
+                    segment_max_bytes=switch_prev_config["segment_max_bytes"],
+                    segment_max_rows=switch_prev_config["segment_max_rows"],
+                    segment_max_age=switch_prev_config["segment_max_age"],
+                    # Legacy-Schutz aus dem vorherigen Zustand wiederherstellen (#968,
+                    # Codex :2443): sonst defaultet ``protect_legacy`` auf false und die
+                    # FIFO-Retention könnte die über-budget Legacy-Quelle löschen, bevor
+                    # der Admin eine informierte Entscheidung getroffen hat.
+                    legacy_retention_protected=switch_prev_config["legacy_retention_protected"],
+                )
+                _subscribe_ringbuffer(restored)
+                set_ringbuffer_enabled(True)
+            except Exception as restore_exc:
+                # Auch das Restore des alten Buffers ist gescheitert (#951 [P2]:
+                # "Report failed mode-switch rollbacks"). Der alte Buffer ist bereits
+                # gestoppt+ge-``reset``, ein neuer konnte nicht aufgebaut werden → der
+                # Store läuft jetzt DEGRADIERT (kein Buffer, deaktiviert): Recording
+                # steht, Query-Endpunkte liefern disabled/500, bis ein Neustart oder ein
+                # weiterer Config-Call kommt. Diesen Zustand NICHT verschlucken, sondern
+                # deterministisch setzen und dem Aufrufer SICHTBAR melden – sonst sähe der
+                # Betreiber nur den ursprünglichen Config-Fehler und wüsste nicht, dass der
+                # Store degradiert ist.
+                reset_ringbuffer()
+                set_ringbuffer_enabled(False)
+                logger.error(
+                    "RingBuffer mode-switch rollback failed: neither the reconfigured buffer "
+                    "nor the previous buffer could be restored; store is now disabled with no "
+                    "active buffer (original error: %r)",
+                    exc,
+                    exc_info=restore_exc,
+                )
+                raise HTTPException(
+                    status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    "ringbuffer mode-switch failed and rollback to the previous buffer also "
+                    f"failed: the store is now disabled with no active buffer. "
+                    f"config error: {exc!s}; rollback error: {restore_exc!s}",
+                ) from restore_exc
         raise
-    return RingBufferStats(enabled=True, **stats)
+    # Persistierte Segment-Config in die Response spiegeln (wie GET /stats),
+    # damit das Config-Modal nach dem Speichern die GESPEICHERTEN Werte
+    # hydratisiert statt auf die Defaults zurueckzufallen (#919/#938).
+    return RingBufferStats(
+        enabled=True,
+        segment_max_bytes=resolved_segment_max_bytes,
+        segment_max_rows=resolved_segment_max_rows,
+        segment_max_age=resolved_segment_max_age,
+        **_segment_contract_stats(
+            max_entries=stats["max_entries"],
+            max_file_size_bytes=stats["max_file_size_bytes"],
+            max_age=stats["max_age"],
+            segment_max_bytes=resolved_segment_max_bytes,
+            segment_max_rows=resolved_segment_max_rows,
+            segment_max_age=resolved_segment_max_age,
+        ),
+        **stats,
+    )

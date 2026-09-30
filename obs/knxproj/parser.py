@@ -69,6 +69,7 @@ class DeviceRecord:
     identifier: str
     individual_address: str
     name: str = ""
+    space_id: str | None = None
     hardware_name: str = ""
     order_number: str = ""
     description: str = ""
@@ -254,6 +255,95 @@ def _parse_trades_from_xml(xml_bytes: bytes) -> list[TradeRecord]:
     return records
 
 
+def _extract_device_space_id(device: Any) -> str | None:
+    """Return the ETS space/location identifier for a device when exposed by xknxproject."""
+
+    def _clean(value: Any) -> str | None:
+        text = str(value or "").strip()
+        return text or None
+
+    if isinstance(device, dict):
+        for key in ("space_id", "location_id", "room_id"):
+            value = _clean(device.get(key))
+            if value:
+                return value
+        for key in ("space", "location", "room"):
+            nested = device.get(key)
+            if isinstance(nested, dict):
+                for nested_key in ("identifier", "id", "space_id", "location_id"):
+                    value = _clean(nested.get(nested_key))
+                    if value:
+                        return value
+            else:
+                value = _clean(getattr(nested, "identifier", None) or getattr(nested, "id", None))
+                if value:
+                    return value
+        return None
+
+    for attr in ("space_id", "location_id", "room_id"):
+        value = _clean(getattr(device, attr, None))
+        if value:
+            return value
+    for attr in ("space", "location", "room"):
+        nested = getattr(device, attr, None)
+        value = _clean(getattr(nested, "identifier", None) or getattr(nested, "id", None))
+        if value:
+            return value
+    return None
+
+
+def _device_ref_identifier(ref: Any) -> str | None:
+    if isinstance(ref, str | int):
+        text = str(ref).strip()
+        return text or None
+
+    if isinstance(ref, dict):
+        for key in ("identifier", "id", "device_id", "ref_id"):
+            text = str(ref.get(key) or "").strip()
+            if text:
+                return text
+        return None
+
+    for attr in ("identifier", "id", "device_id", "ref_id"):
+        text = str(getattr(ref, attr, None) or "").strip()
+        if text:
+            return text
+    return None
+
+
+def _collect_space_device_map(spaces: Any) -> dict[str, str]:
+    device_to_space: dict[str, str] = {}
+
+    def _walk(space_items: Any) -> None:
+        iterable = space_items.items() if isinstance(space_items, dict) else enumerate(space_items or [])
+
+        for space_key, space in iterable:
+            if isinstance(space, dict):
+                identifier = str(space.get("identifier") or space_key).strip()
+                devices = space.get("devices") or []
+                sub_spaces = space.get("spaces") or {}
+            else:
+                identifier = str(getattr(space, "identifier", space_key)).strip()
+                devices = getattr(space, "devices", []) or []
+                sub_spaces = getattr(space, "spaces", {}) or {}
+
+            if identifier:
+                if isinstance(devices, dict):
+                    device_refs = devices.items()
+                else:
+                    device_refs = [(None, device_ref) for device_ref in devices]
+                for device_key, device_ref in device_refs:
+                    device_id = _device_ref_identifier(device_ref) or _device_ref_identifier(device_key)
+                    if device_id and device_id not in device_to_space:
+                        device_to_space[device_id] = identifier
+
+            if sub_spaces:
+                _walk(sub_spaces)
+
+    _walk(spaces)
+    return device_to_space
+
+
 def parse_knxproj_trades(file_bytes: bytes, password: str | None = None) -> list[TradeRecord]:
     """Parse <Trades><Trade .../></Trades> directly from the .knxproj ZIP.
 
@@ -298,7 +388,7 @@ def parse_knxproj_trades(file_bytes: bytes, password: str | None = None) -> list
                     m = re.search(r'xmlns="http://knx\.org/xml/project/(\d+)"', master)
                     if m:
                         schema_version = int(m.group(1))
-        except Exception:
+        except (zipfile.BadZipFile, KeyError, ValueError):
             pass
 
         if schema_version < ets6_schema_version:
@@ -329,8 +419,8 @@ def parse_knxproj_trades(file_bytes: bytes, password: str | None = None) -> list
                     xml_bytes = inner.read(zero_xml)
                     records = _parse_trades_from_xml(xml_bytes)
 
-    except Exception as e:
-        logger.warning("parse_knxproj_trades failed (ignored): %s", e)
+    except Exception:
+        logger.exception("parse_knxproj_trades failed (ignored)")
 
     logger.info("parse_knxproj_trades: %d Gewerke gefunden", len(records))
     return records
@@ -386,7 +476,7 @@ def _walk_spaces(
                 ga_refs = dict(getattr(fn, "group_addresses", {}) or {})
 
             ga_addresses: list[str] = []
-            for _ref_key, ref in ga_refs.items():
+            for ref in ga_refs.values():
                 if isinstance(ref, dict):
                     addr = str(ref.get("address") or "").strip()
                 else:
@@ -437,7 +527,7 @@ def parse_knxproj_locations(
         msg = str(e).lower()
         if any(kw in msg for kw in ("password", "decrypt", "hmac", "bad zip", "invalid password")):
             raise ValueError("Falsches Passwort oder Datei ist verschlüsselt.") from e
-        raise ValueError(f"Fehler beim Parsen: {str(e)}") from e
+        raise ValueError(f"Fehler beim Parsen: {e!s}") from e
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -493,10 +583,13 @@ def parse_knxproj_devices(
     if isinstance(project, dict):
         devices_raw = project.get("devices") or {}
         comm_raw = project.get("communication_objects") or {}
+        top_spaces = project.get("locations") or {}
     else:
         devices_raw = getattr(project, "devices", {}) or {}
         comm_raw = getattr(project, "communication_objects", {}) or {}
+        top_spaces = getattr(project, "locations", {}) or {}
 
+    device_space_map = _collect_space_device_map(top_spaces)
     device_records: list[DeviceRecord] = []
     for dev_id, device in devices_raw.items():
         if isinstance(device, dict):
@@ -510,6 +603,7 @@ def parse_knxproj_devices(
                     identifier=identifier,
                     individual_address=individual_address,
                     name=str(device.get("name") or "").strip(),
+                    space_id=_extract_device_space_id(device) or device_space_map.get(identifier),
                     hardware_name=str(device.get("hardware_name") or "").strip(),
                     order_number=str(device.get("order_number") or "").strip(),
                     description=str(device.get("description") or "").strip(),
@@ -529,6 +623,7 @@ def parse_knxproj_devices(
                     identifier=identifier,
                     individual_address=str(getattr(device, "individual_address", "") or "").strip(),
                     name=str(getattr(device, "name", "") or "").strip(),
+                    space_id=_extract_device_space_id(device) or device_space_map.get(identifier),
                     hardware_name=str(getattr(device, "hardware_name", "") or "").strip(),
                     order_number=str(getattr(device, "order_number", "") or "").strip(),
                     description=str(getattr(device, "description", "") or "").strip(),
@@ -641,7 +736,7 @@ def parse_knxproj(file_bytes: bytes, password: str | None = None) -> list[GroupA
         msg = str(e).lower()
         if any(kw in msg for kw in ("password", "decrypt", "bad password", "hmac", "bad zip", "invalid password")):
             raise ValueError("Falsches Passwort oder Datei ist verschlüsselt.") from e
-        raise ValueError(f"Fehler beim Parsen der .knxproj Datei: {str(e)}") from e
+        raise ValueError(f"Fehler beim Parsen der .knxproj Datei: {e!s}") from e
     finally:
         if tmp_path and os.path.exists(tmp_path):
             os.unlink(tmp_path)

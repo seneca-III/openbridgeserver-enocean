@@ -18,12 +18,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
 
+from obs.api.auth import Principal, get_current_principal
+from obs.api.authz import AuthzAction
+from obs.api.authz_service import filter_authorized_datapoints
 from obs.api.v1 import sessions as sessions_api
 from obs.api.v1.datapoint_config import collect_datapoint_ids_from_config, is_uuid_str
 from obs.core.json import jsonable
@@ -35,6 +41,23 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["websocket"])
 
 LogAccessCheck = Callable[[], Awaitable[bool]]
+DatapointScopeCheck = Callable[[], Awaitable[set[str] | None]]
+DATAPOINT_SCOPE_REFRESH_SECONDS = 5.0
+LogicDebugAccessCheck = Callable[[str], Awaitable[bool]]
+
+
+@dataclass(frozen=True)
+class MessageArchivePredicate:
+    archive_ids: set[str] | None = None
+    types: set[str] | None = None
+    severities: set[str] | None = None
+    statuses: set[str] | None = None
+    sources: set[str] | None = None
+    allow_read: bool = True
+    allow_acknowledge: bool = True
+
+
+MessageArchiveAccess = list[MessageArchivePredicate] | None
 
 
 # ---------------------------------------------------------------------------
@@ -46,21 +69,42 @@ class WebSocketManager:
     """Tracks all connected WebSocket clients and their DataPoint subscriptions."""
 
     def __init__(self) -> None:
-        # conn_id → (websocket, subscribed_dp_ids, send_lock, allowed_dp_ids, log_access, log_access_check)
-        # allowed_dp_ids: None = unrestricted (authenticated user),
-        # otherwise page-scoped allowlist for anonymous viewer sessions.
-        # log_access: authenticated non-page connections receive log_entry pushes.
-        # log_access_check: revalidates API-key existence before every log_entry push.
+        # conn_id → (websocket, subscribed_dp_ids, send_lock, allowed_dp_ids,
+        #            log_access, log_access_check, ringbuffer_metadata)
+        # allowed_dp_ids: None = unrestricted administrator,
+        # otherwise a principal-policy or anonymous page allowlist.
+        # log_access: authenticated JWT non-page connections receive log_entry pushes.
+        # log_access_check: revalidates principal existence before every log_entry push.
         # send_lock serialises concurrent sends on the same WebSocket;
         # concurrent asyncio.gather calls in EventBus would otherwise race.
-        self._connections: dict[str, tuple[WebSocket, set[str], asyncio.Lock, set[str] | None, bool, LogAccessCheck | None]] = {}
+        self._connections: dict[
+            str,
+            tuple[WebSocket, set[str], asyncio.Lock, set[str] | None, bool, LogAccessCheck | None, bool],
+        ] = {}
+        self._datapoint_scope_checks: dict[str, DatapointScopeCheck] = {}
+        self._datapoint_scope_refreshed_at: dict[str, float] = {}
+        # Tracks which connections may receive non-DP action broadcasts (e.g. logic_run).
+        # True for authenticated (JWT/API-key) connections; False for anonymous page-scoped viewers.
+        self._action_access: dict[str, bool] = {}
+        # conn_id -> allowed message archive predicates. None means unrestricted.
+        self._message_archive_access: dict[str, MessageArchiveAccess] = {}
+        self._logic_debug_subscriptions: dict[str, set[str]] = {}
+        self._logic_debug_access: set[str] = set()
+        self._logic_debug_access_checks: dict[str, LogicDebugAccessCheck] = {}
 
     async def connect(
         self,
         ws: WebSocket,
         allowed_dp_ids: set[str] | None = None,
+        allowed_message_archive_ids: set[str] | None = None,
+        allowed_message_archive_access: MessageArchiveAccess = None,
         log_access: bool = False,
         log_access_check: LogAccessCheck | None = None,
+        datapoint_scope_check: DatapointScopeCheck | None = None,
+        ringbuffer_metadata: bool = False,
+        action_access: bool = False,
+        logic_debug_access: bool = False,
+        logic_debug_access_check: LogicDebugAccessCheck | None = None,
         subprotocol: str | None = None,
     ) -> str:
         if subprotocol is None:
@@ -72,17 +116,40 @@ class WebSocketManager:
                 # Test doubles may not support the subprotocol kwarg.
                 await ws.accept()
         conn_id = str(uuid.uuid4())
-        self._connections[conn_id] = (ws, set(), asyncio.Lock(), allowed_dp_ids, log_access, log_access_check)
+        self._connections[conn_id] = (ws, set(), asyncio.Lock(), allowed_dp_ids, log_access, log_access_check, ringbuffer_metadata)
+        if datapoint_scope_check is not None:
+            self._datapoint_scope_checks[conn_id] = datapoint_scope_check
+            self._datapoint_scope_refreshed_at[conn_id] = time.monotonic()
+        self._action_access[conn_id] = action_access
+        self._logic_debug_subscriptions[conn_id] = set()
+        if logic_debug_access:
+            self._logic_debug_access.add(conn_id)
+        if logic_debug_access_check is not None:
+            self._logic_debug_access_checks[conn_id] = logic_debug_access_check
+        if allowed_message_archive_access is not None:
+            self._message_archive_access[conn_id] = allowed_message_archive_access
+        elif allowed_message_archive_ids is not None:
+            self._message_archive_access[conn_id] = [MessageArchivePredicate(archive_ids=allowed_message_archive_ids)]
+        else:
+            self._message_archive_access[conn_id] = None
         logger.debug("WS client connected: %s  (total: %d)", conn_id[:8], len(self._connections))
         return conn_id
 
     async def disconnect(self, conn_id: str) -> None:
+        self._datapoint_scope_checks.pop(conn_id, None)
+        self._datapoint_scope_refreshed_at.pop(conn_id, None)
+        self._action_access.pop(conn_id, None)
         entry = self._connections.pop(conn_id, None)
+        self._message_archive_access.pop(conn_id, None)
+        self._logic_debug_subscriptions.pop(conn_id, None)
+        self._logic_debug_access.discard(conn_id)
+        self._logic_debug_access_checks.pop(conn_id, None)
         if entry:
             ws = entry[0]
             try:
                 await ws.close()
-            except Exception:
+            except (RuntimeError, WebSocketDisconnect):
+                # Already closed / invalid ASGI state — nothing left to clean up.
                 pass
         logger.debug(
             "WS client disconnected: %s  (total: %d)",
@@ -90,7 +157,38 @@ class WebSocketManager:
             len(self._connections),
         )
 
-    def subscribe(self, conn_id: str, dp_ids: list[str]) -> None:
+    def invalidate_datapoint_scopes(self) -> None:
+        """Force scoped connections to revalidate before their next push."""
+        self._datapoint_scope_refreshed_at.clear()
+
+    async def _refresh_datapoint_scope(self, conn_id: str, *, force: bool = False) -> None:
+        scope_check = self._datapoint_scope_checks.get(conn_id)
+        if scope_check is None:
+            return
+
+        now = time.monotonic()
+        refreshed_at = self._datapoint_scope_refreshed_at.get(conn_id)
+        if not force and refreshed_at is not None and now - refreshed_at < DATAPOINT_SCOPE_REFRESH_SECONDS:
+            return
+        self._datapoint_scope_refreshed_at[conn_id] = now
+
+        try:
+            refreshed = await scope_check()
+        except Exception:
+            logger.exception("WS datapoint scope revalidation failed for connection %s", conn_id[:8])
+            refreshed = set()
+
+        entry = self._connections.get(conn_id)
+        if entry is None:
+            return
+        ws, subs, lock, _allowed, log_access, log_access_check, ringbuffer_metadata = entry
+        allowed = None if refreshed is None else set(refreshed)
+        if allowed is not None:
+            subs.intersection_update(allowed)
+        self._connections[conn_id] = (ws, subs, lock, allowed, log_access, log_access_check, ringbuffer_metadata)
+
+    async def subscribe(self, conn_id: str, dp_ids: list[str]) -> None:
+        await self._refresh_datapoint_scope(conn_id, force=True)
         if conn_id in self._connections:
             allowed = self._connections[conn_id][3]
             if allowed is None:
@@ -108,9 +206,51 @@ class WebSocketManager:
         if conn_id in self._connections:
             self._connections[conn_id][1].difference_update(dp_ids)
 
+    async def set_logic_debug(self, conn_id: str, graph_id: str, enabled: bool) -> None:
+        subscriptions = self._logic_debug_subscriptions.get(conn_id)
+        if subscriptions is None:
+            return
+        access_check = self._logic_debug_access_checks.get(conn_id)
+        allowed = conn_id in self._logic_debug_access
+        if access_check is not None:
+            try:
+                allowed = await access_check(graph_id)
+            except Exception:
+                logger.exception("WS logic debug scope check failed for connection %s", conn_id[:8])
+                allowed = False
+        if enabled and allowed:
+            subscriptions.add(graph_id)
+        else:
+            subscriptions.discard(graph_id)
+
+    def has_logic_debug_subscribers(self, graph_id: str) -> bool:
+        return any(graph_id in subscriptions for subscriptions in self._logic_debug_subscriptions.values())
+
+    async def broadcast_logic_debug(self, graph_id: str, msg: dict) -> None:
+        dead: list[str] = []
+        for conn_id, subscriptions in list(self._logic_debug_subscriptions.items()):
+            if graph_id not in subscriptions:
+                continue
+            access_check = self._logic_debug_access_checks.get(conn_id)
+            if access_check is not None:
+                try:
+                    allowed = await access_check(graph_id)
+                except Exception:
+                    logger.exception("WS logic debug scope revalidation failed for connection %s", conn_id[:8])
+                    allowed = False
+                if not allowed:
+                    subscriptions.discard(graph_id)
+                    continue
+            if not await self._send(conn_id, msg):
+                dead.append(conn_id)
+        for conn_id in dead:
+            await self.disconnect(conn_id)
+
     async def send_initial_values(self, conn_id: str, dp_ids: list[str]) -> None:
         """Send current registry values for subscribed datapoints."""
         from obs.core.registry import get_registry
+
+        await self._refresh_datapoint_scope(conn_id)
 
         try:
             reg = get_registry()
@@ -119,6 +259,9 @@ class WebSocketManager:
 
         dead = False
         for dp_id in dp_ids:
+            entry = self._connections.get(conn_id)
+            if entry is None or dp_id not in entry[1]:
+                continue
             try:
                 dp_uuid = uuid.UUID(dp_id)
             except (TypeError, ValueError):
@@ -169,20 +312,91 @@ class WebSocketManager:
                 return True
             except Exception:
                 # Actual transport error — signal caller to close the connection.
+                logger.exception("WS transport error on connection %s — closing", conn_id)
                 return False
 
+    @staticmethod
+    def _message_datapoint_id(msg: dict) -> str | None:
+        """Return the datapoint ID referenced by a server-push message, if any."""
+        dp_id = msg.get("datapoint_id")
+        if isinstance(dp_id, str) and dp_id:
+            return dp_id
+
+        entry = msg.get("entry")
+        if isinstance(entry, dict):
+            entry_dp_id = entry.get("datapoint_id")
+            if isinstance(entry_dp_id, str) and entry_dp_id:
+                return entry_dp_id
+
+        # Legacy value pushes use an action-less payload with top-level "id".
+        if "action" not in msg:
+            legacy_id = msg.get("id")
+            if isinstance(legacy_id, str) and legacy_id:
+                return legacy_id
+
+        return None
+
     async def broadcast(self, msg: dict) -> None:
-        """Send a message to ALL connected clients (no subscription filter)."""
+        """Send a message to connected clients, applying per-message DP scope."""
         dead: list[str] = []
         log_only = msg.get("action") == "log_entry"
-        for conn_id, entry in list(self._connections.items()):
-            _, _subs, _lock, _allowed_ids, log_access, log_access_check = entry
+        scoped_dp_id = self._message_datapoint_id(msg)
+        for conn_id in list(self._connections):
+            if scoped_dp_id is not None:
+                await self._refresh_datapoint_scope(conn_id)
+            entry = self._connections.get(conn_id)
+            if entry is None:
+                continue
+            _, _subs, _lock, allowed_ids, log_access, log_access_check, _ringbuffer_metadata = entry
             if log_only:
                 if not log_access:
                     continue
                 if log_access_check is not None and not await log_access_check():
                     self._set_log_access(conn_id, False)
                     continue
+            if allowed_ids is not None and scoped_dp_id is None and not self._action_access.get(conn_id, False):
+                continue
+            if scoped_dp_id is not None and allowed_ids is not None and scoped_dp_id not in allowed_ids:
+                continue
+            if not await self._send(conn_id, msg):
+                dead.append(conn_id)
+        for conn_id in dead:
+            await self.disconnect(conn_id)
+
+    async def broadcast_message_archive_entry(self, entry: dict[str, Any], previous_entry: dict[str, Any] | None = None) -> None:
+        """Push a newly stored message archive entry to allowed clients.
+
+        A connection that could see ``previous_entry`` but no longer matches the updated
+        ``entry`` (e.g. an edit moved it to a different archive/type/severity/source out of
+        a page-scoped predicate) must not receive the new payload — that would leak the
+        updated contents outside its allowed scope. It gets a refresh nudge instead, which
+        re-fetches through the access-checked REST endpoint rather than the raw entry.
+        """
+        dead: list[str] = []
+        entry_msg = {"action": "message_archive_entry", "entry": entry}
+        refresh_msg = {"action": "message_archive_refresh", "archive_id": str(entry.get("archive_id") or "").lower() or None}
+        for conn_id in list(self._connections):
+            access = self._message_archive_access.get(conn_id)
+            if access is None or _message_archive_entry_matches_access(entry, access):
+                msg = entry_msg
+            elif previous_entry is not None and _message_archive_entry_matches_access(previous_entry, access):
+                msg = refresh_msg
+            else:
+                continue
+            if not await self._send(conn_id, msg):
+                dead.append(conn_id)
+        for conn_id in dead:
+            await self.disconnect(conn_id)
+
+    async def broadcast_message_archive_refresh(self, archive_id: str | None = None) -> None:
+        """Ask clients with access to an archive to refresh their message archive view."""
+        dead: list[str] = []
+        normalized_archive_id = str(archive_id or "").lower() or None
+        msg = {"action": "message_archive_refresh", "archive_id": normalized_archive_id}
+        for conn_id in list(self._connections):
+            access = self._message_archive_access.get(conn_id)
+            if access is not None and not _message_archive_archive_matches_access(normalized_archive_id, access):
+                continue
             if not await self._send(conn_id, msg):
                 dead.append(conn_id)
         for conn_id in dead:
@@ -219,6 +433,10 @@ class WebSocketManager:
             subs = entry[1]
             if dp_id_str not in subs:
                 continue
+            await self._refresh_datapoint_scope(conn_id)
+            entry = self._connections.get(conn_id)
+            if entry is None or dp_id_str not in entry[1]:
+                continue
             if not await self._send(conn_id, dp_msg):
                 dead.append(conn_id)
         for conn_id in dead:
@@ -241,7 +459,7 @@ class WebSocketManager:
             "unit": dp.unit if dp else None,
         }
         metadata: dict[str, Any] | None = None
-        if any(entry[3] is None for entry in self._connections.values()):
+        if any(entry[6] for entry in self._connections.values()):
             from obs.ringbuffer.ringbuffer import build_ringbuffer_metadata_snapshot
 
             metadata = await build_ringbuffer_metadata_snapshot(
@@ -250,12 +468,16 @@ class WebSocketManager:
                 datapoint=dp,
             )
         dead = []
-        for conn_id, entry in list(self._connections.items()):
+        for conn_id in list(self._connections):
+            await self._refresh_datapoint_scope(conn_id)
+            entry = self._connections.get(conn_id)
+            if entry is None:
+                continue
             allowed_ids = entry[3]
             if allowed_ids is not None and dp_id_str not in allowed_ids:
                 continue
             rb_entry = base_rb_entry
-            if allowed_ids is None and metadata is not None:
+            if entry[6] and metadata is not None:
                 rb_entry = {
                     **base_rb_entry,
                     "metadata_version": 1,
@@ -275,8 +497,8 @@ class WebSocketManager:
         entry = self._connections.get(conn_id)
         if entry is None:
             return
-        ws, subs, lock, allowed_dp_ids, _old_log_access, log_access_check = entry
-        self._connections[conn_id] = (ws, subs, lock, allowed_dp_ids, log_access, log_access_check)
+        ws, subs, lock, allowed_dp_ids, _old_log_access, log_access_check, ringbuffer_metadata = entry
+        self._connections[conn_id] = (ws, subs, lock, allowed_dp_ids, log_access, log_access_check, ringbuffer_metadata)
 
 
 async def _page_allowed_datapoints(
@@ -305,14 +527,14 @@ async def _page_allowed_datapoints(
             else:
                 try:
                     page_config_raw = row["page_config"]
-                except Exception:
+                except (KeyError, IndexError, TypeError):
                     page_config_raw = None
         if not row or not page_config_raw:
             page_cache[target_page_id] = None
             return None
         try:
             parsed = PageConfig.model_validate_json(page_config_raw)
-        except Exception:
+        except ValueError:
             parsed = None
         page_cache[target_page_id] = parsed
         return parsed
@@ -328,7 +550,7 @@ async def _page_allowed_datapoints(
             out.add(widget.status_datapoint_id)
         collect_datapoint_ids_from_config(widget.config, out)
 
-        if widget.type != "widget_ref":
+        if widget.type not in {"widget_ref", "WidgetRef"}:
             return
 
         source_page_id = _non_empty_str(widget.config.get("source_page_id"))
@@ -366,6 +588,203 @@ async def _page_allowed_datapoints(
     return ids
 
 
+async def _page_allowed_message_archives(
+    db: Database,
+    page_id: str,
+    *,
+    widget_ref_access_check: Callable[[str], Awaitable[bool]] | None = None,
+    widget_ref_readonly_check: Callable[[str], Awaitable[bool]] | None = None,
+) -> set[str] | None:
+    """Return archive IDs referenced by MessageArchive widgets.
+
+    None means a page contains a MessageArchive widget without an archive
+    filter, so it intentionally displays all message archives.
+    """
+    predicates = await _page_allowed_message_archive_predicates(
+        db,
+        page_id,
+        widget_ref_access_check=widget_ref_access_check,
+        widget_ref_readonly_check=widget_ref_readonly_check,
+    )
+    if not predicates:
+        return set()
+    ids: set[str] = set()
+    for predicate in predicates:
+        if predicate.archive_ids is None:
+            return None
+        ids.update(predicate.archive_ids)
+    return ids
+
+
+async def _page_allowed_message_archive_predicates(
+    db: Database,
+    page_id: str,
+    *,
+    widget_ref_access_check: Callable[[str], Awaitable[bool]] | None = None,
+    widget_ref_readonly_check: Callable[[str], Awaitable[bool]] | None = None,
+) -> list[MessageArchivePredicate]:
+    """Return per-widget MessageArchive predicates for page-scoped pushes."""
+
+    def _non_empty_str(value: Any) -> str | None:
+        if isinstance(value, str) and value:
+            return value
+        return None
+
+    def _string_set_from_config(config: dict[str, Any], *keys: str, lower: bool = False) -> set[str] | None:
+        values: list[str] = []
+        for key in keys:
+            raw = config.get(key)
+            if isinstance(raw, list):
+                values.extend(item for item in raw if isinstance(item, str))
+            elif isinstance(raw, str) and raw:
+                values.extend(part.strip() for part in raw.split(","))
+        cleaned = {(value.strip().lower() if lower else value.strip()) for value in values if value.strip()}
+        if not cleaned:
+            return None
+        return cleaned
+
+    def _bool_from_config(config: dict[str, Any], *keys: str, default: bool = True) -> bool:
+        for key in keys:
+            if key in config:
+                return bool(config.get(key))
+        return default
+
+    def _mini_widgets_from_config(config: dict[str, Any]) -> list[Any]:
+        raw = config.get("miniWidgets")
+        return raw if isinstance(raw, list) else []
+
+    page_cache: dict[str, PageConfig | None] = {}
+
+    async def _load_page_config(target_page_id: str) -> PageConfig | None:
+        if target_page_id in page_cache:
+            return page_cache[target_page_id]
+        row = await db.fetchone("SELECT page_config FROM visu_nodes WHERE id = ? AND type = 'PAGE'", (target_page_id,))
+        page_config_raw = None
+        if row:
+            if isinstance(row, dict):
+                page_config_raw = row.get("page_config")
+            else:
+                try:
+                    page_config_raw = row["page_config"]
+                except (KeyError, IndexError, TypeError):
+                    page_config_raw = None
+        if not row or not page_config_raw:
+            page_cache[target_page_id] = None
+            return None
+        try:
+            parsed = PageConfig.model_validate_json(page_config_raw)
+        except ValueError:
+            parsed = None
+        page_cache[target_page_id] = parsed
+        return parsed
+
+    async def _collect_widget_archives(
+        widget: Any,
+        out: list[MessageArchivePredicate],
+        visited_refs: set[tuple[str, str, bool]],
+        *,
+        inherited_readonly: bool = False,
+    ) -> None:
+        config = widget.config if isinstance(widget.config, dict) else {}
+        if widget.type == "MessageArchive":
+            out.append(
+                MessageArchivePredicate(
+                    archive_ids=_string_set_from_config(config, "archive_ids", "archive_id", lower=True),
+                    types=_string_set_from_config(config, "types", "type"),
+                    severities=_string_set_from_config(config, "severities", "severity"),
+                    statuses=_string_set_from_config(config, "statuses", "status"),
+                    sources=_string_set_from_config(config, "sources", "source"),
+                    allow_read=False if inherited_readonly else _bool_from_config(config, "allow_read", "allowRead", default=True),
+                    allow_acknowledge=False
+                    if inherited_readonly
+                    else _bool_from_config(config, "allow_acknowledge", "allowAcknowledge", default=True),
+                )
+            )
+
+        for mini_widget in _mini_widgets_from_config(config):
+            if not isinstance(mini_widget, dict):
+                continue
+            if mini_widget.get("visible") is not True:
+                continue
+            mini_type = _non_empty_str(mini_widget.get("widgetType")) or _non_empty_str(mini_widget.get("type"))
+            if not mini_type:
+                continue
+            mini_config = mini_widget.get("config")
+            await _collect_widget_archives(
+                SimpleNamespace(type=mini_type, config=mini_config if isinstance(mini_config, dict) else {}),
+                out,
+                visited_refs,
+                inherited_readonly=inherited_readonly,
+            )
+
+        if widget.type not in {"widget_ref", "WidgetRef"}:
+            return
+
+        source_page_id = _non_empty_str(widget.config.get("source_page_id"))
+        source_widget_name = _non_empty_str(widget.config.get("source_widget_name"))
+        if not source_page_id or not source_widget_name:
+            return
+        if widget_ref_access_check is not None and not await widget_ref_access_check(source_page_id):
+            return
+        source_is_readonly = False
+        if widget_ref_readonly_check is not None:
+            source_is_readonly = await widget_ref_readonly_check(source_page_id)
+
+        ref_readonly = inherited_readonly or source_is_readonly
+        ref_key = (source_page_id, source_widget_name, ref_readonly)
+        if ref_key in visited_refs:
+            return
+        visited_refs.add(ref_key)
+
+        source_page = await _load_page_config(source_page_id)
+        if source_page is None:
+            return
+
+        target_widget = next(
+            (candidate for candidate in source_page.widgets if candidate.name == source_widget_name),
+            None,
+        )
+        if target_widget is None:
+            return
+        await _collect_widget_archives(target_widget, out, visited_refs, inherited_readonly=ref_readonly)
+
+    page = await _load_page_config(page_id)
+    if page is None:
+        return []
+
+    predicates: list[MessageArchivePredicate] = []
+    visited_refs: set[tuple[str, str, bool]] = set()
+    for widget in page.widgets:
+        await _collect_widget_archives(widget, predicates, visited_refs)
+    return predicates
+
+
+def _message_archive_entry_matches_access(entry: dict[str, Any], access: list[MessageArchivePredicate]) -> bool:
+    for predicate in access:
+        archive_id = str(entry.get("archive_id") or "").lower()
+        if predicate.archive_ids is not None and archive_id not in predicate.archive_ids:
+            continue
+        if predicate.types and str(entry.get("type") or "") not in predicate.types:
+            continue
+        if predicate.severities and str(entry.get("severity") or "") not in predicate.severities:
+            continue
+        if predicate.statuses and str(entry.get("status") or "") not in predicate.statuses:
+            continue
+        if predicate.sources and str(entry.get("source") or "") not in predicate.sources:
+            continue
+        return True
+    return False
+
+
+def _message_archive_archive_matches_access(archive_id: str | None, access: list[MessageArchivePredicate]) -> bool:
+    if archive_id is None:
+        return True
+    for predicate in access:
+        if predicate.archive_ids is None or archive_id in predicate.archive_ids:
+            return True
+    return False
+
+
 def _extract_subprotocol_tokens(ws: WebSocket) -> tuple[str | None, str | None, str | None]:
     offered_subprotocols = ws.scope.get("subprotocols")
     if not isinstance(offered_subprotocols, list):
@@ -401,15 +820,19 @@ def _requested_jwt_subprotocol(ws: WebSocket) -> str | None:
     return None
 
 
-async def _authenticate_visu_page_scope(ws: WebSocket) -> tuple[bool, str]:
-    """Validate page-scoped visu websocket access without JWT."""
-    from obs.api.v1.visu import _resolve_access_with_node
+async def _authorize_visu_page_scope(
+    *,
+    db: Database,
+    page_id: str | None,
+    session_token: str | None,
+    username: str | None,
+) -> tuple[bool, str]:
+    """Validate that a websocket may use a visu page scope."""
+    from obs.api.v1.visu import _check_user_access, _resolve_access_with_node
 
-    page_id = ws.query_params.get("page_id")
     if not page_id:
         return False, "Missing credentials"
 
-    db = get_db()
     page_row = await db.fetchone("SELECT type FROM visu_nodes WHERE id = ?", (page_id,))
     if not page_row:
         return False, "Page not found"
@@ -421,35 +844,64 @@ async def _authenticate_visu_page_scope(ws: WebSocket) -> tuple[bool, str]:
     if access in ("public", "readonly"):
         return True, "OK"
     if access == "protected":
-        _jwt_token, session_token_subprotocol, _selected = _extract_subprotocol_tokens(ws)
-        session_token = session_token_subprotocol or ws.query_params.get("session_token")
+        if username is not None and username != "__api_key__" and not username.startswith("api_key:"):
+            return True, "OK"
         validate_id = defining_node_id or page_id
         if session_token and sessions_api.validate_session(session_token, validate_id):
             return True, "OK"
         return False, "Valid session token required"
     if access == "user":
-        return False, "Authentication required"
+        if username is None:
+            return False, "Authentication required"
+        if username == "__api_key__" or username.startswith("api_key:"):
+            return False, "Authentication required"
+        if await _check_user_access(db, page_id, username):
+            return True, "OK"
+        return False, "Zugriff verweigert"
     return False, "Authentication required"
+
+
+async def _authenticate_visu_page_scope(ws: WebSocket) -> tuple[bool, str]:
+    """Validate page-scoped visu websocket access without JWT."""
+    _jwt_token, session_token_subprotocol, _selected = _extract_subprotocol_tokens(ws)
+    session_token = session_token_subprotocol or ws.query_params.get("session_token")
+    page_id = ws.query_params.get("page_id")
+    if not page_id:
+        return False, "Missing credentials"
+    return await _authorize_visu_page_scope(
+        db=get_db(),
+        page_id=page_id,
+        session_token=session_token,
+        username=None,
+    )
 
 
 async def _authenticate_ws_request(ws: WebSocket) -> tuple[bool, str]:
     """Validate auth for websocket handshake."""
     from obs.api.auth import decode_token, hash_api_key
+    from obs.api.setup import setup_required
+
+    if setup_required():
+        # HTTP middleware cannot see websocket handshakes, so setup mode is
+        # enforced here too — including the anonymous visu page scope below.
+        return False, "Setup required"
 
     auth_header = ws.headers.get("authorization", "")
     if auth_header.startswith("Bearer "):
         try:
-            decode_token(auth_header[7:])
+            username = decode_token(auth_header[7:])
+            await _jwt_principal(get_db(), username)
             return True, "OK"
-        except Exception:
+        except HTTPException:
             return False, "Invalid token"
 
     subprotocol_jwt, _session_token, _selected = _extract_subprotocol_tokens(ws)
     if subprotocol_jwt:
         try:
-            decode_token(subprotocol_jwt)
+            username = decode_token(subprotocol_jwt)
+            await _jwt_principal(get_db(), username)
             return True, "OK"
-        except Exception:
+        except HTTPException:
             return False, "Invalid token"
 
     api_key = ws.headers.get("x-api-key")
@@ -471,7 +923,11 @@ async def _authenticate_ws_request(ws: WebSocket) -> tuple[bool, str]:
 async def _ws_has_log_access(user: str | None, api_key: str | None) -> bool:
     """Return whether the authenticated websocket may receive log_entry pushes."""
     if user and user != "__api_key__":
-        return True
+        try:
+            db = get_db()
+        except RuntimeError:
+            return False
+        return await db.fetchone("SELECT 1 FROM users WHERE username=?", (user,)) is not None
     if api_key:
         try:
             db = get_db()
@@ -485,7 +941,128 @@ async def _ws_has_log_access(user: str | None, api_key: str | None) -> bool:
             (key_hash,),
         )
         return row is not None
-    return False
+    return bool(user and user != "__api_key__")
+
+
+async def _ws_has_logic_debug_access(db: Database, principal: Principal, graph_id: str) -> bool:
+    """Return whether *principal* may inspect one graph's live values."""
+    try:
+        row = await db.fetchone("SELECT * FROM logic_graphs WHERE id=?", (graph_id,))
+        if not row:
+            return False
+        from obs.api.v1.logic import _can_read_logic_graph
+
+        return await _can_read_logic_graph(db, principal, row)
+    except Exception:
+        logger.exception("WS logic debug graph authorization failed for graph %s", graph_id)
+        return False
+
+
+async def _jwt_principal(db: Database, username: str) -> Principal:
+    row = await db.fetchone("SELECT is_admin FROM users WHERE username=?", (username,))
+    if not row:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "User not found")
+    return Principal(subject=username, type="user", is_admin=bool(row["is_admin"]))
+
+
+async def _ws_authorized_datapoint_scope(db: Database, principal: Principal) -> set[str] | None:
+    if principal.type == "user" and principal.is_admin:
+        return None
+
+    rows = await db.fetchall("SELECT id FROM datapoints ORDER BY id")
+    all_ids = [row["id"] for row in rows]
+    allowed = await filter_authorized_datapoints(
+        db,
+        principal,
+        all_ids,
+        action=AuthzAction.READ,
+    )
+    return set(allowed)
+
+
+async def _ws_authenticated_page_scope(
+    db: Database,
+    page_id: str,
+    principal: Principal,
+    session_token: str | None,
+) -> set[str] | None:
+    from obs.api.v1.visu import _check_user_access, _resolve_access_with_node
+
+    user_source_page_ids: set[str] = set()
+
+    async def _can_access_page(candidate_page_id: str) -> bool:
+        access, defining_node_id = await _resolve_access_with_node(db, candidate_page_id)
+        if access in ("public", "readonly"):
+            return True
+        if access == "protected":
+            if principal.type == "user":
+                return True
+            validate_id = defining_node_id or candidate_page_id
+            return bool(session_token and sessions_api.validate_session(session_token, validate_id))
+        if access == "user" and principal.type == "user":
+            ok = await _check_user_access(db, candidate_page_id, principal.subject)
+            if ok and candidate_page_id != page_id:
+                user_source_page_ids.add(candidate_page_id)
+            return ok
+        return False
+
+    if not await _can_access_page(page_id):
+        return None
+    page_scope_ids = await _page_allowed_datapoints(db, page_id, widget_ref_access_check=_can_access_page)
+    if page_scope_ids is None:
+        return None
+    access, _ = await _resolve_access_with_node(db, page_id)
+    if access == "user":
+        allowed_ids = set(await filter_authorized_datapoints(db, principal, page_scope_ids, action=AuthzAction.READ))
+        return page_scope_ids & allowed_ids
+
+    # Datapoints contributed by user-access widget_ref source pages must also respect READ grants.
+    if user_source_page_ids:
+        user_sourced: set[str] = set()
+        for src_page_id in user_source_page_ids:
+            src_ids = await _page_allowed_datapoints(db, src_page_id)
+            if src_ids:
+                user_sourced.update(src_ids)
+        user_sourced &= page_scope_ids
+        if user_sourced:
+            # Datapoints directly on this page (not only via widget_ref) must not be subject
+            # to the widget_ref READ grant filter, even if they happen to appear in a
+            # user-access source page as well.
+            async def _deny_widget_refs(_: str) -> bool:
+                return False
+
+            direct_ids = await _page_allowed_datapoints(db, page_id, widget_ref_access_check=_deny_widget_refs) or set()
+            user_sourced -= direct_ids
+        if user_sourced:
+            read_allowed = set(await filter_authorized_datapoints(db, principal, user_sourced, action=AuthzAction.READ))
+            page_scope_ids = (page_scope_ids - user_sourced) | read_allowed
+    return page_scope_ids
+
+
+async def _merge_authenticated_page_scope(
+    db: Database,
+    allowed_dp_ids: set[str],
+    page_id: str,
+    principal: Principal,
+    session_token: str | None,
+) -> None:
+    page_scope_ids = await _ws_authenticated_page_scope(db, page_id, principal, session_token)
+    if page_scope_ids is None:
+        return
+
+    from obs.api.v1.datapoints import _has_explicit_datapoint_read_deny
+
+    explicitly_denied: set[str] = set()
+    for dp_id in page_scope_ids:
+        try:
+            dp_uuid = uuid.UUID(dp_id)
+        except (TypeError, ValueError):
+            continue
+        if await _has_explicit_datapoint_read_deny(db, principal, dp_uuid):
+            explicitly_denied.add(dp_id)
+
+    allowed_dp_ids.difference_update(explicitly_denied)
+    allowed_dp_ids.update(page_scope_ids - explicitly_denied)
 
 
 # ---------------------------------------------------------------------------
@@ -499,6 +1076,12 @@ def get_ws_manager() -> WebSocketManager:
     if _manager is None:
         raise RuntimeError("WebSocketManager not initialized")
     return _manager
+
+
+def invalidate_datapoint_scopes() -> None:
+    """Invalidate live WebSocket authorization caches when policy inputs change."""
+    if _manager is not None:
+        _manager.invalidate_datapoint_scopes()
 
 
 def reset_ws_manager() -> None:
@@ -536,7 +1119,7 @@ async def websocket_endpoint(
     # - authenticated users: unrestricted subscriptions/live pushes
     # - anonymous users: only allowed with page context and page-scoped datapoints
     from obs.api.auth import decode_token
-    from obs.api.v1.visu import _resolve_access_with_node
+    from obs.api.v1.visu import _check_user_access, _resolve_access_with_node
 
     resolved_token: str | None = None
     selected_subprotocol: str | None = None
@@ -555,7 +1138,7 @@ async def websocket_endpoint(
     if resolved_token is not None:
         try:
             user = decode_token(resolved_token)
-        except Exception:
+        except HTTPException:
             invalid_token = True
             user = None
 
@@ -564,34 +1147,89 @@ async def websocket_endpoint(
         return
 
     allowed_dp_ids: set[str] | None = None
+    allowed_message_archive_access: MessageArchiveAccess = None
+    db: Database | None = get_db() if page_id else None
+    datapoint_scope_check: DatapointScopeCheck | None = None
+    authenticated_page_session = subprotocol_session or ws.query_params.get("session_token")
+    session_token = authenticated_page_session
+    current_principal_check: Callable[[], Awaitable[Principal]] | None = None
+
+    async def _can_access_widget_ref_page(source_page_id: str) -> bool:
+        if db is None:
+            return False
+        source_access, source_defining_node_id = await _resolve_access_with_node(db, source_page_id)
+        if source_access in ("public", "readonly"):
+            return True
+        if source_access == "protected":
+            source_validate_id = source_defining_node_id or source_page_id
+            return bool(session_token and sessions_api.validate_session(session_token, source_validate_id))
+        if source_access == "user":
+            if user is None or user == "__api_key__" or user.startswith("api_key:"):
+                return False
+            return await _check_user_access(db, source_page_id, user)
+        return False
+
+    async def _is_readonly_widget_ref_page(source_page_id: str) -> bool:
+        if db is None:
+            return False
+        source_access, _source_defining_node_id = await _resolve_access_with_node(db, source_page_id)
+        return source_access == "readonly"
+
+    async def _scope_for_principal(current_principal: Principal) -> set[str] | None:
+        assert db is not None
+        scope = await _ws_authorized_datapoint_scope(db, current_principal)
+        if page_id and scope is not None:
+            await _merge_authenticated_page_scope(db, scope, page_id, current_principal, authenticated_page_session)
+        return scope
+
+    if api_key and user == "__api_key__":
+        db = db or get_db()
+
+        async def _revalidate_api_key_principal() -> Principal:
+            assert db is not None
+            return await get_current_principal(credentials=None, api_key=api_key, db=db)
+
+        async def _revalidate_api_key_scope() -> set[str] | None:
+            return await _scope_for_principal(await _revalidate_api_key_principal())
+
+        current_principal_check = _revalidate_api_key_principal
+        datapoint_scope_check = _revalidate_api_key_scope
+        allowed_dp_ids = await datapoint_scope_check()
+    elif user is not None:
+        db = db or get_db()
+        username = user
+
+        async def _revalidate_jwt_principal() -> Principal:
+            assert db is not None
+            if resolved_token is None or decode_token(resolved_token) != username:
+                raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+            return await _jwt_principal(db, username)
+
+        async def _revalidate_jwt_scope() -> set[str] | None:
+            return await _scope_for_principal(await _revalidate_jwt_principal())
+
+        current_principal_check = _revalidate_jwt_principal
+        datapoint_scope_check = _revalidate_jwt_scope
+        allowed_dp_ids = await datapoint_scope_check()
+
+    authenticated_user = user is not None
     if user is None:
         if not page_id:
             await ws.close(code=4001, reason="Authentication required")
             return
 
-        db = get_db()
-        session_token = subprotocol_session or ws.query_params.get("session_token")
+        if db is None:
+            await ws.close(code=4001, reason="Authentication required")
+            return
         access, defining_node_id = await _resolve_access_with_node(db, page_id)
         if access == "protected":
             validate_id = defining_node_id or page_id
             if not session_token or not sessions_api.validate_session(session_token, validate_id):
                 await ws.close(code=4001, reason="Valid session token required")
                 return
-        elif access == "user":
+        elif access == "user" or access not in ("public", "readonly"):
             await ws.close(code=4001, reason="Authentication required")
             return
-        elif access not in ("public", "readonly"):
-            await ws.close(code=4001, reason="Authentication required")
-            return
-
-        async def _can_access_widget_ref_page(source_page_id: str) -> bool:
-            source_access, source_defining_node_id = await _resolve_access_with_node(db, source_page_id)
-            if source_access in ("public", "readonly"):
-                return True
-            if source_access == "protected":
-                source_validate_id = source_defining_node_id or source_page_id
-                return bool(session_token and sessions_api.validate_session(session_token, source_validate_id))
-            return False
 
         allowed_dp_ids = await _page_allowed_datapoints(
             db,
@@ -602,15 +1240,48 @@ async def websocket_endpoint(
             # Keep the connection authenticated for page-scope sessions even if
             # page config cannot be parsed (e.g. lightweight test doubles).
             allowed_dp_ids = set()
+    if db is not None and page_id:
+        ok, reason = await _authorize_visu_page_scope(
+            db=db,
+            page_id=page_id,
+            session_token=session_token,
+            username=user,
+        )
+        if not ok:
+            await ws.close(code=4001, reason=reason)
+            return
+        allowed_message_archive_access = await _page_allowed_message_archive_predicates(
+            db,
+            page_id,
+            widget_ref_access_check=_can_access_widget_ref_page,
+            widget_ref_readonly_check=_is_readonly_widget_ref_page,
+        )
 
-    log_access = await _ws_has_log_access(user, api_key) if allowed_dp_ids is None else False
+    effective_api_key = api_key if user == "__api_key__" else None
+    log_access = await _ws_has_log_access(user, effective_api_key) if authenticated_user and not page_id and user != "__api_key__" else False
+
+    async def _revalidate_logic_debug_access(graph_id: str) -> bool:
+        if db is None or current_principal_check is None or page_id:
+            return False
+        try:
+            principal = await current_principal_check()
+        except Exception:  # noqa: BLE001 -- authentication revalidation must fail closed
+            return False
+        return await _ws_has_logic_debug_access(db, principal, graph_id)
+
+    logic_debug_access_check = _revalidate_logic_debug_access if authenticated_user and not page_id else None
 
     manager = get_ws_manager()
     conn_id = await manager.connect(
         ws,
         allowed_dp_ids=allowed_dp_ids,
+        allowed_message_archive_access=allowed_message_archive_access,
         log_access=log_access,
-        log_access_check=(lambda: _ws_has_log_access(user, api_key)) if log_access else None,
+        log_access_check=(lambda: _ws_has_log_access(user, effective_api_key)) if log_access else None,
+        datapoint_scope_check=datapoint_scope_check,
+        ringbuffer_metadata=authenticated_user,
+        action_access=authenticated_user,
+        logic_debug_access_check=logic_debug_access_check,
         subprotocol=selected_subprotocol,
     )
 
@@ -628,7 +1299,7 @@ async def websocket_endpoint(
             if action == "subscribe":
                 ids = [str(i) for i in data.get("ids", [])]
                 before = manager.subscriptions(conn_id)
-                manager.subscribe(conn_id, ids)
+                await manager.subscribe(conn_id, ids)
                 after = manager.subscriptions(conn_id)
                 added = [i for i in ids if i in after and i not in before]
                 subscribed = [i for i in ids if i in after]
@@ -642,6 +1313,11 @@ async def websocket_endpoint(
 
             elif action == "ping":
                 await ws.send_json({"action": "pong"})
+
+            elif action == "logic_debug":
+                graph_id = str(data.get("graph_id") or "")
+                if graph_id:
+                    await manager.set_logic_debug(conn_id, graph_id, bool(data.get("enabled")))
 
     except WebSocketDisconnect:
         pass

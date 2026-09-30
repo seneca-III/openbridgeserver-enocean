@@ -40,9 +40,9 @@ from collections import deque
 from datetime import UTC, datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from obs.adapters.base import AdapterBase
+from obs.adapters.base import AdapterBase, AdapterDelegationCapability
 from obs.adapters.registry import register
 from obs.core.event_bus import DataValueEvent
 from obs.core.json import json_dumps, jsonable
@@ -136,7 +136,7 @@ def _coerce_iobroker_value(value: Any) -> Any:
         pass
     try:
         return json.loads(raw)
-    except Exception:
+    except (json.JSONDecodeError, TypeError):
         return value
 
 
@@ -145,6 +145,12 @@ class IoBrokerAdapter(AdapterBase):
     adapter_type = "IOBROKER"
     config_schema = IoBrokerAdapterConfig
     binding_config_schema = IoBrokerBindingConfig
+    delegation_capabilities = frozenset(
+        {
+            AdapterDelegationCapability.CREATE_DATAPOINT,
+            AdapterDelegationCapability.LINK_BINDING,
+        }
+    )
 
     def __init__(self, event_bus: Any, config: dict | None = None, **kwargs) -> None:
         super().__init__(event_bus, config, **kwargs)
@@ -275,7 +281,7 @@ class IoBrokerAdapter(AdapterBase):
                 continue
             try:
                 bc = IoBrokerBindingConfig(**binding.config)
-            except Exception:
+            except (ValidationError, TypeError):
                 logger.warning(
                     "Ungültige ioBroker Binding-Konfiguration für %s — übersprungen",
                     binding.id,
@@ -372,7 +378,7 @@ class IoBrokerAdapter(AdapterBase):
 
     def _register_socket_handlers(self, sio: Any) -> None:
         @sio.event
-        async def connect():  # noqa: ANN202
+        async def connect():
             if self._socket is not sio:
                 return
             logger.info("ioBroker Socket.IO connected → %s", self._connect_url)
@@ -385,7 +391,7 @@ class IoBrokerAdapter(AdapterBase):
             await self._subscribe_bound_states(force_publish_initial=True, publish_connected_status=False)
 
         @sio.event
-        async def disconnect():  # noqa: ANN202
+        async def disconnect():
             if self._socket is not sio:
                 return
             logger.info("ioBroker Socket.IO disconnected")
@@ -395,7 +401,7 @@ class IoBrokerAdapter(AdapterBase):
             self._ensure_reconnect_task()
 
         @sio.on("stateChange")
-        async def state_change(*args):  # noqa: ANN202
+        async def state_change(*args):
             if self._socket is not sio:
                 return
             await self._on_state_change_event(*args)
@@ -548,7 +554,7 @@ class IoBrokerAdapter(AdapterBase):
                     try:
                         value = await self._read_binding_value(binding, suppress_errors=False)
                     except Exception:
-                        logger.warning(
+                        logger.exception(
                             "ioBroker adapter skipped publish after failed read during subscribe/resync for binding %s",
                             binding.id,
                         )
@@ -702,6 +708,7 @@ class IoBrokerAdapter(AdapterBase):
                 state = await self._call_socket("getState", item["id"], timeout=4.0)
                 item["value"] = self._extract_state_value(state)
             except Exception:
+                logger.exception("ioBroker: getState failed for %s", item["id"])
                 item["value"] = None
 
     @staticmethod

@@ -51,6 +51,23 @@ def get_class(adapter_type: str) -> type | None:
     return _adapters.get(adapter_type)
 
 
+def supports_delegation(adapter_type: str, capability: Any) -> bool:
+    """Return whether *adapter_type* explicitly delegates *capability*.
+
+    Unknown adapter types, missing declarations, and malformed declarations are
+    denied.  This keeps authorization fail-closed for legacy and future adapters.
+    """
+    from obs.adapters.base import AdapterDelegationCapability
+
+    if not isinstance(capability, AdapterDelegationCapability):
+        return False
+    cls = _adapters.get(adapter_type)
+    declared = getattr(cls, "delegation_capabilities", None) if cls is not None else None
+    if not isinstance(declared, frozenset) or not all(isinstance(item, AdapterDelegationCapability) for item in declared):
+        return False
+    return capability in declared
+
+
 def all_types() -> list[str]:
     return list(_adapters.keys())
 
@@ -308,7 +325,7 @@ def load_valid_bindings(rows: list[Any]) -> tuple[list[Any], list[BindingLoadIss
     for row in rows:
         try:
             bindings.append(_row_to_binding(row))
-        except Exception as exc:
+        except (KeyError, ValueError, TypeError) as exc:
             issue = BindingLoadIssue(
                 binding_id=_row_value(row, "id") or "<unknown>",
                 adapter_instance_id=_row_value(row, "adapter_instance_id"),
@@ -386,6 +403,6 @@ async def _set_instance_status(
 def _row_value(row: Any, key: str) -> str | None:
     try:
         value = row[key]
-    except Exception:
+    except (KeyError, IndexError):
         return None
     return str(value) if value is not None else None

@@ -11,19 +11,23 @@ POST   /icons/fontawesome — import icons from FontAwesome
 from __future__ import annotations
 
 import io
+import logging
 import re
-import zipfile
 import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 
 import httpx
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel
 
+from obs.api.audit import contract_audit, set_contract_audit_summary
 from obs.api.auth import get_admin_user, get_current_user
 from obs.config import get_settings
 from obs.db.database import Database, get_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["icons"])
 
@@ -161,9 +165,7 @@ def _sanitize_svg(content: bytes) -> bytes:
             attr_name = local_name(attr)
             value = elem.attrib.get(attr) or ""
             normalized_scheme = re.sub(r"[\x00-\x20]+", "", value).lower()
-            if attr_name.startswith("on"):
-                del elem.attrib[attr]
-            elif attr_name in {"href", "xlink:href"} and normalized_scheme.startswith(("javascript:", "data:")):
+            if attr_name.startswith("on") or attr_name in {"href", "xlink:href"} and normalized_scheme.startswith(("javascript:", "data:")):
                 del elem.attrib[attr]
 
         for child in list(elem):
@@ -259,9 +261,14 @@ async def list_icons(
     return IconListOut(total=len(items), icons=items)
 
 
-@router.post("/import", response_model=ImportResult)
+@router.post(
+    "/import",
+    response_model=ImportResult,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/icons/import"))],
+)
 async def import_icons(
     files: list[UploadFile] = File(...),
+    request: Request = None,
     _user: str = Depends(get_admin_user),
 ) -> ImportResult:
     """Upload one or more SVG files or a ZIP archive containing SVGs.
@@ -330,12 +337,15 @@ async def import_icons(
     for name, svg_bytes in pending_writes.items():
         (icons_dir / f"{name}.svg").write_bytes(svg_bytes)
 
-    return ImportResult(
+    result = ImportResult(
         imported=len(imported),
         skipped=skipped,
         names=imported,
         message=(f"{len(imported)} Icon(s) importiert" + (f", {skipped} übersprungen" if skipped else "")),
     )
+    if request is not None:
+        set_contract_audit_summary(request, resource_count=result.imported, payload=sorted(imported))
+    return result
 
 
 class ExportRequest(BaseModel):
@@ -363,9 +373,13 @@ def _build_export_zip(icons_dir: Path, names: list[str]) -> io.BytesIO:
     return buf
 
 
-@router.post("/export")
+@router.post(
+    "/export",
+    dependencies=[Depends(contract_audit("POST", "/api/v1/icons/export"))],
+)
 async def export_icons_post(
     body: ExportRequest,
+    request: Request = None,
     _user: str = Depends(get_current_user),
 ) -> StreamingResponse:
     """Export Icons als ZIP (POST-Variante, empfohlen).
@@ -373,6 +387,11 @@ async def export_icons_post(
     Leere Namen-Liste = alle Icons exportieren.
     """
     buf = _build_export_zip(_icons_dir(), body.names)
+    if request is not None:
+        with zipfile.ZipFile(buf) as archive:
+            exported_names = sorted(archive.namelist())
+        buf.seek(0)
+        set_contract_audit_summary(request, resource_count=len(exported_names), payload=exported_names)
     return StreamingResponse(
         buf,
         media_type="application/zip",
@@ -380,9 +399,14 @@ async def export_icons_post(
     )
 
 
-@router.delete("/", status_code=status.HTTP_200_OK)
+@router.delete(
+    "/",
+    status_code=status.HTTP_200_OK,
+    dependencies=[Depends(contract_audit("DELETE", "/api/v1/icons/"))],
+)
 async def delete_icons(
     body: DeleteRequest,
+    request: Request = None,
     _user: str = Depends(get_admin_user),
 ) -> dict:
     """Delete one or multiple icons by name."""
@@ -413,6 +437,8 @@ async def delete_icons(
             deleted.append(name)
         else:
             not_found.append(name)
+    if request is not None:
+        set_contract_audit_summary(request, resource_count=len(deleted), payload=sorted(body.names))
     return {"deleted": len(deleted), "names": deleted, "not_found": not_found}
 
 
@@ -437,7 +463,11 @@ async def get_icons_settings(
     return IconsSettingsOut(fa_api_key=row["value"] if row else None)
 
 
-@router.put("/settings", response_model=IconsSettingsOut)
+@router.put(
+    "/settings",
+    response_model=IconsSettingsOut,
+    dependencies=[Depends(contract_audit("PUT", "/api/v1/icons/settings"))],
+)
 async def update_icons_settings(
     body: IconsSettingsIn,
     _user: str = Depends(get_current_user),
@@ -523,7 +553,7 @@ async def _fa_exchange_token(
             return token
     except Exception:
         # dbg.append(f"[token-exchange] Exception: {exc}")
-        pass
+        logger.exception("FontAwesome token exchange failed")
     return None
 
 
@@ -559,7 +589,7 @@ async def _fa_get_version(
                 return v
     except Exception:
         # dbg.append(f"[version-discovery] Exception: {exc}")
-        pass
+        logger.exception("FontAwesome version discovery failed")
     # dbg.append("[version-discovery] Fallback → 7.2.0")
     return "7.2.0"
 
@@ -626,7 +656,7 @@ async def _fa_graphql_svg(
 
     except Exception:
         # dbg.append(f"[graphql:{icon_name}] Exception: {exc}")
-        pass
+        logger.exception("FontAwesome GraphQL icon lookup failed for %s", icon_name)
     return None
 
 
@@ -646,7 +676,7 @@ async def _fa_cdn_svg(
             if r.status_code == 200 and _is_svg(r.content):
                 return r.content
         except Exception:
-            pass
+            logger.exception("FontAwesome CDN fetch failed for %s", name)
         return None
 
     svg = await _fetch(icon_name)
@@ -655,9 +685,14 @@ async def _fa_cdn_svg(
     return svg
 
 
-@router.post("/fontawesome", response_model=ImportResult)
+@router.post(
+    "/fontawesome",
+    response_model=ImportResult,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/icons/fontawesome"))],
+)
 async def import_fontawesome(
     body: FontAwesomeRequest,
+    request: Request = None,
     _user: str = Depends(get_admin_user),
     db: Database = Depends(get_db),
 ) -> ImportResult:
@@ -748,13 +783,21 @@ async def import_fontawesome(
             else:
                 skipped += 1
 
-    return ImportResult(
+    result = ImportResult(
         imported=len(imported),
         skipped=skipped,
         names=imported,
         debug=[],  # debug=dbg  ← Debug-Ausgabe bei Bedarf wieder aktivieren
         message=(f"{len(imported)} FontAwesome Icon(s) importiert" + (f", {skipped} nicht gefunden/übersprungen" if skipped else "")),
     )
+    if request is not None:
+        # The API key is intentionally excluded from the audit digest input.
+        set_contract_audit_summary(
+            request,
+            resource_count=result.imported,
+            payload={"icons": sorted(body.icons), "style": body.style},
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -774,7 +817,7 @@ def _parse_knxuf_js(content: str) -> dict[str, str]:
 
 def _build_knxuf_svg(path_data: str) -> bytes:
     """Wrap a KNX UF path string in a minimal SVG element."""
-    import xml.etree.ElementTree as ET  # noqa: PLC0415 (local import for clarity)
+    import xml.etree.ElementTree as ET
 
     root = ET.Element("svg")
     root.set("xmlns", "http://www.w3.org/2000/svg")
@@ -784,8 +827,13 @@ def _build_knxuf_svg(path_data: str) -> bytes:
     return ET.tostring(root, encoding="utf-8", xml_declaration=False)
 
 
-@router.post("/knxuf", response_model=ImportResult)
+@router.post(
+    "/knxuf",
+    response_model=ImportResult,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/icons/knxuf"))],
+)
 async def import_knxuf(
+    request: Request = None,
     _user: str = Depends(get_current_user),
 ) -> ImportResult:
     """KNX UF Iconset aus dem ha-knx-uf-iconset GitHub-Repository importieren.
@@ -842,9 +890,12 @@ async def import_knxuf(
         target_path.write_bytes(sanitized)
         imported.append(stored_name)
 
-    return ImportResult(
+    result = ImportResult(
         imported=len(imported),
         skipped=skipped,
         names=imported,
         message=(f"{len(imported)} KNX UF Icon(s) importiert" + (f", {skipped} übersprungen" if skipped else "")),
     )
+    if request is not None:
+        set_contract_audit_summary(request, resource_count=result.imported, payload=sorted(imported))
+    return result

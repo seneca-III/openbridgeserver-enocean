@@ -6,12 +6,15 @@ All tests are self-contained (no Docker, no real DB, no network).
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from starlette.requests import Request
 
 from obs.security.url_targets import UrlTargetDecision
 
@@ -60,6 +63,7 @@ class _DbStub:
         self._rows = rows or []
         self._one = one
         self.executed: list[tuple] = []
+        self._in_transaction = False
 
     async def fetchone(self, query, params=()):
         return self._one
@@ -69,6 +73,43 @@ class _DbStub:
 
     async def execute_and_commit(self, query, params=()):
         self.executed.append((query, params))
+
+    async def execute(self, query, params=()):
+        self.executed.append((query, params))
+
+    async def commit(self):
+        pass
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._in_transaction
+
+    @asynccontextmanager
+    async def transaction(self):
+        assert not self._in_transaction
+        snapshot = len(self.executed)
+        self._in_transaction = True
+        try:
+            yield
+        except Exception:
+            del self.executed[snapshot:]
+            raise
+        finally:
+            self._in_transaction = False
+
+
+def _request(method: str, path: str) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": method,
+            "path": path,
+            "query_string": b"",
+            "headers": [],
+            "client": ("127.0.0.1", 1),
+            "route": SimpleNamespace(path=path),
+        }
+    )
 
 
 # ===========================================================================
@@ -824,6 +865,74 @@ class TestDataPointRegistryLoadFromDb:
         state = reg._values[dp_id]
         assert state.value == "not-a-time"
 
+    @pytest.mark.asyncio
+    async def test_load_from_db_persisted_value_malformed_json_kept_as_raw_string(self):
+        """A persisted last-value that isn't valid JSON (e.g. corrupted/legacy raw
+        text) must fall back to the raw stored string rather than raising."""
+        from obs.core.registry import DataPointRegistry
+
+        dp_id = uuid.uuid4()
+        dp_rows = _make_db_rows_for_registry(dp_id)
+        last_val_rows = [
+            _row(
+                datapoint_id=str(dp_id),
+                value="not valid json {",
+                unit="°C",
+                ts=datetime.now(UTC).isoformat(),
+            )
+        ]
+
+        class _DbWithMalformedValue(_DbStub):
+            async def fetchall(self, query, params=()):
+                if "datapoint_last_values" in query:
+                    return last_val_rows
+                return dp_rows
+
+        reg = DataPointRegistry.__new__(DataPointRegistry)
+        reg._db = _DbWithMalformedValue(rows=dp_rows)
+        reg._mqtt = AsyncMock()
+        reg._bus = AsyncMock()
+        reg._points = {}
+        reg._values = {}
+        await reg.load_from_db()
+        state = reg._values[dp_id]
+        assert state.value == "not valid json {"
+        assert state.quality == "good"
+
+    @pytest.mark.asyncio
+    async def test_load_from_db_persisted_value_invalid_ts_falls_back_to_now(self):
+        """A persisted last-value row with an unparsable ``ts`` must not blow up
+        startup — it falls back to the current time instead."""
+        from obs.core.registry import DataPointRegistry
+
+        dp_id = uuid.uuid4()
+        dp_rows = _make_db_rows_for_registry(dp_id)
+        last_val_rows = [
+            _row(
+                datapoint_id=str(dp_id),
+                value="22.5",
+                unit="°C",
+                ts="not-a-valid-timestamp",
+            )
+        ]
+
+        class _DbWithBadTs(_DbStub):
+            async def fetchall(self, query, params=()):
+                if "datapoint_last_values" in query:
+                    return last_val_rows
+                return dp_rows
+
+        before = datetime.now(UTC)
+        reg = DataPointRegistry.__new__(DataPointRegistry)
+        reg._db = _DbWithBadTs(rows=dp_rows)
+        reg._mqtt = AsyncMock()
+        reg._bus = AsyncMock()
+        reg._points = {}
+        reg._values = {}
+        await reg.load_from_db()
+        state = reg._values[dp_id]
+        assert state.ts >= before
+
 
 class TestDataPointRegistryCRUD:
     @pytest.mark.asyncio
@@ -887,6 +996,121 @@ class TestDataPointRegistryCRUD:
         assert isinstance(event, DataPointRenamedEvent)
         assert event.old_name == "Old"
         assert event.new_name == "New"
+
+    @pytest.mark.asyncio
+    async def test_update_leaves_live_object_unchanged_when_persistence_fails(self):
+        from obs.core.registry import DataPointRegistry
+        from obs.models.datapoint import DataPoint, DataPointUpdate
+
+        class _FailingDb(_DbStub):
+            async def execute_and_commit(self, query, params=()):
+                raise RuntimeError("simulated disk full")
+
+        db = _FailingDb()
+        reg = DataPointRegistry.__new__(DataPointRegistry)
+        reg._db = db
+        reg._mqtt = AsyncMock()
+        reg._bus = AsyncMock()
+
+        dp = DataPoint(name="Virtual Switch", external_write_enabled=False)
+        reg._points = {dp.id: dp}
+        reg._values = {dp.id: MagicMock()}
+
+        payload = DataPointUpdate(external_write_enabled=True)
+        with pytest.raises(RuntimeError, match="simulated disk full"):
+            await reg.update(dp.id, payload)
+
+        # The live registry object — the same instance WriteRouter reads
+        # directly, with no DB re-check — must not reflect the failed write.
+        assert reg._points[dp.id].external_write_enabled is False
+        assert reg._points[dp.id] is dp
+
+    @pytest.mark.asyncio
+    async def test_update_only_persists_the_changed_columns(self):
+        # A full-row UPDATE built from a stale snapshot could lose a second,
+        # concurrently-committed PATCH to a different field (Codex review):
+        # both requests would snapshot the same pre-update row, so whichever
+        # commits last silently overwrites the first request's already-
+        # persisted column with its own stale value for it. Asserting that a
+        # PATCH's SQL only ever names the columns it actually changes is a
+        # timing-independent proof this can't happen, regardless of how two
+        # concurrent requests interleave.
+        from obs.core.registry import DataPointRegistry
+        from obs.models.datapoint import DataPoint, DataPointUpdate
+
+        db = _DbStub()
+        reg = DataPointRegistry.__new__(DataPointRegistry)
+        reg._db = db
+        reg._mqtt = AsyncMock()
+        reg._bus = AsyncMock()
+
+        dp = DataPoint(name="Old", unit="U0")
+        reg._points = {dp.id: dp}
+        reg._values = {dp.id: MagicMock()}
+
+        await reg.update(dp.id, DataPointUpdate(unit="U1"))
+
+        query, _params = db.executed[-1]
+        assert "unit=?" in query
+        assert "name=?" not in query
+        assert "data_type=?" not in query
+        assert "external_write_enabled=?" not in query
+
+    @pytest.mark.asyncio
+    async def test_update_applies_change_even_when_caller_is_cancelled_after_commit_succeeds(self):
+        # If the caller's own task is cancelled (client disconnect, server
+        # timeout) exactly while awaiting an in-flight DB write that has
+        # already committed, the live registry object must still end up
+        # reflecting it — otherwise WriteRouter keeps reading a stale
+        # external_write_enabled=True after the DB write that was meant to
+        # disable it in fact succeeded (Codex review).
+        from obs.core.registry import DataPointRegistry
+        from obs.models.datapoint import DataPoint, DataPointUpdate
+
+        class _SlowCommitDb(_DbStub):
+            async def execute_and_commit(self, query, params=()):
+                await asyncio.sleep(0.05)
+                self.executed.append((query, params))
+
+        db = _SlowCommitDb()
+        reg = DataPointRegistry.__new__(DataPointRegistry)
+        reg._db = db
+        reg._mqtt = AsyncMock()
+        reg._bus = AsyncMock()
+
+        dp = DataPoint(name="Virtual Switch", external_write_enabled=True)
+        reg._points = {dp.id: dp}
+        reg._values = {dp.id: MagicMock()}
+
+        task = asyncio.create_task(reg.update(dp.id, DataPointUpdate(external_write_enabled=False)))
+        await asyncio.sleep(0.01)  # let update() start and reach the shielded await
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert reg._points[dp.id].external_write_enabled is False
+
+    @pytest.mark.asyncio
+    async def test_update_deletes_last_value_when_persistence_is_disabled(self):
+        from obs.core.registry import DataPointRegistry
+        from obs.models.datapoint import DataPoint, DataPointUpdate
+
+        db = _DbStub()
+        reg = DataPointRegistry.__new__(DataPointRegistry)
+        reg._db = db
+        reg._mqtt = AsyncMock()
+        reg._bus = AsyncMock()
+
+        dp = DataPoint(name="Sensor", persist_value=True)
+        reg._points = {dp.id: dp}
+        reg._values = {dp.id: MagicMock()}
+
+        await reg.update(dp.id, DataPointUpdate(persist_value=False))
+
+        assert reg._points[dp.id].persist_value is False
+        delete_calls = [q for q, _p in db.executed if q.startswith("DELETE FROM datapoint_last_values")]
+        assert len(delete_calls) == 1
 
     @pytest.mark.asyncio
     async def test_update_nonexistent_raises(self):
@@ -1050,8 +1274,7 @@ class TestWriteRouterHandle:
         router._write_to_dest_bindings.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_handle_publishes_value_event(self):
-        from obs.core.event_bus import DataValueEvent
+    async def test_handle_ignores_bindingless_datapoint(self):
         from obs.core.write_router import WriteRouter
 
         dp = SimpleNamespace(name="dp", data_type="FLOAT")
@@ -1065,14 +1288,32 @@ class TestWriteRouterHandle:
 
         dp_id = uuid.uuid4()
         await router.handle(dp_id, "42.0")
+        router._bus.publish.assert_not_awaited()
+        router._write_to_dest_bindings.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_handle_publishes_for_external_write_enabled_bindingless_datapoint(self):
+        from obs.core.event_bus import DataValueEvent
+        from obs.core.write_router import WriteRouter
+
+        dp = SimpleNamespace(name="dp", data_type="FLOAT", external_write_enabled=True)
+        router = WriteRouter.__new__(WriteRouter)
+        router._db = _DbStub()
+        router._registry = SimpleNamespace(get=lambda _: dp)
+        router._bus = SimpleNamespace(publish=AsyncMock())
+        router._last_sent = {}
+        router._last_value = {}
+        router._write_to_dest_bindings = AsyncMock()
+
+        dp_id = uuid.uuid4()
+        await router.handle(dp_id, "42.0")
+        router._write_to_dest_bindings.assert_not_awaited()
         router._bus.publish.assert_awaited_once()
-        event = router._bus.publish.await_args.args[0]
+        (event,), _kwargs = router._bus.publish.call_args
         assert isinstance(event, DataValueEvent)
         assert event.datapoint_id == dp_id
-        assert event.value == pytest.approx(42.0)
-        assert event.quality == "good"
+        assert event.value == 42.0
         assert event.source_adapter == "mqtt_set"
-        router._write_to_dest_bindings.assert_not_awaited()
 
 
 class TestWriteRouterHandleValueEvent:
@@ -1570,7 +1811,7 @@ class TestSystemHealth:
 
         fake_reg = SimpleNamespace(count=lambda: 5)
         monkeypatch.setattr("obs.core.registry.get_registry", lambda: fake_reg)
-        monkeypatch.setattr(adapter_registry, "get_all_instances", lambda: {})
+        monkeypatch.setattr(adapter_registry, "get_all_instances", dict)
 
         result = await sys_api.health()
         assert result.status == "ok"
@@ -1586,7 +1827,7 @@ class TestSystemHealth:
             raise RuntimeError("not initialized")
 
         monkeypatch.setattr("obs.core.registry.get_registry", _raise)
-        monkeypatch.setattr(adapter_registry, "get_all_instances", lambda: {})
+        monkeypatch.setattr(adapter_registry, "get_all_instances", dict)
 
         result = await sys_api.health()
         assert result.status == "ok"
@@ -1650,13 +1891,14 @@ class TestSystemAppSettings:
         monkeypatch.setattr("obs.logic.manager.get_logic_manager", _mock_get_logic_manager, raising=False)
 
         body = sys_api.AppSettingsIn(timezone="Europe/Berlin")
-        result = await sys_api.update_app_settings(body=body, db=db, _user="admin")
+        result = await sys_api.update_app_settings(body=body, request=_request("PUT", "/api/v1/system/settings"), db=db, _user="admin")
         assert result.timezone == "Europe/Berlin"
 
     @pytest.mark.asyncio
     async def test_update_app_settings_invalid_timezone_raises(self):
-        import obs.api.v1.system as sys_api
         from fastapi import HTTPException
+
+        import obs.api.v1.system as sys_api
 
         db = _DbStub()
         body = sys_api.AppSettingsIn(timezone="Invalid/Timezone/XYZ")
@@ -1692,15 +1934,16 @@ class TestSystemNavLinks:
 
         db = _DbStub()
         body = sys_api.NavLinkIn(label="Test", url="http://test.com")
-        result = await sys_api.create_nav_link(body=body, db=db, _admin="admin")
+        result = await sys_api.create_nav_link(body=body, request=_request("POST", "/api/v1/system/nav-links"), db=db, _admin="admin")
         assert result.label == "Test"
         assert result.url == "http://test.com"
         assert len(result.id) > 0
 
     @pytest.mark.asyncio
     async def test_update_nav_link_not_found_raises(self):
-        import obs.api.v1.system as sys_api
         from fastapi import HTTPException
+
+        import obs.api.v1.system as sys_api
 
         db = _DbStub(one=None)
         body = sys_api.NavLinkPatch(label="New")
@@ -1715,14 +1958,21 @@ class TestSystemNavLinks:
         row = _row(id="link-1", label="Old", url="http://old.com", icon="", sort_order=0, open_new_tab=1)
         db = _DbStub(one=row)
         body = sys_api.NavLinkPatch(label="Updated")
-        result = await sys_api.update_nav_link(link_id="link-1", body=body, db=db, _admin="admin")
+        result = await sys_api.update_nav_link(
+            link_id="link-1",
+            body=body,
+            request=_request("PATCH", "/api/v1/system/nav-links/link-1"),
+            db=db,
+            _admin="admin",
+        )
         assert result.label == "Updated"
         assert result.url == "http://old.com"
 
     @pytest.mark.asyncio
     async def test_delete_nav_link_not_found_raises(self):
-        import obs.api.v1.system as sys_api
         from fastapi import HTTPException
+
+        import obs.api.v1.system as sys_api
 
         db = _DbStub(one=None)
         with pytest.raises(HTTPException) as exc_info:
@@ -1735,7 +1985,12 @@ class TestSystemNavLinks:
 
         db = _DbStub(one=_row(id="link-1"))
         # Should not raise
-        await sys_api.delete_nav_link(link_id="link-1", db=db, _admin="admin")
+        await sys_api.delete_nav_link(
+            link_id="link-1",
+            request=_request("DELETE", "/api/v1/system/nav-links/link-1"),
+            db=db,
+            _admin="admin",
+        )
         assert any("DELETE" in q for q, _ in db.executed)
 
 
@@ -1792,14 +2047,16 @@ class TestSystemLogs:
         monkeypatch.setattr("obs.log_buffer.set_log_buffer_level", lambda lvl: called_with.append(lvl))
 
         body = sys_api.LogLevelIn(level="debug")
-        result = await sys_api.set_log_level(body=body, _admin="admin")
+        db = _DbStub()
+        result = await sys_api.set_log_level(body=body, request=_request("PUT", "/api/v1/system/log-level"), _admin="admin", db=db)
         assert result is None
         assert called_with == ["DEBUG"]
 
     @pytest.mark.asyncio
     async def test_set_log_level_invalid_raises(self):
-        import obs.api.v1.system as sys_api
         from fastapi import HTTPException
+
+        import obs.api.v1.system as sys_api
 
         body = sys_api.LogLevelIn(level="SUPERVERBOSE")
         with pytest.raises(HTTPException) as exc_info:
@@ -1832,8 +2089,9 @@ class TestSystemHistorySettings:
 
     @pytest.mark.asyncio
     async def test_update_history_settings_invalid_plugin_raises(self):
-        import obs.api.v1.system as sys_api
         from fastapi import HTTPException
+
+        import obs.api.v1.system as sys_api
 
         db = _DbStub()
         body = sys_api.HistorySettingsIn(plugin="badplugin")
@@ -1846,7 +2104,8 @@ class TestSystemHistorySettings:
         import obs.api.v1.system as sys_api
 
         body = sys_api.HistorySettingsIn(plugin="sqlite")
-        result = await sys_api.test_history_connection(body=body, _admin="admin")
+        db = _DbStub()
+        result = await sys_api.test_history_connection(body=body, request=_request("POST", "/api/v1/system/history/test"), _admin="admin", db=db)
         assert result.ok is True
         assert "SQLite" in result.message
 
@@ -1886,8 +2145,32 @@ class TestSystemHistorySettings:
         import obs.api.v1.system as sys_api
 
         body = sys_api.HistorySettingsIn(plugin="unknownplugin")
-        result = await sys_api.test_history_connection(body=body, _admin="admin")
+        db = _DbStub()
+        result = await sys_api.test_history_connection(body=body, request=_request("POST", "/api/v1/system/history/test"), _admin="admin", db=db)
         assert result.ok is False
+
+    @pytest.mark.asyncio
+    async def test_test_history_connection_logs_and_reports_unexpected_error(self, monkeypatch):
+        """A genuinely unexpected error (not a missing optional dependency, which
+        raises RuntimeError and is handled separately) must be logged via
+        logger.exception and reported back as ok=False with the error message."""
+        import obs.api.v1.system as sys_api
+
+        class _InfluxPlugin:
+            def __init__(self, **kwargs):
+                pass
+
+            async def ping(self):
+                raise ValueError("simulated unexpected ping failure")
+
+        monkeypatch.setattr("obs.history.influxdb_plugin.InfluxDBHistoryPlugin", _InfluxPlugin)
+        db = _DbStub(rows=[])
+        body = sys_api.HistorySettingsIn(plugin="influxdb")
+
+        result = await sys_api.test_history_connection(body=body, db=db, _admin="admin")
+
+        assert result.ok is False
+        assert "simulated unexpected ping failure" in result.message
 
 
 # ===========================================================================

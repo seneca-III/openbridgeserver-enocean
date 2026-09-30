@@ -9,6 +9,8 @@ Instanz-Routen (NEU):
   POST   /api/v1/adapters/instances/{id}/test      test connection (ephemeral)
   POST   /api/v1/adapters/instances/{id}/restart   stop + reconnect
   GET    /api/v1/adapters/instances/{id}/mqtt/browse  MQTT topic browser (scan broker)
+  GET    /api/v1/adapters/instances/{id}/onewire/browse    1-Wire sensor/property browser (scan owserver)
+  PATCH  /api/v1/adapters/instances/{id}/onewire/aliases   persist a ROM-ID → label alias
 
 Typ-Routen (unverändert):
   GET    /api/v1/adapters                          list registered types
@@ -22,18 +24,34 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from pydantic import BaseModel, ValidationError
 
 from obs.adapters import registry as adapter_registry
+from obs.adapters.base import AdapterDelegationCapability
 from obs.adapters.knx.dpt_registry import DPTRegistry
-from obs.api.auth import get_admin_user, get_current_user
-from obs.api.v1.bindings import _json_config, _validate_adapter_binding
+from obs.api.audit import (
+    AuditOutcome,
+    contract_audit,
+    set_contract_audit_details,
+    set_contract_audit_outcome,
+    set_contract_audit_resource_id,
+    set_contract_audit_summary,
+)
+from obs.api.auth import Principal, get_admin_user, get_current_principal, get_current_user
+from obs.api.authz import AuthzAction
+from obs.api.authz_service import authorize_adapter_instance, filter_authorized_datapoints
+from obs.api.v1.application_audit import audit_application_contract, write_application_success
+from obs.api.v1.bindings import _ensure_binding_mutation_scope, _json_config, _validate_adapter_binding
+from obs.api.v1.redaction import REDACTED
 from obs.db.database import Database, get_db
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["adapters"])
 
@@ -120,6 +138,31 @@ class TestResult(BaseModel):
     detail_params: dict = {}
 
 
+def _failed_test_result(request: Request | None, result: TestResult) -> TestResult:
+    if request is not None:
+        set_contract_audit_outcome(request, AuditOutcome.FAILED)
+    return result
+
+
+def _bulk_summary(request: Request | None, *, count: int, payload: Any, error_count: int | None = None) -> None:
+    if request is not None:
+        set_contract_audit_summary(request, resource_count=count, payload=payload)
+        if error_count is not None:
+            set_contract_audit_details(
+                request,
+                {
+                    **request.state.contract_audit_details,
+                    "error_count": error_count,
+                },
+            )
+
+
+def _bulk_mutation_result(request: Request | None, *, count: int, payload: Any, errors: list[str]) -> None:
+    _bulk_summary(request, count=count, payload=payload, error_count=len(errors))
+    if errors and request is not None:
+        set_contract_audit_outcome(request, AuditOutcome.FAILED)
+
+
 class IoBrokerStateOut(BaseModel):
     id: str
     name: str | None = None
@@ -156,6 +199,18 @@ class EnoceanMqttDatapointOut(BaseModel):
     writable: bool = False
     role: str | None = None
     value: Any = None
+
+
+class OneWireSensorOut(BaseModel):
+    rom_id: str
+    family: str
+    properties: list[str]
+    alias: str | None = None
+
+
+class OneWireAliasRequest(BaseModel):
+    rom_id: str
+    label: str
 
 
 class IoBrokerImportRequest(BaseModel):
@@ -228,13 +283,173 @@ async def _enocean_mqtt_adapter_for_instance(instance_id: uuid.UUID, db: Databas
     return dummy, True
 
 
+_MESSAGE_PROVIDER_SECRET_FIELDS = {
+    "pushover": ("api_token",),
+    "telegram": ("bot_token",),
+    "seven.io": ("api_key",),
+}
+_MESSAGE_PROVIDER_TARGET_SECRET_FIELDS = {
+    "pushover": ("user_key",),
+    "telegram": ("chat_id",),
+    "seven.io": ("to",),
+}
+
+
+def _redact_message_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Redact MESSAGE provider credentials and recipient identifiers for API output."""
+    redacted = dict(config)
+    providers = redacted.get("providers")
+    if not isinstance(providers, dict):
+        return redacted
+
+    redacted_providers = dict(providers)
+    redacted["providers"] = redacted_providers
+
+    for provider_name, provider_fields in _MESSAGE_PROVIDER_SECRET_FIELDS.items():
+        provider_config = redacted_providers.get(provider_name)
+        if not isinstance(provider_config, dict):
+            continue
+        provider_redacted = dict(provider_config)
+        redacted_providers[provider_name] = provider_redacted
+        for field in provider_fields:
+            if provider_redacted.get(field):
+                provider_redacted[field] = REDACTED
+
+        targets = provider_redacted.get("targets")
+        if not isinstance(targets, dict):
+            continue
+        targets_redacted = dict(targets)
+        provider_redacted["targets"] = targets_redacted
+        for target_name, target_config in targets.items():
+            if not isinstance(target_config, dict):
+                continue
+            target_redacted = dict(target_config)
+            targets_redacted[target_name] = target_redacted
+            for field in _MESSAGE_PROVIDER_TARGET_SECRET_FIELDS[provider_name]:
+                if target_redacted.get(field):
+                    target_redacted[field] = REDACTED
+
+    return redacted
+
+
+def _message_target_has_redacted_secret(provider_name: str, target_config: dict[str, Any]) -> bool:
+    return any(target_config.get(field) == REDACTED for field in _MESSAGE_PROVIDER_TARGET_SECRET_FIELDS[provider_name])
+
+
+def _message_redacted_secret_paths(config: dict[str, Any]) -> list[str]:
+    providers = config.get("providers")
+    if not isinstance(providers, dict):
+        return []
+
+    paths: list[str] = []
+    for provider_name, provider_fields in _MESSAGE_PROVIDER_SECRET_FIELDS.items():
+        provider_config = providers.get(provider_name)
+        if not isinstance(provider_config, dict):
+            continue
+        for field in provider_fields:
+            if provider_config.get(field) == REDACTED:
+                paths.append(f"providers.{provider_name}.{field}")
+
+        targets = provider_config.get("targets")
+        if not isinstance(targets, dict):
+            continue
+        for target_name, target_config in targets.items():
+            if not isinstance(target_config, dict):
+                continue
+            for field in _MESSAGE_PROVIDER_TARGET_SECRET_FIELDS[provider_name]:
+                if target_config.get(field) == REDACTED:
+                    paths.append(f"providers.{provider_name}.targets.{target_name}.{field}")
+    return paths
+
+
+def _reject_unresolved_redacted_message_config(config: dict[str, Any]) -> None:
+    paths = _message_redacted_secret_paths(config)
+    if paths:
+        raise ValueError("Unresolved redacted MESSAGE secrets: " + ", ".join(paths) + "; please re-enter credentials")
+
+
+def _message_redacted_target_rename_candidates(
+    provider_name: str,
+    stored_targets: dict[str, Any],
+    incoming_targets: dict[str, Any],
+) -> list[dict[str, Any]]:
+    removed_targets = [target for target_name, target in stored_targets.items() if target_name not in incoming_targets and isinstance(target, dict)]
+    added_redacted_targets = [
+        target
+        for target_name, target in incoming_targets.items()
+        if target_name not in stored_targets and isinstance(target, dict) and _message_target_has_redacted_secret(provider_name, target)
+    ]
+    # Only handle single renames: FIFO matching for multiple renames would assign secrets in
+    # stored-dict order, but the GUI appends renamed keys at the end, so the incoming order
+    # reflects the user's edit sequence rather than the stored order — silently swapping secrets.
+    if len(removed_targets) != 1 or len(added_redacted_targets) != 1:
+        return []
+    return removed_targets
+
+
+def _preserve_redacted_message_config_secrets(stored_config: dict[str, Any], incoming_config: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(incoming_config)
+    stored_providers = stored_config.get("providers")
+    incoming_providers = incoming_config.get("providers")
+    if not isinstance(stored_providers, dict) or not isinstance(incoming_providers, dict):
+        return merged
+
+    merged_providers = dict(incoming_providers)
+    merged["providers"] = merged_providers
+
+    for provider_name, provider_fields in _MESSAGE_PROVIDER_SECRET_FIELDS.items():
+        stored_provider = stored_providers.get(provider_name)
+        incoming_provider = incoming_providers.get(provider_name)
+        if not isinstance(stored_provider, dict) or not isinstance(incoming_provider, dict):
+            continue
+
+        merged_provider = dict(incoming_provider)
+        merged_providers[provider_name] = merged_provider
+        for field in provider_fields:
+            if merged_provider.get(field) == REDACTED and field in stored_provider:
+                merged_provider[field] = stored_provider[field]
+
+        stored_targets = stored_provider.get("targets")
+        incoming_targets = incoming_provider.get("targets")
+        if not isinstance(stored_targets, dict) or not isinstance(incoming_targets, dict):
+            continue
+
+        merged_targets = dict(incoming_targets)
+        merged_provider["targets"] = merged_targets
+        removed_targets_queue = _message_redacted_target_rename_candidates(provider_name, stored_targets, incoming_targets)
+        for target_name, incoming_target in incoming_targets.items():
+            stored_target = stored_targets.get(target_name)
+            if not isinstance(stored_target, dict) or not isinstance(incoming_target, dict):
+                if not isinstance(incoming_target, dict) or not _message_target_has_redacted_secret(provider_name, incoming_target):
+                    continue
+                if not removed_targets_queue:
+                    raise ValueError(
+                        f"Unresolvable redacted secret in target '{target_name}' of provider "
+                        f"'{provider_name}': cannot determine mapping — please re-enter credentials"
+                    )
+                stored_target = removed_targets_queue.pop(0)
+            merged_target = dict(incoming_target)
+            merged_targets[target_name] = merged_target
+            for field in _MESSAGE_PROVIDER_TARGET_SECRET_FIELDS[provider_name]:
+                if merged_target.get(field) == REDACTED and field in stored_target:
+                    merged_target[field] = stored_target[field]
+
+    return merged
+
+
+def _redact_instance_config(adapter_type: str, config: dict[str, Any]) -> dict[str, Any]:
+    if adapter_type == "MESSAGE":
+        return _redact_message_config(config)
+    return config
+
+
 def _instance_out(row: Any, instance: Any | None) -> AdapterInstanceOut:
     cls = adapter_registry.get_class(row["adapter_type"])
     return AdapterInstanceOut(
         id=uuid.UUID(row["id"]),
         adapter_type=row["adapter_type"],
         name=row["name"],
-        config=json.loads(row["config"]) if row["config"] else {},
+        config=_redact_instance_config(row["adapter_type"], json.loads(row["config"]) if row["config"] else {}),
         enabled=bool(row["enabled"]),
         registered=cls is not None,
         running=instance is not None,
@@ -247,6 +462,84 @@ def _instance_out(row: Any, instance: Any | None) -> AdapterInstanceOut:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
     )
+
+
+def _principal_from_dependency(user: Principal | str) -> Principal:
+    if isinstance(user, Principal):
+        return user
+    # Compatibility for direct unit calls that still pass the legacy username.
+    return Principal(subject=str(user), type="user", is_admin=str(user) == "admin")
+
+
+async def _filter_readable_datapoint_ids(
+    db: Database,
+    principal: Principal,
+    dp_ids: list[str],
+) -> set[str]:
+    if principal.type == "user" and principal.is_admin:
+        return set(dp_ids)
+    return set(await filter_authorized_datapoints(db, principal, dp_ids, action=AuthzAction.READ))
+
+
+async def _ensure_instance_read(db: Database, principal: Principal, instance_id: str) -> None:
+    if principal.type == "user" and principal.is_admin:
+        return
+    decision = await authorize_adapter_instance(
+        db,
+        principal,
+        instance_id,
+        action=AuthzAction.READ,
+        min_role="guest",
+    )
+    if not decision.allowed:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+
+
+async def _ensure_instance_mutation(
+    db: Database,
+    principal: Principal,
+    instance_id: str,
+    adapter_type: str,
+) -> None:
+    if principal.type == "user" and principal.is_admin:
+        return
+
+    await _ensure_instance_write_grant(db, principal, instance_id)
+    _ensure_adapter_delegates_operation(
+        principal,
+        adapter_type,
+        AdapterDelegationCapability.CONFIGURE_INSTANCE,
+    )
+
+
+def _ensure_adapter_delegates_operation(
+    principal: Principal,
+    adapter_type: str,
+    *capabilities: AdapterDelegationCapability,
+) -> None:
+    """Require every closed, code-declared capability for an adapter operation."""
+    if principal.type == "user" and principal.is_admin:
+        return
+    if (
+        principal.type != "user"
+        or not capabilities
+        or not all(adapter_registry.supports_delegation(adapter_type, capability) for capability in capabilities)
+    ):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Adapter-Operation nicht erlaubt")
+
+
+async def _ensure_instance_write_grant(db: Database, principal: Principal, instance_id: str) -> None:
+    if principal.type == "user" and principal.is_admin:
+        return
+    decision = await authorize_adapter_instance(
+        db,
+        principal,
+        instance_id,
+        action=AuthzAction.WRITE,
+        min_role="operator",
+    )
+    if not decision.allowed:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Adapter-Instanzänderung nicht erlaubt")
 
 
 async def _validate_message_config_preserves_binding_targets(
@@ -276,12 +569,17 @@ async def _validate_message_config_preserves_binding_targets(
 
 @router.get("/instances", response_model=list[AdapterInstanceOut])
 async def list_instances(
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> list[AdapterInstanceOut]:
     rows = await db.fetchall("SELECT * FROM adapter_instances ORDER BY adapter_type, name")
+    principal = _principal_from_dependency(_user)
     result = []
     for row in rows:
+        try:
+            await _ensure_instance_read(db, principal, row["id"])
+        except HTTPException:
+            continue
         instance = adapter_registry.get_instance_by_id(row["id"])
         result.append(_instance_out(row, instance))
     return result
@@ -291,11 +589,13 @@ async def list_instances(
     "/instances",
     response_model=AdapterInstanceOut,
     status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/adapters/instances"))],
 )
 async def create_instance(
     body: AdapterInstanceCreate,
     _user: str = Depends(get_admin_user),
     db: Database = Depends(lambda: get_db()),
+    request: Request = None,
 ) -> AdapterInstanceOut:
     cls = adapter_registry.get_class(body.adapter_type)
     if cls is None:
@@ -303,6 +603,11 @@ async def create_instance(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"Adapter-Typ '{body.adapter_type}' nicht registriert",
         )
+    if body.adapter_type == "MESSAGE":
+        try:
+            _reject_unresolved_redacted_message_config(body.config)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     # Config validieren
     try:
         cls.config_schema(**body.config)
@@ -313,6 +618,8 @@ async def create_instance(
         ) from exc
 
     instance_id = str(uuid.uuid4())
+    if request is not None:
+        set_contract_audit_resource_id(request, instance_id)
     now = datetime.now(UTC).isoformat()
 
     await db.execute_and_commit(
@@ -337,7 +644,8 @@ async def create_instance(
         try:
             await adapter_registry.start_instance(instance_id, get_event_bus(), db)
         except Exception:
-            pass  # Verbindungsfehler → Instanz existiert, aber running=False
+            # Verbindungsfehler → Instanz existiert, aber running=False
+            logger.exception("Start der neu angelegten Adapter-Instanz %s fehlgeschlagen", instance_id)
 
     row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (instance_id,))
     instance = adapter_registry.get_instance_by_id(instance_id)
@@ -347,101 +655,180 @@ async def create_instance(
 @router.get("/instances/{instance_id}", response_model=AdapterInstanceOut)
 async def get_instance(
     instance_id: uuid.UUID,
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> AdapterInstanceOut:
     row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    await _ensure_instance_read(db, _principal_from_dependency(_user), str(instance_id))
     instance = adapter_registry.get_instance_by_id(str(instance_id))
     return _instance_out(row, instance)
 
 
-@router.patch("/instances/{instance_id}", response_model=AdapterInstanceOut)
+# Serializes the read-modify-write of a ONEWIRE instance's config JSON per
+# instance_id, shared between update_instance() and onewire_set_alias(). Without
+# this, an alias save (binding-form sensor scan) racing the general instance
+# settings form's save both read the same pre-update config, and whichever
+# UPDATE commits last silently overwrites the other's change — e.g. the
+# settings form's own (already-fetched, now stale) copy of `aliases` clobbering
+# an alias just persisted by onewire_set_alias(), or two overlapping alias
+# saves each merging in only their own rom_id.
+_ONEWIRE_CONFIG_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+@router.patch(
+    "/instances/{instance_id}",
+    response_model=AdapterInstanceOut,
+    dependencies=[Depends(contract_audit("PATCH", "/api/v1/adapters/instances/{instance_id}"))],
+)
 async def update_instance(
     instance_id: uuid.UUID,
     body: AdapterInstanceUpdate,
-    _user: str = Depends(get_admin_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> AdapterInstanceOut:
-    row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
-    if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    principal = _principal_from_dependency(_user)
+    await _ensure_instance_write_grant(db, principal, str(instance_id))
+    lock = _ONEWIRE_CONFIG_LOCKS.setdefault(str(instance_id), asyncio.Lock())
+    async with lock:
+        row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+        await _ensure_instance_mutation(
+            db,
+            principal,
+            str(instance_id),
+            row["adapter_type"],
+        )
 
-    # Neue Werte bestimmen
-    name_new = body.name if body.name is not None else row["name"]
-    enabled_new = body.enabled if body.enabled is not None else bool(row["enabled"])
-    config_raw = row["config"]
-    if body.config is not None:
-        cls = adapter_registry.get_class(row["adapter_type"])
-        if cls:
-            try:
-                cls.config_schema(**body.config)
-            except Exception as exc:
-                raise HTTPException(
-                    status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    f"Config-Validierungsfehler: {exc}",
-                ) from exc
-        if row["adapter_type"] == "MESSAGE":
-            await _validate_message_config_preserves_binding_targets(str(instance_id), body.config, db)
-        config_raw = json.dumps(body.config)
+        # Neue Werte bestimmen
+        name_new = body.name if body.name is not None else row["name"]
+        enabled_new = body.enabled if body.enabled is not None else bool(row["enabled"])
+        config_raw = row["config"]
+        if body.config is not None:
+            config_new = body.config
+            if row["adapter_type"] == "MESSAGE":
+                stored_config = json.loads(config_raw) if config_raw else {}
+                try:
+                    config_new = _preserve_redacted_message_config_secrets(stored_config, body.config)
+                    _reject_unresolved_redacted_message_config(config_new)
+                except ValueError as exc:
+                    raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+            if row["adapter_type"] == "ONEWIRE":
+                # `aliases` is maintained exclusively by onewire_set_alias() (the
+                # binding-form sensor scan), never by this form — always keep the
+                # currently-persisted value instead of the client's copy (which
+                # may be stale, e.g. an alias was saved elsewhere after this form
+                # was loaded), sharing _ONEWIRE_CONFIG_LOCKS so this can't race a
+                # concurrent onewire_set_alias() either.
+                stored_config = json.loads(config_raw) if config_raw else {}
+                if "aliases" in stored_config:
+                    config_new["aliases"] = stored_config["aliases"]
+                else:
+                    config_new.pop("aliases", None)
+            cls = adapter_registry.get_class(row["adapter_type"])
+            if cls:
+                try:
+                    cls.config_schema(**config_new)
+                except Exception as exc:
+                    raise HTTPException(
+                        status.HTTP_422_UNPROCESSABLE_CONTENT,
+                        f"Config-Validierungsfehler: {exc}",
+                    ) from exc
+            if row["adapter_type"] == "MESSAGE":
+                await _validate_message_config_preserves_binding_targets(str(instance_id), config_new, db)
+            config_raw = json.dumps(config_new)
 
-    now = datetime.now(UTC).isoformat()
-    await db.execute_and_commit(
-        """UPDATE adapter_instances
-           SET name=?, config=?, enabled=?, updated_at=?
-           WHERE id=?""",
-        (name_new, config_raw, int(enabled_new), now, str(instance_id)),
-    )
+        now = datetime.now(UTC).isoformat()
+        await db.execute_and_commit(
+            """UPDATE adapter_instances
+               SET name=?, config=?, enabled=?, updated_at=?
+               WHERE id=?""",
+            (name_new, config_raw, int(enabled_new), now, str(instance_id)),
+        )
 
-    # Hot-reload: Instanz neu starten
-    from obs.core.event_bus import get_event_bus
+        # Hot-reload: Instanz neu starten
+        from obs.core.event_bus import get_event_bus
 
-    if enabled_new:
-        await adapter_registry.restart_instance(str(instance_id), get_event_bus(), db)
-    else:
-        await adapter_registry.stop_instance(str(instance_id))
+        if enabled_new:
+            await adapter_registry.restart_instance(str(instance_id), get_event_bus(), db)
+        else:
+            await adapter_registry.stop_instance(str(instance_id))
 
-    row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
-    instance = adapter_registry.get_instance_by_id(str(instance_id))
+        row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
+        instance = adapter_registry.get_instance_by_id(str(instance_id))
     return _instance_out(row, instance)
 
 
-@router.delete("/instances/{instance_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete(
+    "/instances/{instance_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    dependencies=[Depends(contract_audit("DELETE", "/api/v1/adapters/instances/{instance_id}"))],
+)
 async def delete_instance(
     instance_id: uuid.UUID,
-    _user: str = Depends(get_admin_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> None:
-    row = await db.fetchone("SELECT id FROM adapter_instances WHERE id=?", (str(instance_id),))
+    principal = _principal_from_dependency(_user)
+    await _ensure_instance_write_grant(db, principal, str(instance_id))
+    row = await db.fetchone("SELECT id, adapter_type FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    await _ensure_instance_mutation(
+        db,
+        principal,
+        str(instance_id),
+        row["adapter_type"],
+    )
 
     await adapter_registry.stop_instance(str(instance_id))
     # Bindings werden per DB (ON DELETE CASCADE via Trigger oder manuell) gelöscht
-    await db.execute_and_commit("DELETE FROM adapter_bindings WHERE adapter_instance_id=?", (str(instance_id),))
-    await db.execute_and_commit("DELETE FROM adapter_instances WHERE id=?", (str(instance_id),))
+    async with db.transaction():
+        await db.execute("DELETE FROM adapter_bindings WHERE adapter_instance_id=?", (str(instance_id),))
+        await db.execute(
+            "DELETE FROM authz_node_roles WHERE node_type='adapter_instance' AND node_id=?",
+            (str(instance_id),),
+        )
+        await db.execute("DELETE FROM adapter_instances WHERE id=?", (str(instance_id),))
 
 
-@router.post("/instances/{instance_id}/test", response_model=TestResult)
+@router.post(
+    "/instances/{instance_id}/test",
+    response_model=TestResult,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/adapters/instances/{instance_id}/test"))],
+)
 async def test_instance(
     instance_id: uuid.UUID,
     body: TestRequest | None = None,
-    _user: str = Depends(get_current_user),
+    request: Request = None,
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> TestResult:
     """Verbindungstest mit aktuellem oder gegebenem Config (ephemer, kein Persist)."""
+    principal = _principal_from_dependency(_user)
+    await _ensure_instance_write_grant(db, principal, str(instance_id))
     row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    await _ensure_instance_mutation(
+        db,
+        principal,
+        str(instance_id),
+        row["adapter_type"],
+    )
 
     cls = adapter_registry.get_class(row["adapter_type"])
     if cls is None:
-        return TestResult(
-            success=False,
-            detail=f"Adapter-Typ '{row['adapter_type']}' nicht registriert",
-            detail_code="typeNotRegistered",
-            detail_params={"type": row["adapter_type"]},
+        return _failed_test_result(
+            request,
+            TestResult(
+                success=False,
+                detail=f"Adapter-Typ '{row['adapter_type']}' nicht registriert",
+                detail_code="typeNotRegistered",
+                detail_params={"type": row["adapter_type"]},
+            ),
         )
 
     if body and body.config:
@@ -453,7 +840,11 @@ async def test_instance(
     try:
         cls.config_schema(**config_dict)
     except Exception as exc:
-        return TestResult(success=False, detail=f"Config-Fehler: {exc}", detail_code="configError", detail_params={"error": str(exc)})
+        logger.exception("Adapter config validation failed for instance %s", instance_id)
+        return _failed_test_result(
+            request,
+            TestResult(success=False, detail=f"Config-Fehler: {exc}", detail_code="configError", detail_params={"error": str(exc)}),
+        )
 
     from obs.core.event_bus import EventBus
 
@@ -475,20 +866,33 @@ async def test_instance(
                 detail_code="connectOk",
                 detail_params={"type": row["adapter_type"]},
             )
-        return TestResult(success=False, detail="Verbindungsversuch fehlgeschlagen", detail_code="connectFailed")
+        return _failed_test_result(request, TestResult(success=False, detail="Verbindungsversuch fehlgeschlagen", detail_code="connectFailed"))
     except Exception as exc:
-        return TestResult(success=False, detail=str(exc))
+        logger.exception("Verbindungstest für Instanz %s fehlgeschlagen", instance_id)
+        return _failed_test_result(request, TestResult(success=False, detail=str(exc)))
 
 
-@router.post("/instances/{instance_id}/restart", response_model=AdapterInstanceOut)
+@router.post(
+    "/instances/{instance_id}/restart",
+    response_model=AdapterInstanceOut,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/adapters/instances/{instance_id}/restart"))],
+)
 async def restart_instance_route(
     instance_id: uuid.UUID,
-    _user: str = Depends(get_admin_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> AdapterInstanceOut:
+    principal = _principal_from_dependency(_user)
+    await _ensure_instance_write_grant(db, principal, str(instance_id))
     row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    await _ensure_instance_mutation(
+        db,
+        principal,
+        str(instance_id),
+        row["adapter_type"],
+    )
 
     from obs.core.event_bus import get_event_bus
 
@@ -499,15 +903,23 @@ async def restart_instance_route(
     return _instance_out(row, instance)
 
 
-@router.post("/instances/{source_instance_id}/bindings/migrate", response_model=BindingMigrationResult)
+@router.post(
+    "/instances/{source_instance_id}/bindings/migrate",
+    response_model=BindingMigrationResult,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/adapters/instances/{source_instance_id}/bindings/migrate"))],
+)
 async def migrate_instance_bindings(
     source_instance_id: uuid.UUID,
     body: BindingMigrationRequest,
-    _user: str = Depends(get_admin_user),
+    request: Request = None,
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> BindingMigrationResult:
     source_id = str(source_instance_id)
     target_id = str(body.target_instance_id)
+    principal = _principal_from_dependency(_user)
+    await _ensure_instance_write_grant(db, principal, source_id)
+    await _ensure_instance_write_grant(db, principal, target_id)
     if source_id == target_id:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Quell- und Ziel-Instanz dürfen nicht identisch sein")
 
@@ -518,6 +930,9 @@ async def migrate_instance_bindings(
     target_row = await db.fetchone("SELECT id, adapter_type, config FROM adapter_instances WHERE id=?", (target_id,))
     if target_row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Ziel-Instanz nicht gefunden")
+
+    await _ensure_instance_mutation(db, principal, source_id, source_row["adapter_type"])
+    await _ensure_instance_mutation(db, principal, target_id, target_row["adapter_type"])
 
     if source_row["adapter_type"] != target_row["adapter_type"]:
         raise HTTPException(
@@ -546,6 +961,7 @@ async def migrate_instance_bindings(
         if binding_row["datapoint_id"] in target_datapoint_ids:
             skipped += 1
             continue
+        await _ensure_binding_mutation_scope(db, principal, uuid.UUID(binding_row["datapoint_id"]))
         if target_message_config is not None:
             _validate_adapter_binding(
                 "MESSAGE",
@@ -564,28 +980,39 @@ async def migrate_instance_bindings(
         target_datapoint_ids.add(binding_row["datapoint_id"])
         migrated += 1
 
-    if migrated > 0:
+    if migrated > 0 and not getattr(db, "in_transaction", False):
         await db.commit()
 
     await adapter_registry.reload_instance_bindings(source_id, db)
     await adapter_registry.reload_instance_bindings(target_id, db)
 
-    return BindingMigrationResult(
+    result = BindingMigrationResult(
         source_instance_id=source_instance_id,
         target_instance_id=body.target_instance_id,
         total_source_bindings=total_source_bindings,
         migrated=migrated,
         skipped=skipped,
     )
+    _bulk_summary(
+        request,
+        count=migrated,
+        payload={"source_instance_id": source_id, "target_instance_id": target_id},
+    )
+    return result
 
 
 @router.get("/instances/{instance_id}/bindings", response_model=list[InstanceBindingEntry])
 async def list_instance_bindings(
     instance_id: uuid.UUID,
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> list[InstanceBindingEntry]:
     """Alle Bindings einer Adapter-Instanz, angereichert mit Datenpunkt-Namen."""
+    instance_row = await db.fetchone("SELECT id FROM adapter_instances WHERE id=?", (str(instance_id),))
+    if instance_row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    principal = _principal_from_dependency(_user)
+    await _ensure_instance_read(db, principal, str(instance_id))
     rows = await db.fetchall(
         """SELECT ab.id, ab.datapoint_id, dp.name AS dp_name, ab.enabled, ab.config
            FROM adapter_bindings ab
@@ -594,6 +1021,7 @@ async def list_instance_bindings(
            ORDER BY dp.name, ab.created_at""",
         (str(instance_id),),
     )
+    allowed_dp_ids = await _filter_readable_datapoint_ids(db, principal, [row["datapoint_id"] for row in rows])
     return [
         InstanceBindingEntry(
             binding_id=uuid.UUID(row["id"]),
@@ -603,6 +1031,7 @@ async def list_instance_bindings(
             config=json.loads(row["config"]) if row["config"] else {},
         )
         for row in rows
+        if row["datapoint_id"] in allowed_dp_ids
     ]
 
 
@@ -615,7 +1044,7 @@ class HolidayEntry(BaseModel):
 async def list_instance_holidays(
     instance_id: uuid.UUID,
     year: int = Query(default=0, description="Jahr (0 = aktuelles Jahr)"),
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> list[HolidayEntry]:
     """Alle Feiertage einer Zeitschaltuhr-Instanz für das angegebene Jahr (Library + benutzerdefiniert)."""
@@ -624,10 +1053,11 @@ async def list_instance_holidays(
     row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    await _ensure_instance_read(db, _principal_from_dependency(_user), str(instance_id))
     if row["adapter_type"] != "ZEITSCHALTUHR":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für Zeitschaltuhr-Instanzen verfügbar")
 
-    target_year = year if year > 0 else _dt.now().year
+    target_year = year if year > 0 else _dt.now().year  # noqa: DTZ005 -- default "current year" convenience only; explicit `year` always overrides
 
     instance = adapter_registry.get_instance_by_id(str(instance_id))
     if instance is not None and hasattr(instance, "get_holidays_for_year"):
@@ -663,13 +1093,14 @@ def _build_tls_context(cfg: Any) -> Any:
 async def mqtt_browse_topics(
     instance_id: uuid.UUID,
     timeout: int = 5,
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> list[str]:
     """Subscribe to # for up to `timeout` seconds (max 10) and return observed topics."""
     row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    await _ensure_instance_read(db, _principal_from_dependency(_user), str(instance_id))
     if row["adapter_type"] != "MQTT":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für MQTT-Instanzen verfügbar")
 
@@ -712,7 +1143,7 @@ async def mqtt_browse_topics(
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             f"MQTT-Verbindung fehlgeschlagen: {exc}",
-        )
+        ) from exc
 
     return sorted(topics)
 
@@ -769,13 +1200,14 @@ async def mqtt_sample_payload(
     instance_id: uuid.UUID,
     topic: str,
     timeout: int = 5,
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> dict:
     """Subscribe to a specific topic and return the first received payload (useful for retained messages)."""
     row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    await _ensure_instance_read(db, _principal_from_dependency(_user), str(instance_id))
     if row["adapter_type"] != "MQTT":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für MQTT-Instanzen verfügbar")
 
@@ -820,7 +1252,7 @@ async def mqtt_sample_payload(
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             f"MQTT-Verbindung fehlgeschlagen: {exc}",
-        )
+        ) from exc
 
     raise HTTPException(
         status.HTTP_404_NOT_FOUND,
@@ -833,13 +1265,14 @@ async def iobroker_browse_states(
     instance_id: uuid.UUID,
     q: str = Query("", max_length=200),
     limit: int = Query(50, ge=1, le=100),
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> list[IoBrokerStateOut]:
     """Durchsuchbare ioBroker-State-Liste für Binding-Auswahl."""
     row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    await _ensure_instance_read(db, _principal_from_dependency(_user), str(instance_id))
     if row["adapter_type"] != "IOBROKER":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für IOBROKER-Instanzen verfügbar")
 
@@ -856,6 +1289,109 @@ async def iobroker_browse_states(
             status.HTTP_503_SERVICE_UNAVAILABLE,
             f"ioBroker-State-Suche fehlgeschlagen: {exc}",
         ) from exc
+
+
+@router.get("/instances/{instance_id}/onewire/browse", response_model=list[OneWireSensorOut])
+async def onewire_browse_sensors(
+    instance_id: uuid.UUID,
+    _user: str = Depends(get_current_user),
+    db: Database = Depends(lambda: get_db()),
+) -> list[OneWireSensorOut]:
+    """Live-Scan des owserver-Gerätebaums für die Binding-Sensor/Property-Auswahl (issue #6)."""
+    row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    if row["adapter_type"] != "ONEWIRE":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für ONEWIRE-Instanzen verfügbar")
+
+    instance = adapter_registry.get_instance_by_id(str(instance_id))
+    if instance is None:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "1-Wire-Instanz ist nicht verbunden")
+    if not hasattr(instance, "browse_sensors"):
+        raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "1-Wire-Sensor-Browser nicht verfügbar")
+    if not getattr(instance, "has_proxy", instance.connected):
+        # No proxy was ever obtained (e.g. owserver was unreachable at startup,
+        # or pyownet isn't installed) — browse_sensors() would otherwise just
+        # return [], which looks identical to "connected, zero devices" instead
+        # of surfacing the actual connectivity problem.
+        #
+        # Deliberately not `instance.connected`: that flag can go stale (e.g. a
+        # DEST-only binding's write failed and there's no poll loop to notice
+        # owserver coming back since), which would permanently 503 an instance
+        # that could otherwise scan successfully right now. `has_proxy` only
+        # reflects whether connect() ever produced a live proxy object; a
+        # scan attempt with a stale/broken proxy still fails via the except
+        # block below.
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "1-Wire-Instanz ist nicht verbunden")
+
+    try:
+        return [OneWireSensorOut(**item) for item in await instance.browse_sensors()]
+    except Exception as exc:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"1-Wire-Sensor-Scan fehlgeschlagen: {exc}",
+        ) from exc
+
+
+@router.patch("/instances/{instance_id}/onewire/aliases", response_model=OneWireAliasRequest)
+@audit_application_contract(
+    "PATCH",
+    "/api/v1/adapters/instances/{instance_id}/onewire/aliases",
+    principal_param="_user",
+    resource_param="instance_id",
+)
+async def onewire_set_alias(
+    instance_id: uuid.UUID,
+    body: OneWireAliasRequest,
+    request: Request = None,  # type: ignore[assignment]
+    _user: str = Depends(get_admin_user),
+    db: Database = Depends(lambda: get_db()),
+) -> OneWireAliasRequest:
+    """Persistiert einen ROM-ID → Klartext-Label Alias, gepflegt aus der Binding-Scan-UI (issue #6)."""
+    lock = _ONEWIRE_CONFIG_LOCKS.setdefault(str(instance_id), asyncio.Lock())
+    async with lock:
+        row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
+        if row is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+        if row["adapter_type"] != "ONEWIRE":
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für ONEWIRE-Instanzen verfügbar")
+
+        config = json.loads(row["config"]) if row["config"] else {}
+        aliases = dict(config.get("aliases") or {})
+        aliases[body.rom_id] = body.label
+        config["aliases"] = aliases
+
+        cls = adapter_registry.get_class(row["adapter_type"])
+        if cls:
+            try:
+                cls.config_schema(**config)
+            except Exception as exc:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    f"Config-Validierungsfehler: {exc}",
+                ) from exc
+
+        now = datetime.now(UTC).isoformat()
+        await db.execute_and_commit(
+            "UPDATE adapter_instances SET config=?, updated_at=? WHERE id=?",
+            (json.dumps(config), now, str(instance_id)),
+        )
+
+        from obs.core.event_bus import get_event_bus
+
+        await adapter_registry.restart_instance(str(instance_id), get_event_bus(), db)
+
+    if isinstance(db, Database):
+        await write_application_success(
+            db,
+            request,
+            _user,
+            "PATCH",
+            "/api/v1/adapters/instances/{instance_id}/onewire/aliases",
+            resource_id=str(instance_id),
+            commit=True,
+        )
+    return body
 
 
 def _iobroker_obs_type(state_type: str | None) -> tuple[str, str | None]:
@@ -927,7 +1463,7 @@ async def _iobroker_candidates(
             cfg = json.loads(row["config"] or "{}")
             if cfg.get("state_id"):
                 existing_states.add(str(cfg["state_id"]))
-        except Exception:
+        except (json.JSONDecodeError, AttributeError):
             pass
 
     result: list[IoBrokerImportItem] = []
@@ -949,36 +1485,58 @@ async def _iobroker_candidates(
     return result
 
 
+async def _ensure_iobroker_import_authority(
+    db: Database,
+    principal: Principal,
+    instance_id: str,
+) -> None:
+    await _ensure_instance_write_grant(db, principal, instance_id)
+    row = await db.fetchone("SELECT adapter_type FROM adapter_instances WHERE id=?", (instance_id,))
+    if row is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    if row["adapter_type"] != "IOBROKER":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für IOBROKER-Instanzen verfügbar")
+    _ensure_adapter_delegates_operation(
+        principal,
+        row["adapter_type"],
+        AdapterDelegationCapability.CREATE_DATAPOINT,
+        AdapterDelegationCapability.LINK_BINDING,
+    )
+
+
 @router.post(
     "/instances/{instance_id}/iobroker/import-preview",
     response_model=IoBrokerImportResult,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/adapters/instances/{instance_id}/iobroker/import-preview"))],
 )
 async def iobroker_import_preview(
     instance_id: uuid.UUID,
     body: IoBrokerImportRequest,
-    _user: str = Depends(get_current_user),
+    request: Request = None,
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> IoBrokerImportResult:
-    row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
-    if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
-    if row["adapter_type"] != "IOBROKER":
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für IOBROKER-Instanzen verfügbar")
-    return IoBrokerImportResult(preview=await _iobroker_candidates(str(instance_id), body, db))
+    principal = _principal_from_dependency(_user)
+    await _ensure_iobroker_import_authority(db, principal, str(instance_id))
+    result = IoBrokerImportResult(preview=await _iobroker_candidates(str(instance_id), body, db))
+    _bulk_summary(request, count=len(result.preview), payload=body.model_dump())
+    return result
 
 
-@router.post("/instances/{instance_id}/iobroker/import", response_model=IoBrokerImportResult)
+@router.post(
+    "/instances/{instance_id}/iobroker/import",
+    response_model=IoBrokerImportResult,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/adapters/instances/{instance_id}/iobroker/import"))],
+)
 async def iobroker_import_states(
     instance_id: uuid.UUID,
     body: IoBrokerImportRequest,
-    _user: str = Depends(get_admin_user),
+    request: Request = None,
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> IoBrokerImportResult:
-    row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
-    if row is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
-    if row["adapter_type"] != "IOBROKER":
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für IOBROKER-Instanzen verfügbar")
+    principal = _principal_from_dependency(_user)
+    await _ensure_iobroker_import_authority(db, principal, str(instance_id))
 
     from obs.api.v1.bindings import create_binding
     from obs.core.registry import get_registry
@@ -1006,6 +1564,13 @@ async def iobroker_import_states(
                 ),
             )
             result.created_datapoints += 1
+            if not principal.is_admin:
+                await db.execute_and_commit(
+                    """INSERT INTO authz_node_roles
+                       (principal_type, principal_id, node_type, node_id, role, effect)
+                       VALUES ('user', ?, 'datapoint', ?, 'operator', 'allow')""",
+                    (principal.subject, str(dp.id)),
+                )
             config: dict[str, Any] = {"state_id": item.state_id}
             if source_type:
                 config["source_data_type"] = source_type
@@ -1017,12 +1582,19 @@ async def iobroker_import_states(
                     config=config,
                     enabled=True,
                 ),
-                _user,
+                principal,
                 db,
             )
             result.created_bindings += 1
         except Exception as exc:
+            logger.exception("ioBroker-Import fehlgeschlagen für State %s", item.state_id)
             result.errors.append(f"{item.state_id}: {exc}")
+    _bulk_mutation_result(
+        request,
+        count=result.created_datapoints + result.created_bindings + result.skipped_existing,
+        payload=body.model_dump(),
+        errors=result.errors,
+    )
     return result
 
 
@@ -1041,16 +1613,18 @@ class AnwesenheitHealthResult(BaseModel):
 @router.get("/instances/{instance_id}/anwesenheit/health", response_model=AnwesenheitHealthResult)
 async def anwesenheit_health(
     instance_id: uuid.UUID,
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> AnwesenheitHealthResult:
     """Check whether history data is available for the configured offset window."""
-    from datetime import timedelta, timezone
     from datetime import datetime as _dt
+    from datetime import timedelta
 
     row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    principal = _principal_from_dependency(_user)
+    await _ensure_instance_read(db, principal, str(instance_id))
     if row["adapter_type"] != "ANWESENHEITSSIMULATION":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für ANWESENHEITSSIMULATION-Instanzen verfügbar")
 
@@ -1061,7 +1635,7 @@ async def anwesenheit_health(
 
     try:
         cfg = AnwesenheitssimulationConfig(**config_dict)
-    except Exception as exc:
+    except (ValidationError, TypeError) as exc:
         return AnwesenheitHealthResult(healthy=False, message=f"Config-Fehler: {exc}")
 
     try:
@@ -1077,6 +1651,8 @@ async def anwesenheit_health(
         "SELECT id, datapoint_id FROM adapter_bindings WHERE adapter_instance_id=? AND direction='SOURCE' AND enabled=1",
         (str(instance_id),),
     )
+    allowed_dp_ids = await _filter_readable_datapoint_ids(db, principal, [row["datapoint_id"] for row in binding_rows])
+    binding_rows = [row for row in binding_rows if row["datapoint_id"] in allowed_dp_ids]
     total = len(binding_rows)
     if total == 0:
         return AnwesenheitHealthResult(
@@ -1086,7 +1662,7 @@ async def anwesenheit_health(
             bindings_with_data=0,
         )
 
-    now = _dt.now(tz=timezone.utc)
+    now = _dt.now(tz=UTC)
     delta = timedelta(days=cfg.offset_days)
     hist_from = now - delta - timedelta(hours=12)
     hist_to = now - delta + timedelta(hours=12)
@@ -1099,7 +1675,7 @@ async def anwesenheit_health(
             if records:
                 with_data += 1
         except Exception:
-            pass
+            logger.exception("Anwesenheit-Health-Check: Historienabfrage für Binding %s fehlgeschlagen", b_row["id"])
 
     healthy = with_data > 0
     if healthy:
@@ -1146,13 +1722,15 @@ class AnwesenheitSyncResult(BaseModel):
 )
 async def anwesenheit_list_datapoints(
     instance_id: uuid.UUID,
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> list[AnwesenheitDatapointEntry]:
     """List all Boolean/Integer DataPoints with their binding status for this instance."""
     row = await db.fetchone("SELECT adapter_type FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    principal = _principal_from_dependency(_user)
+    await _ensure_instance_read(db, principal, str(instance_id))
     if row["adapter_type"] != "ANWESENHEITSSIMULATION":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für ANWESENHEIT-Instanzen verfügbar")
 
@@ -1169,10 +1747,14 @@ async def anwesenheit_list_datapoints(
     bound_map: dict[str, str] = {r["datapoint_id"]: r["id"] for r in binding_rows}
 
     result: list[AnwesenheitDatapointEntry] = []
+    candidate_ids = [str(dp.id) for dp in all_dps if dp.data_type in ("BOOLEAN", "INTEGER")]
+    allowed_dp_ids = await _filter_readable_datapoint_ids(db, principal, candidate_ids)
     for dp in sorted(all_dps, key=lambda d: d.name.lower()):
         if dp.data_type not in ("BOOLEAN", "INTEGER"):
             continue
         dp_id_str = str(dp.id)
+        if dp_id_str not in allowed_dp_ids:
+            continue
         result.append(
             AnwesenheitDatapointEntry(
                 id=dp_id_str,
@@ -1188,19 +1770,28 @@ async def anwesenheit_list_datapoints(
 @router.post(
     "/instances/{instance_id}/anwesenheit/sync-bindings",
     response_model=AnwesenheitSyncResult,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/adapters/instances/{instance_id}/anwesenheit/sync-bindings"))],
 )
 async def anwesenheit_sync_bindings(
     instance_id: uuid.UUID,
     body: AnwesenheitSyncRequest,
-    _user: str = Depends(get_admin_user),
+    request: Request = None,
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> AnwesenheitSyncResult:
     """Create missing bindings for selected DataPoints and remove bindings for deselected ones."""
+    principal = _principal_from_dependency(_user)
+    await _ensure_instance_write_grant(db, principal, str(instance_id))
     row = await db.fetchone("SELECT adapter_type FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
     if row["adapter_type"] != "ANWESENHEITSSIMULATION":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für ANWESENHEIT-Instanzen verfügbar")
+    _ensure_adapter_delegates_operation(
+        principal,
+        row["adapter_type"],
+        AdapterDelegationCapability.LINK_BINDING,
+    )
 
     from obs.api.v1.bindings import create_binding, delete_binding
     from obs.models.binding import AdapterBindingCreate
@@ -1229,11 +1820,12 @@ async def anwesenheit_sync_bindings(
                     config={},
                     enabled=True,
                 ),
-                _user,
+                principal,
                 db,
             )
             result.created += 1
         except Exception as exc:
+            logger.exception("Anwesenheit-Sync: Anlegen der Bindung für DataPoint %s fehlgeschlagen", dp_id_str)
             result.errors.append(f"{dp_id_str}: {exc}")
 
     # Remove bindings for deselected DataPoints
@@ -1241,9 +1833,10 @@ async def anwesenheit_sync_bindings(
         try:
             binding_uuid = uuid.UUID(current[dp_id_str])
             dp_uuid = uuid.UUID(dp_id_str)
-            await delete_binding(dp_uuid, binding_uuid, _user, db)
+            await delete_binding(dp_uuid, binding_uuid, principal, db)
             result.removed += 1
         except Exception as exc:
+            logger.exception("Anwesenheit-Sync: Entfernen der Bindung für DataPoint %s fehlgeschlagen", dp_id_str)
             result.errors.append(f"{dp_id_str}: {exc}")
 
     # Reload adapter bindings if the instance is running
@@ -1252,8 +1845,15 @@ async def anwesenheit_sync_bindings(
         if inst is not None:
             await adapter_registry.reload_instance_bindings(instance_id, db)
     except Exception:
-        pass  # non-critical — bindings take effect on next restart
+        # non-critical — bindings take effect on next restart
+        logger.exception("Anwesenheit-Sync: Reload der Bindings für Instanz %s fehlgeschlagen", instance_id)
 
+    _bulk_mutation_result(
+        request,
+        count=result.created + result.removed,
+        payload=sorted(body.datapoint_ids),
+        errors=result.errors,
+    )
     return result
 
 
@@ -1277,7 +1877,7 @@ async def snmp_walk(
     timeout: float = Query(default=5.0, ge=0.5, le=30.0, description="Timeout pro Request (s)"),
     max_results: int = Query(default=50, ge=1, le=500, description="Einträge pro Seite"),
     start_oid: str | None = Query(default=None, description="Cursor für Paginierung (letzter OID der Vorseite)"),
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> list[SnmpWalkEntry]:
     """SNMP-Walk über einen OID-Teilbaum — nützlich für OID-Discovery beim Binding-Anlegen.
@@ -1287,14 +1887,16 @@ async def snmp_walk(
     row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    await _ensure_instance_read(db, _principal_from_dependency(_user), str(instance_id))
     if row["adapter_type"] != "SNMP":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für SNMP-Instanzen verfügbar")
 
     instance = adapter_registry.get_instance_by_id(str(instance_id))
     if instance is None or not instance.connected:
+        import json as _json
+
         from obs.adapters.snmp.adapter import SnmpAdapter
         from obs.core.event_bus import EventBus
-        import json as _json
 
         raw_config = row["config"] or "{}"
         config_dict = _json.loads(raw_config) if isinstance(raw_config, str) else raw_config
@@ -1384,23 +1986,31 @@ async def get_binding_schema(
     return schema
 
 
-@router.post("/{adapter_type}/test", response_model=TestResult)
+@router.post(
+    "/{adapter_type}/test",
+    response_model=TestResult,
+    dependencies=[Depends(contract_audit("POST", "/api/v1/adapters/{adapter_type}/test"))],
+)
 async def test_adapter(
     adapter_type: str,
     body: TestRequest,
-    _user: str = Depends(get_current_user),
+    request: Request = None,
+    _user: str = Depends(get_admin_user),
 ) -> TestResult:
     cls = adapter_registry.get_class(adapter_type)
     if cls is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Adapter '{adapter_type}' nicht registriert")
     try:
         cls.config_schema(**body.config)
-    except Exception as exc:
-        return TestResult(
-            success=False,
-            detail=f"Config-Validierungsfehler: {exc}",
-            detail_code="configValidationError",
-            detail_params={"error": str(exc)},
+    except ValidationError as exc:
+        return _failed_test_result(
+            request,
+            TestResult(
+                success=False,
+                detail=f"Config-Validierungsfehler: {exc}",
+                detail_code="configValidationError",
+                detail_params={"error": str(exc)},
+            ),
         )
 
     from obs.core.event_bus import EventBus
@@ -1423,12 +2033,17 @@ async def test_adapter(
                 detail_code="connectOk",
                 detail_params={"type": adapter_type},
             )
-        return TestResult(success=False, detail="Verbindungsversuch fehlgeschlagen", detail_code="connectFailed")
+        return _failed_test_result(request, TestResult(success=False, detail="Verbindungsversuch fehlgeschlagen", detail_code="connectFailed"))
     except Exception as exc:
-        return TestResult(success=False, detail=str(exc))
+        logger.exception("Verbindungstest für Adapter-Typ %s fehlgeschlagen", adapter_type)
+        return _failed_test_result(request, TestResult(success=False, detail=str(exc)))
 
 
-@router.patch("/{adapter_type}/config", response_model=AdapterConfigOut)
+@router.patch(
+    "/{adapter_type}/config",
+    response_model=AdapterConfigOut,
+    dependencies=[Depends(contract_audit("PATCH", "/api/v1/adapters/{adapter_type}/config"))],
+)
 async def update_adapter_config(
     adapter_type: str,
     body: ConfigPatch,
@@ -1438,8 +2053,17 @@ async def update_adapter_config(
     cls = adapter_registry.get_class(adapter_type)
     if cls is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"Adapter '{adapter_type}' nicht registriert")
+    config_new = body.config
+    if adapter_type == "MESSAGE":
+        row = await db.fetchone("SELECT * FROM adapter_configs WHERE adapter_type=?", (adapter_type,))
+        stored_config = json.loads(row["config"]) if row is not None and row["config"] else {}
+        try:
+            config_new = _preserve_redacted_message_config_secrets(stored_config, body.config)
+            _reject_unresolved_redacted_message_config(config_new)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     try:
-        cls.config_schema(**body.config)
+        cls.config_schema(**config_new)
     except Exception as exc:
         raise HTTPException(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -1452,11 +2076,11 @@ async def update_adapter_config(
            VALUES (?,?,?,?)
            ON CONFLICT(adapter_type) DO UPDATE
            SET config=excluded.config, enabled=excluded.enabled, updated_at=excluded.updated_at""",
-        (adapter_type, json.dumps(body.config), int(body.enabled), now),
+        (adapter_type, json.dumps(config_new), int(body.enabled), now),
     )
     return AdapterConfigOut(
         adapter_type=adapter_type,
-        config=body.config,
+        config=_redact_instance_config(adapter_type, config_new),
         enabled=body.enabled,
         updated_at=now,
     )
@@ -1473,7 +2097,7 @@ async def get_adapter_config(
         return AdapterConfigOut(adapter_type=adapter_type, config={}, enabled=True, updated_at=None)
     return AdapterConfigOut(
         adapter_type=adapter_type,
-        config=json.loads(row["config"]),
+        config=_redact_instance_config(adapter_type, json.loads(row["config"])),
         enabled=bool(row["enabled"]),
         updated_at=row["updated_at"],
     )

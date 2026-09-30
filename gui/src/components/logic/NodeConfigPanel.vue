@@ -1,28 +1,64 @@
 <template>
-  <div v-if="node" class="h-full flex flex-col bg-surface-800 border-l border-slate-200 dark:border-slate-700/60 w-72">
+  <div v-if="node" class="h-full flex flex-col bg-surface-800 border-l border-slate-200 dark:border-slate-700/60 relative flex-shrink-0" :style="{ width: panelWidth + 'px' }">
+    <div
+      class="absolute top-0 left-0 h-full w-1.5 -translate-x-1/2 cursor-ew-resize z-10 hover:bg-teal-500/40"
+      :class="{ 'bg-teal-500/40': isResizingPanel }"
+      @pointerdown="startPanelResize"
+      :title="$t('logic.nodeConfig.resizeHandle')"
+    />
 
-    <!-- Header -->
-    <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-700/60 flex items-center justify-between">
-      <h3 class="text-sm font-semibold text-slate-700 dark:text-slate-200">{{ $te('logic.nodeTypes.' + node?.type) ? $t('logic.nodeTypes.' + node?.type) : (nodeDef?.label ?? node?.type) }}</h3>
-      <button @click="$emit('close')" class="btn-icon text-slate-500">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-        </svg>
+    <!-- Header — the user-defined block name is the heading and stays editable
+         here (and therefore in the debug values tab, issue #1157); the block
+         type and the generated node id follow as secondary information. -->
+    <div class="px-4 py-3 border-b border-slate-200 dark:border-slate-700/60 flex items-start justify-between gap-2">
+      <div class="min-w-0 flex-1">
+        <input
+          v-model="localData.label"
+          type="text"
+          maxlength="80"
+          class="w-full bg-transparent border-0 border-b border-transparent hover:border-slate-300 dark:hover:border-slate-600 focus:border-teal-500 focus:outline-none px-0 py-0.5 text-sm font-semibold text-slate-700 dark:text-slate-200 placeholder:font-normal placeholder:text-slate-400"
+          :placeholder="defaultNodeTitle"
+          :aria-label="$t('logic.blockName.label')"
+          :title="$t('logic.blockName.panelHint')"
+          data-testid="node-label-input"
+          @change="onNodeLabelChange"
+          @keydown.enter.prevent="onNodeLabelChange"
+        />
+        <p class="mt-0.5 text-[10px] text-slate-500 truncate" :title="node.id" data-testid="node-identity">
+          {{ $t('logic.blockName.typeAndId', { type: defaultNodeTitle, id: node.id }) }}
+        </p>
+      </div>
+      <div class="flex items-center gap-1 shrink-0">
+        <button @click="$emit('close')" class="btn-icon text-slate-500">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+        <HelpButton help-id="logic-node-config" />
+      </div>
+    </div>
+
+    <!-- ── Tab bar — the block's own setting tabs plus, while debug mode is
+             active, the debug values of that block (issue #1128) ────────── -->
+    <div v-if="panelTabs.length > 1" class="flex border-b border-slate-200 dark:border-slate-700/60" data-testid="node-panel-tabs">
+      <button v-for="tab in panelTabs" :key="tab.id"
+        :data-testid="'node-panel-tab-' + tab.id"
+        @click="selectPanelTab(tab)"
+        :title="tab.label"
+        :class="['tab-btn', isPanelTabActive(tab) && 'tab-btn--active', tab.debug && 'tab-btn--debug']">
+        <span class="tab-btn__label">{{ tab.label }}</span>
+        <span v-if="tab.dot" class="tab-dot">•</span>
       </button>
     </div>
 
-    <!-- ── DataPoint nodes: tab UI ────────────────────────────────────── -->
-    <template v-if="isDatapointNode">
+    <!-- Block settings — hidden while the debug tab is shown. Wrapped in a
+         render-only template element so the existing per-type layout keeps its
+         own flex child of the panel root; edits in progress live in script
+         state and are unaffected by the switch. -->
+    <template v-if="!debugMode || panelTab === 'settings'">
 
-      <!-- Tab bar -->
-      <div class="flex border-b border-slate-200 dark:border-slate-700/60">
-        <button v-for="tab in tabs" :key="tab.id"
-          @click="activeTab = tab.id"
-          :class="['tab-btn', activeTab === tab.id && 'tab-btn--active']">
-          {{ tab.label }}
-          <span v-if="tab.dot" class="tab-dot">•</span>
-        </button>
-      </div>
+    <!-- ── DataPoint nodes: one pane per setting tab of the bar above ─── -->
+    <template v-if="isDatapointNode">
 
       <div class="flex-1 overflow-y-auto">
 
@@ -31,7 +67,7 @@
           <p class="text-xs text-slate-500 mb-3 shrink-0">{{ nodeDescription(nodeDef) }}</p>
           <div class="flex flex-col flex-1 min-h-0 gap-1">
             <label class="label shrink-0">{{ $t('logic.ports.object') }}</label>
-            <input v-model="dpSearch" type="text" class="input text-sm shrink-0" :placeholder="$t('logic.nodeConfig.connection.searchPlaceholder')" @input="searchDps" />
+            <input v-model="dpSearch" type="text" class="input text-sm shrink-0" :placeholder="$t('logic.nodeConfig.connection.searchPlaceholder')" data-testid="dp-search" @input="searchDps" />
             <div v-if="dpResults.length"
               class="mt-1 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-lg overflow-hidden flex-1 min-h-0 overflow-y-auto">
               <button v-for="dp in dpResults" :key="dp.id"
@@ -282,6 +318,47 @@
       </div>
     </template>
 
+    <!-- ── value_sequence: GUI-first step editor ─────────────────────── -->
+    <template v-else-if="isValueSequenceNode">
+      <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+        <p class="text-xs text-slate-500">{{ nodeDescription(nodeDef) }}</p>
+        <div class="form-group">
+          <label class="label">{{ $t('logic.nodeConfig.value_sequence.run_mode') }}</label>
+          <select v-model="localData.run_mode" class="input text-sm" @change="emitUpdate">
+            <option value="once">{{ $t('logic.nodeConfig.value_sequence.modes.once') }}</option>
+            <option value="repeat_count">{{ $t('logic.nodeConfig.value_sequence.modes.repeat_count') }}</option>
+            <option value="while_condition">{{ $t('logic.nodeConfig.value_sequence.modes.while_condition') }}</option>
+          </select>
+        </div>
+        <div v-if="localData.run_mode === 'repeat_count'" class="form-group">
+          <label class="label">{{ $t('logic.nodeConfig.value_sequence.repeat_count') }}</label>
+          <input v-model.number="localData.repeat_count" type="number" min="1" class="input text-sm" @change="emitUpdate" />
+        </div>
+        <div class="form-group">
+          <label class="label">{{ $t('logic.nodeConfig.value_sequence.restart_policy') }}</label>
+          <select v-model="localData.restart_policy" class="input text-sm" @change="emitUpdate">
+            <option value="ignore">{{ $t('logic.nodeConfig.value_sequence.policies.ignore') }}</option>
+            <option value="restart">{{ $t('logic.nodeConfig.value_sequence.policies.restart') }}</option>
+            <option value="queue">{{ $t('logic.nodeConfig.value_sequence.policies.queue') }}</option>
+          </select>
+        </div>
+        <label class="flex gap-2 text-xs text-slate-600 dark:text-slate-300"><input v-model="localData.cancel_when_condition_false" type="checkbox" @change="emitUpdate" />{{ $t('logic.nodeConfig.value_sequence.cancel_when_condition_false') }}</label>
+        <div class="flex gap-2">
+          <button type="button" class="btn-secondary btn-sm" data-testid="sequence-add" @click="addSequenceStep">{{ $t('logic.nodeConfig.value_sequence.add') }}</button>
+          <button type="button" class="btn-secondary btn-sm" data-testid="sequence-blink" @click="applySequencePreset">{{ $t('logic.nodeConfig.value_sequence.blink') }}</button>
+        </div>
+        <div v-for="(step, index) in sequenceSteps" :key="index" class="border border-slate-700 rounded-lg p-3 flex flex-col gap-2" :data-testid="`sequence-step-${index}`">
+          <div class="flex justify-between items-center"><span class="text-xs font-semibold text-amber-400">{{ $t('logic.nodeConfig.value_sequence.step', { n: index + 1 }) }}</span><div class="flex gap-2"><button class="text-xs" @click="moveSequenceStep(index, -1)">↑</button><button class="text-xs" @click="moveSequenceStep(index, 1)">↓</button><button class="text-xs text-teal-400" @click="duplicateSequenceStep(index)">{{ $t('logic.nodeConfig.value_sequence.duplicate') }}</button><button class="text-xs text-red-400" @click="removeSequenceStep(index)">×</button></div></div>
+          <input v-model="sequenceSearches[index]" class="input text-xs" :placeholder="$t('logic.nodeConfig.value_sequence.object')" @input="onSequenceSearchInput(index)" />
+          <div v-if="sequenceDpResults[index]?.length" class="max-h-24 overflow-y-auto border border-slate-700 rounded">
+            <button v-for="dp in sequenceDpResults[index]" :key="dp.id" class="block w-full text-left px-2 py-1 text-xs hover:bg-slate-700" @click="selectSequenceDp(index, dp)">{{ dp.name }} <span class="text-slate-500">{{ dp.data_type }}</span></button>
+          </div>
+          <input v-model="step.value" class="input text-xs" :placeholder="$t('logic.nodeConfig.value_sequence.value')" @change="saveSequenceSteps" />
+          <div class="flex gap-2"><input v-model.number="step.delay_ms" type="number" min="0" class="input text-xs" @change="saveSequenceSteps" /><span class="text-xs self-center">ms</span></div>
+        </div>
+      </div>
+    </template>
+
     <!-- ── api_client: special rendering with conditional auth fields ──── -->
     <template v-else-if="isApiClientNode">
       <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
@@ -396,7 +473,15 @@
         </div>
         <div class="form-group">
           <label class="label">{{ $t('logic.nodeConfig.apiClient.timeoutLabel') }}</label>
-          <input v-model="localData.timeout_s" type="number" class="input text-sm" @change="emitUpdate" />
+          <input
+            v-model="localData.timeout_s"
+            type="number"
+            min="1"
+            step="any"
+            class="input text-sm"
+            data-testid="api-client-timeout"
+            @change="emitBoundedUpdate('timeout_s', { type: 'number', min: 1 })"
+          />
         </div>
         <label class="flex items-center gap-2 cursor-pointer">
           <input type="checkbox" v-model="localData.verify_ssl" @change="emitUpdate" class="accent-teal-500" />
@@ -480,6 +565,184 @@
               :placeholder="$t('logic.nodeConfig.stringConcat.inputPlaceholder', { n: i })"
               :data-testid="`concat-text-${i}`"
             />
+          </div>
+        </div>
+      </div>
+    </template>
+
+    <!-- ── string_replace: ordered search/replace rules (issue #871) ────── -->
+    <template v-else-if="isStringReplaceNode">
+      <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+        <p class="text-xs text-slate-500">{{ nodeDescription(nodeDef) }}</p>
+
+        <div class="flex items-center justify-between">
+          <span class="section-label">{{ $t('logic.nodeConfig.stringReplace.rules') }}</span>
+          <button
+            @click="addReplaceRule()"
+            class="btn-secondary btn-sm text-teal-400"
+            data-testid="replace-rule-add"
+          >{{ $t('logic.nodeConfig.rules.add') }}</button>
+        </div>
+        <p class="text-xs text-slate-500 -mt-2">{{ $t('logic.nodeConfig.stringReplace.orderHint') }}</p>
+
+        <div
+          v-for="(rule, i) in stringReplaceRules" :key="i"
+          class="rule-row"
+          :data-testid="`replace-rule-${i}`"
+        >
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-mono text-slate-400 w-5 shrink-0">{{ i + 1 }}</span>
+            <select
+              :value="replaceRuleIsRegex(rule) ? 'regex' : 'plain'"
+              @change="updateReplaceRule(i, 'mode', $event.target.value)"
+              class="input text-xs flex-1"
+              :data-testid="`replace-rule-mode-${i}`"
+            >
+              <option value="plain">{{ $t('logic.nodeConfig.stringReplace.modes.plain') }}</option>
+              <option value="regex">{{ $t('logic.nodeConfig.stringReplace.modes.regex') }}</option>
+            </select>
+            <button
+              @click="moveReplaceRule(i, -1)"
+              class="text-xs text-slate-500 hover:text-slate-300 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+              :disabled="i === 0"
+              :title="$t('logic.nodeConfig.stringReplace.moveUp')"
+              :data-testid="`replace-rule-up-${i}`"
+            >↑</button>
+            <button
+              @click="moveReplaceRule(i, 1)"
+              class="text-xs text-slate-500 hover:text-slate-300 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+              :disabled="i === stringReplaceRules.length - 1"
+              :title="$t('logic.nodeConfig.stringReplace.moveDown')"
+              :data-testid="`replace-rule-down-${i}`"
+            >↓</button>
+            <button
+              @click="removeReplaceRule(i)"
+              class="text-xs text-red-400 hover:text-red-300 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+              :disabled="stringReplaceRules.length <= 1"
+              :title="$t('logic.nodeConfig.rules.remove')"
+              :data-testid="`replace-rule-remove-${i}`"
+            >×</button>
+          </div>
+
+          <div class="form-group">
+            <label class="label">{{ replaceRuleIsRegex(rule) ? $t('logic.nodeConfig.stringReplace.patternLabel') : $t('logic.nodeConfig.stringReplace.searchLabel') }}</label>
+            <input
+              :value="rule.search ?? ''"
+              @input="updateReplaceRule(i, 'search', $event.target.value)"
+              class="input text-xs font-mono"
+              :placeholder="replaceRuleIsRegex(rule) ? $t('logic.nodeConfig.stringReplace.patternPlaceholder') : $t('logic.nodeConfig.stringReplace.searchPlaceholder')"
+              :data-testid="`replace-rule-search-${i}`"
+            />
+          </div>
+
+          <div class="form-group">
+            <label class="label">{{ $t('logic.nodeConfig.stringReplace.replaceLabel') }}</label>
+            <input
+              :value="rule.replace ?? ''"
+              @input="updateReplaceRule(i, 'replace', $event.target.value)"
+              class="input text-xs font-mono"
+              :placeholder="$t('logic.nodeConfig.stringReplace.replacePlaceholder')"
+              :data-testid="`replace-rule-replacement-${i}`"
+            />
+            <p v-if="replaceRuleIsRegex(rule)" class="text-xs text-slate-500 mt-1">{{ $t('logic.nodeConfig.stringReplace.groupHint') }}</p>
+          </div>
+
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              :checked="replaceRuleFlag(rule, 'case_sensitive')"
+              @change="updateReplaceRule(i, 'case_sensitive', $event.target.checked)"
+              class="accent-teal-500"
+              :data-testid="`replace-rule-case-${i}`"
+            />
+            <span class="text-xs text-slate-600 dark:text-slate-300">{{ $t('logic.nodeConfig.rules.caseSensitive') }}</span>
+          </label>
+
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              :checked="replaceRuleFlag(rule, 'replace_all')"
+              @change="updateReplaceRule(i, 'replace_all', $event.target.checked)"
+              class="accent-teal-500"
+              :data-testid="`replace-rule-all-${i}`"
+            />
+            <span class="text-xs text-slate-600 dark:text-slate-300">{{ $t('logic.nodeConfig.stringReplace.replaceAll') }}</span>
+          </label>
+        </div>
+      </div>
+    </template>
+
+    <!-- ── sensor_watchdog: per-input timeout/fault-value rows ──────────── -->
+    <template v-else-if="isSensorWatchdogNode">
+      <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+        <p class="text-xs text-slate-500">{{ nodeDescription(nodeDef) }}</p>
+
+        <div class="flex items-center justify-between">
+          <span class="section-label">{{ $t('logic.nodeConfig.sensorWatchdog.inputs') }}</span>
+          <button
+            @click="addWatchdogInput()"
+            class="btn-secondary btn-sm text-teal-400 disabled:opacity-40 disabled:cursor-not-allowed"
+            :disabled="watchdogInputs.length >= 10"
+            data-testid="watchdog-input-add"
+          >{{ $t('logic.nodeConfig.sensorWatchdog.add') }}</button>
+        </div>
+
+        <div
+          v-for="(entry, i) in watchdogInputs" :key="i"
+          class="rule-row"
+          :data-testid="`watchdog-input-${i}`"
+        >
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-mono text-slate-400 w-5 shrink-0">{{ i + 1 }}</span>
+            <input
+              :value="entry.label"
+              @input="updateWatchdogInput(i, 'label', $event.target.value)"
+              class="input text-xs flex-1"
+              :placeholder="$t('logic.nodeConfig.sensorWatchdog.labelPlaceholder')"
+              :data-testid="`watchdog-input-label-${i}`"
+            />
+            <button
+              @click="removeWatchdogInput(i)"
+              class="text-xs text-red-400 hover:text-red-300 shrink-0 disabled:opacity-40 disabled:cursor-not-allowed"
+              :disabled="watchdogInputs.length <= 1"
+              :title="$t('logic.nodeConfig.sensorWatchdog.remove')"
+              :data-testid="`watchdog-input-remove-${i}`"
+            >{{ $t('logic.nodeConfig.sensorWatchdog.removeShort') }}</button>
+          </div>
+
+          <div class="form-group">
+            <label class="label">{{ $t('logic.nodeConfig.sensorWatchdog.timeoutLabel') }}</label>
+            <input
+              type="number" min="1" step="any"
+              :value="entry.timeout_s ?? 60"
+              @input="updateWatchdogInput(i, 'timeout_s', $event.target.value)"
+              class="input text-xs"
+              :data-testid="`watchdog-input-timeout-${i}`"
+            />
+          </div>
+
+          <div class="form-group">
+            <label class="label">{{ $t('logic.nodeConfig.sensorWatchdog.faultValueLabel') }}</label>
+            <input
+              :value="entry.fault_value ?? ''"
+              @input="updateWatchdogInput(i, 'fault_value', $event.target.value)"
+              class="input text-xs"
+              :placeholder="$t('logic.nodeConfig.sensorWatchdog.faultValuePlaceholder')"
+              :data-testid="`watchdog-input-fault-value-${i}`"
+            />
+          </div>
+
+          <div class="form-group">
+            <label class="label">{{ $t('logic.nodeConfig.sensorWatchdog.repeatLabel') }}</label>
+            <input
+              type="number" min="0" step="any"
+              :value="entry.repeat_s ?? 0"
+              @input="updateWatchdogInput(i, 'repeat_s', $event.target.value)"
+              class="input text-xs"
+              :placeholder="$t('logic.nodeConfig.sensorWatchdog.repeatPlaceholder')"
+              :data-testid="`watchdog-input-repeat-${i}`"
+            />
+            <p class="text-xs text-slate-500 mt-1">{{ $t('logic.nodeConfig.sensorWatchdog.repeatHint') }}</p>
           </div>
         </div>
       </div>
@@ -653,6 +916,7 @@
             </div>
           </template>
 
+          <div @focusout="onExtractorControlsFocusOut">
           <!-- Multi-path path picker dropdown (one shared, fills active row) -->
           <div v-if="extractorPaths.length" class="form-group">
             <label class="label">
@@ -662,7 +926,13 @@
               <option value="">{{ $t('logic.nodeConfig.extractor.pathPlaceholder') }}</option>
               <option v-for="p in extractorPaths" :key="p" :value="p">{{ p }}</option>
             </select>
+            <p v-if="extractorPathsTruncated" class="text-xs text-amber-400/80 mt-1" data-testid="extractor-paths-truncated">
+              {{ $t('logic.nodeConfig.extractor.pathListTruncated', { n: EXTRACTOR_MAX_PATHS }) }}
+            </p>
           </div>
+          <p v-if="extractorPreviewPruned" class="text-xs text-amber-400/80" data-testid="extractor-preview-pruned">
+            {{ $t('logic.nodeConfig.extractor.previewPruned') }}
+          </p>
 
           <!-- Output rows -->
           <div class="form-group">
@@ -677,6 +947,7 @@
 
             <div
               v-for="(entry, i) in jsonPaths" :key="i"
+              @focusin="activeExtractorRow = i"
               class="extractor-output-row mt-2 p-2 rounded-lg border border-slate-700/50 flex flex-col gap-1"
               :style="extractorOutputRowStyle"
             >
@@ -698,7 +969,6 @@
                 :value="entry.path"
                 @input="updateJsonPath(i, 'path', $event.target.value)"
                 @focus="activeExtractorRow = i"
-                @blur="activeExtractorRow = null"
                 class="input text-xs font-mono w-full"
                 :class="activeExtractorRow === i ? 'ring-1 ring-teal-500/60' : ''"
                 :placeholder="$t('logic.nodeConfig.extractor.pathExample')"
@@ -712,6 +982,7 @@
             <p v-if="!jsonPaths.length && !localData.json_path" class="text-xs text-slate-500 mt-2 text-center py-2">
               Klicke <strong>+</strong> um Ausgänge hinzuzufügen.
             </p>
+          </div>
           </div>
         </template>
 
@@ -729,6 +1000,7 @@
             </div>
           </template>
 
+          <div @focusout="onExtractorControlsFocusOut">
           <!-- Multi-path path picker dropdown (one shared, fills active row) -->
           <div v-if="extractorPaths.length" class="form-group">
             <label class="label">
@@ -753,6 +1025,7 @@
 
             <div
               v-for="(entry, i) in xmlPaths" :key="i"
+              @focusin="activeExtractorRow = i"
               class="extractor-output-row mt-2 p-2 rounded-lg border border-slate-700/50 flex flex-col gap-1"
               :style="extractorOutputRowStyle"
             >
@@ -774,7 +1047,6 @@
                 :value="entry.path"
                 @input="updateXmlPath(i, 'path', $event.target.value)"
                 @focus="activeExtractorRow = i"
-                @blur="activeExtractorRow = null"
                 class="input text-xs font-mono w-full"
                 :class="activeExtractorRow === i ? 'ring-1 ring-teal-500/60' : ''"
                 :placeholder="$t('logic.nodeConfig.extractor.xmlPathPlaceholder')"
@@ -788,6 +1060,7 @@
             <p v-if="!xmlPaths.length && !localData.xml_path" class="text-xs text-slate-500 mt-2 text-center py-2">
               {{ $t('logic.nodeConfig.extractor.clickPlusToAddOutputs') }}
             </p>
+          </div>
           </div>
         </template>
       </div>
@@ -919,6 +1192,16 @@
           <input v-model.number="localData.refresh_interval_min" type="number" min="1"
             class="input text-sm" @change="emitUpdate" data-testid="ical-refresh" />
           <p class="text-xs text-slate-500 mt-1">{{ $t('logic.nodeConfig.ical.refreshHint') }}</p>
+        </div>
+
+        <!-- Maximum payload size -->
+        <div class="form-group">
+          <label class="label">{{ $t('logic.nodeConfig.ical.maxPayloadSizeLabel') }}</label>
+          <input v-model.number="localData.max_payload_size_mb" type="number" min="1" max="50" step="1"
+            class="input text-sm"
+            @change="emitBoundedUpdate('max_payload_size_mb', ICAL_PAYLOAD_SIZE_SCHEMA)"
+            data-testid="ical-max-payload-size" />
+          <p class="text-xs text-slate-500 mt-1">{{ $t('logic.nodeConfig.ical.maxPayloadSizeHint') }}</p>
         </div>
 
         <!-- RAW output info -->
@@ -1100,9 +1383,108 @@
       </div>
     </template>
 
+    <!-- ── message_archive: archive selection by display name ────────────── -->
+    <template v-else-if="isMessageArchiveNode">
+      <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+        <p class="text-xs text-slate-500">{{ nodeDescription(nodeDef) }}</p>
+
+        <div class="form-group">
+          <label class="label">{{ $t('logic.nodeConfig.messageArchive.archive') }}</label>
+          <select v-model="localData.archive_id" class="input text-sm" @change="emitUpdate">
+            <option value="">{{ $t('logic.nodeConfig.messageArchive.selectArchive') }}</option>
+            <option v-for="archive in messageArchives" :key="archive.id" :value="archive.id">
+              {{ archive.name || archive.id }}
+            </option>
+            <option v-if="selectedMessageArchiveMissing" :value="localData.archive_id">
+              {{ $t('logic.nodeConfig.messageArchive.missingArchive') }}
+            </option>
+          </select>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div class="form-group">
+            <label class="label">{{ $t('logic.nodeConfig.messageArchive.type') }}</label>
+            <select v-model="localData.type" class="input text-sm" @change="emitUpdate">
+              <option v-for="type in MESSAGE_TYPE_OPTIONS" :key="type" :value="type">
+                {{ $t(`messageArchives.types.${type}`) }}
+              </option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="label">{{ $t('logic.nodeConfig.messageArchive.severity') }}</label>
+            <select v-model="localData.severity" class="input text-sm" @change="emitUpdate">
+              <option v-for="severity in MESSAGE_SEVERITY_OPTIONS" :key="severity" :value="severity">
+                {{ $t(`messageArchives.severities.${severity}`) }}
+              </option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="label">{{ $t('logic.nodeConfig.messageArchive.title') }}</label>
+          <input
+            v-model="localData.title"
+            class="input text-sm"
+            :placeholder="$t('logic.nodeConfig.messageArchive.titlePlaceholder')"
+            data-testid="message-archive-title"
+            @change="emitUpdate"
+          />
+        </div>
+
+        <div class="form-group">
+          <label class="label">{{ $t('logic.nodeConfig.messageArchive.message') }}</label>
+          <textarea
+            v-model="localData.message"
+            class="input text-sm min-h-24 resize-y"
+            :placeholder="$t('logic.nodeConfig.messageArchive.messagePlaceholder')"
+            @change="emitUpdate"
+          />
+        </div>
+      </div>
+    </template>
+
+    <template v-else-if="isNotifyMessageNode">
+      <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+        <p class="text-xs text-slate-500">{{ nodeDescription(nodeDef) }}</p>
+        <div class="form-group">
+          <label class="label">{{ $t('logic.nodeConfig.notification.adapter') }}</label>
+          <select v-model="localData.adapter_instance_id" class="input text-sm" @change="onNotificationAdapterChange">
+            <option value="">{{ $t('logic.nodeConfig.notification.selectAdapter') }}</option>
+            <option v-for="instance in messageAdapters" :key="instance.id" :value="instance.id">{{ instance.name }}</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="label">{{ $t('logic.nodeConfig.notification.targets') }}</label>
+          <label v-for="target in notificationTargets" :key="target.key" class="flex items-center gap-2 text-sm">
+            <input type="checkbox" :checked="notificationTargetSelected(target)" @change="toggleNotificationTarget(target, $event.target.checked)" />
+            <span>{{ target.key }}</span>
+          </label>
+          <p v-if="localData.adapter_instance_id && !notificationTargets.length" class="text-xs text-amber-500">{{ $t('logic.nodeConfig.notification.noTargets') }}</p>
+        </div>
+        <div class="form-group"><label class="label">{{ $t('logic.nodeConfig.notification.title') }}</label><input v-model="localData.title" class="input text-sm" @change="emitUpdate" /></div>
+        <div class="form-group"><label class="label">{{ $t('logic.nodeConfig.notification.fallback') }}</label><textarea v-model="localData.message" class="input text-sm min-h-24" @change="emitUpdate" /><p class="text-xs text-slate-500 mt-1">{{ $t('logic.nodeConfig.notification.placeholders') }}</p></div>
+        <div class="form-group"><label class="label">{{ $t('logic.nodeConfig.notification.priority') }}</label><input v-model.number="localData.priority" type="number" min="-2" max="1" class="input text-sm" @change="emitUpdate" /></div>
+      </div>
+    </template>
+
+    <template v-else-if="isCommentNode">
+      <div class="flex-1 overflow-hidden p-4 flex flex-col gap-2">
+        <p class="text-xs text-slate-500 shrink-0">{{ nodeDescription(nodeDef) }}</p>
+        <label class="label shrink-0">{{ $t('logic.nodeConfig.comment.text') }}</label>
+        <textarea
+          v-model="localData.text"
+          class="input text-sm flex-1 resize-none"
+          :placeholder="$t('logic.nodeConfig.comment.textPlaceholder')"
+          data-testid="comment-text"
+          @change="emit('update', { text: localData.text })"
+        />
+      </div>
+    </template>
+
     <!-- ── All other node types: generic rendering ─────────────────────── -->
     <template v-else>
       <div class="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+        <p v-if="nodeDef?.legacy" class="rounded border border-amber-500/40 bg-amber-500/10 p-3 text-xs text-amber-600 dark:text-amber-300">{{ $t('logic.nodeConfig.notification.legacy') }}</p>
         <p v-if="nodeDef?.description" class="text-xs text-slate-500">{{ nodeDescription(nodeDef) }}</p>
         <template v-if="nodeDef?.config_schema">
           <div v-for="(schema, key) in configFields" :key="key" class="form-group">
@@ -1111,21 +1493,68 @@
               v-model="localData[key]" rows="6"
               class="input text-xs font-mono resize-y" @change="emitUpdate" />
             <select v-else-if="schema.enum"
-              v-model="localData[key]" class="input text-sm" @change="emitUpdate">
-              <option v-for="opt in schema.enum" :key="opt" :value="opt">{{ opt }}</option>
+              :value="enumDisplayValue(key, schema)"
+              class="input text-sm" @change="onSchemaEnumChange(key, $event)">
+              <!-- A configured setting the schema does not list — an explicit
+                   null, or one from a newer version — needs an option of its
+                   own: a <select> whose value matches no option falls back to
+                   showing the first one, which would claim a setting that is
+                   not active. -->
+              <option v-if="enumDisplayValue(key, schema) === ''" value="" disabled>
+                {{ $t('logic.nodeConfig.common.unsetEnum') }}
+              </option>
+              <option v-for="opt in schema.enum" :key="opt" :value="opt">{{ enumOptionLabel(nodeDef?.type, key, opt) }}</option>
             </select>
+            <select v-else-if="typedValueKind(schema) === 'bool'"
+              :value="normaliseTypedValue(configuredValue(key, schema), 'bool')"
+              class="input text-sm" @change="onBooleanFieldChange(key, $event)">
+              <option value="true">{{ $t('logic.nodeConfig.common.boolTrue') }}</option>
+              <option value="false">{{ $t('logic.nodeConfig.common.boolFalse') }}</option>
+            </select>
+            <input v-else-if="typedValueKind(schema) === 'number'"
+              type="number" step="any"
+              :value="normaliseTypedValue(configuredValue(key, schema), 'number')"
+              class="input text-sm" @change="onTypedValueChange(key, schema, $event)" />
             <input v-else-if="schema.type === 'boolean'"
-              type="checkbox" v-model="localData[key]"
-              class="text-sm" @change="emitUpdate" />
+              type="checkbox" :checked="schemaBooleanChecked(key, schema)"
+              class="text-sm" @change="onSchemaBooleanChange(key, $event)" />
+            <!-- Every remaining typed value field, not just data_type 'string':
+                 an unrecognised type is passed through uncoerced by the
+                 executor and may still be a list or object, which the generic
+                 v-model input below would scalarize. -->
+            <input v-else-if="schema.value_type_field"
+              type="text"
+              :value="normaliseTypedValue(configuredValue(key, schema), typedValueKind(schema))"
+              class="input text-sm" @change="onTypedValueChange(key, schema, $event)" />
             <input v-else
               v-model="localData[key]"
-              :type="schema.subtype === 'password' ? 'password' : schema.type === 'number' ? 'number' : 'text'"
-              class="input text-sm" @change="emitUpdate" />
+              :type="schema.subtype === 'password' ? 'password' : ['number', 'integer'].includes(schema.type) ? 'number' : 'text'"
+              :min="schema.min ?? schema.minimum"
+              :max="schema.max ?? schema.maximum"
+              :step="schema.step ?? (schema.type === 'integer' ? 1 : schema.type === 'number' ? 'any' : undefined)"
+              class="input text-sm" @change="onSchemaFieldChange(key, schema)" />
+            <p v-if="node?.type === 'datetime' && key === 'custom_format'" class="text-xs text-slate-500 mt-1">
+              {{ $t('logic.nodeConfig.datetime.tokens') }}
+            </p>
           </div>
 
         </template>
       </div>
     </template>
+
+    </template>
+
+    <DebugInspector
+      v-if="debugMode && panelTab === 'debug'"
+      :inputs="debugInputs"
+      :outputs="debugOutputs"
+      :output-labels="debugOutputLabels"
+      :metadata="debugMetadata"
+      :has-overrides="hasDebugOverrides"
+      @set-override="(inputId, text) => emit('set-override', inputId, text)"
+      @clear-override="inputId => emit('clear-override', inputId)"
+      @clear-all="emit('clear-all')"
+    />
 
   </div>
 </template>
@@ -1133,19 +1562,33 @@
 <script setup>
 import { ref, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { dpApi, searchApi, securityApi } from '@/api/client'
+import { adapterApi, dpApi, messageArchivesApi, searchApi, securityApi } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { getAutoContrastText } from '@/utils/colorContrast'
+import { EXTRACTOR_MAX_PATHS, collectJsonPaths, extractorOutputLabels, parseExtractorJson } from '@/utils/logicExtractorOutputs'
+import { isPythonTruthy } from '@/utils/logicBooleans'
+import { coercedValueText } from '@/utils/logicTypedValue'
+import { useResizablePanel } from '@/composables/useResizablePanel'
+import HelpButton from '@/components/ui/HelpButton.vue'
+import DebugInspector from './DebugInspector.vue'
 
 const { t, te } = useI18n()
 const auth = useAuthStore()
 
+const { width: panelWidth, isResizing: isResizingPanel, startResize: startPanelResize } =
+  useResizablePanel({ storageKey: 'obs.logic.nodeConfigPanelWidth', defaultWidth: 288, min: 260, max: 800 })
+
 const props = defineProps({
-  node:        { type: Object, default: null },
-  nodeTypes:   { type: Array,  default: () => [] },
-  nodeOutputs: { type: Object, default: () => ({}) },
+  node:              { type: Object,  default: null },
+  nodeTypes:         { type: Array,   default: () => [] },
+  nodeOutputs:       { type: Object,  default: () => ({}) },
+  debugMode:         { type: Boolean, default: false },
+  debugInputs:       { type: Array,   default: () => [] },
+  debugOutputs:      { type: Object,  default: () => ({}) },
+  debugMetadata:     { type: Object,  default: null },
+  hasDebugOverrides: { type: Boolean, default: false },
 })
-const emit = defineEmits(['update', 'close'])
+const emit = defineEmits(['update', 'close', 'set-override', 'clear-override', 'clear-all'])
 
 const EXTRACTOR_OUTPUT_BG = 'rgba(30, 41, 59, 0.6)'
 const EXTRACTOR_OUTPUT_FG = getAutoContrastText(EXTRACTOR_OUTPUT_BG)
@@ -1159,15 +1602,43 @@ const localData          = ref({})
 const dpSearch           = ref('')
 const dpResults          = ref([])
 const activeTab          = ref('connection')
+// Outer pane switch (issue #1128): 'debug' can only occur while debug mode is
+// on. Enabling debug mode jumps to the debug values, disabling it returns to
+// the settings; a manual choice then sticks across block selections.
+// `activeTab` stays the setting sub-tab of DataPoint blocks.
+const panelTab           = ref(props.debugMode ? 'debug' : 'settings')
 const valueMapPreset     = ref('')
 const valueMapCustom     = ref('')
 const valueMapCustomError = ref('')
+const sequenceDpResults = ref([])
+const sequenceSearches = ref([])
+const sequenceSearchDrafts = ref([])
+const sequenceSearchNodeId = ref(null)
 const urlTargetChecking = ref(false)
 const urlTargetSaving = ref(false)
 const urlTargetDecision = ref(null)
 const urlTargetMsg = ref(null)
 const apiVariableSearches = ref([])
 const apiVariableResults = ref([])
+const messageArchives = ref([])
+const messageAdapters = ref([])
+const MESSAGE_TYPE_OPTIONS = ['automation', 'notification', 'system', 'security', 'adapter', 'diagnostic']
+const MESSAGE_SEVERITY_OPTIONS = ['info', 'success', 'warning', 'error', 'critical']
+const ICAL_PAYLOAD_SIZE_SCHEMA = { type: 'integer', min: 1, max: 50 }
+
+function normaliseIcalPayloadSize(rawValue) {
+  if (typeof rawValue === 'boolean' || rawValue === null || rawValue === undefined) return 2
+  let value
+  if (typeof rawValue === 'number') {
+    value = rawValue
+  } else if (typeof rawValue === 'string' && /^[+-]?\d+$/.test(rawValue.trim())) {
+    value = Number(rawValue)
+  } else {
+    return 2
+  }
+  if (!Number.isFinite(value)) return 2
+  return Math.min(50, Math.max(1, Math.trunc(value)))
+}
 
 const CONDITION_OPERATOR_OPTIONS = computed(() => [
   { value: 'eq',          label: t('logic.nodeConfig.rules.operators.eq') },
@@ -1341,12 +1812,37 @@ const isExtractorNode  = computed(() =>
 )
 const isSubstringExtractorNode = computed(() => props.node?.type === 'substring_extractor')
 const isStringConcatNode = computed(() => props.node?.type === 'string_concat')
+const isStringReplaceNode = computed(() => props.node?.type === 'string_replace')
+const isSensorWatchdogNode = computed(() => props.node?.type === 'sensor_watchdog')
 const isICalNode          = computed(() => props.node?.type === 'ical')
 const apiVariables = computed(() => Array.isArray(localData.value.variables) ? localData.value.variables : [])
 const isWakeOnLanNode     = computed(() => props.node?.type === 'wake_on_lan')
 const isHostCheckNode     = computed(() => props.node?.type === 'host_check')
+const isMessageArchiveNode = computed(() => props.node?.type === 'message_archive')
+const isNotifyMessageNode = computed(() => props.node?.type === 'notify_message')
+const selectedMessageAdapter = computed(() => messageAdapters.value.find(instance => instance.id === localData.value.adapter_instance_id))
+function notificationProviderEnabled(config) {
+  if (config?.enabled === true || config?.enabled === 1) return true
+  if (typeof config?.enabled === 'string') {
+    return ['true', '1', 'yes', 'on'].includes(config.enabled.trim().toLowerCase())
+  }
+  return false
+}
+const notificationTargets = computed(() => {
+  const providers = selectedMessageAdapter.value?.config?.providers || {}
+  return Object.entries(providers).flatMap(([provider, config]) => notificationProviderEnabled(config)
+    ? Object.keys(config.targets || {}).map(target => ({ provider, target, key: `${provider}/${target}` }))
+    : [])
+})
 const isDecisionNode      = computed(() => props.node?.type === 'decision')
 const isValueMappingNode  = computed(() => props.node?.type === 'value_mapping')
+const isValueSequenceNode = computed(() => props.node?.type === 'value_sequence')
+const isCommentNode       = computed(() => props.node?.type === 'comment')
+const sequenceSteps = computed(() => Array.isArray(localData.value.steps) ? localData.value.steps : [])
+const selectedMessageArchiveMissing = computed(() => {
+  const id = localData.value.archive_id
+  return !!id && !messageArchives.value.some((archive) => archive.id === id)
+})
 
 const MAC_RE = /^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$/
 const macAddressError = computed(() => {
@@ -1532,41 +2028,128 @@ function isTextCondition(operator) {
   return ['text_eq', 'contains', 'starts_with', 'ends_with', 'regex'].includes(operator)
 }
 
+// ── string_replace: ordered search/replace rules (issue #871) ─────────────
+// Rules are persisted as a JSON string (like decision/value_mapping) so the
+// list stays one config field; order is meaningful — each rule works on the
+// result of its predecessor.
+function _defaultReplaceRule() {
+  return { search: '', replace: '', mode: 'plain', case_sensitive: true, replace_all: true }
+}
+
+const stringReplaceRules = computed(() => {
+  const rows = _parseRows(localData.value.rules)
+  return rows.length ? rows : [_defaultReplaceRule()]
+})
+
+// Same normalisation as the executor: anything that is not "regex" (after
+// trimming and lowercasing) is a plain search, so a rule imported as "REGEX"
+// is not shown as a plain one while being executed as a regular expression.
+function replaceRuleIsRegex(rule) {
+  return String(rule.mode ?? '').trim().toLowerCase() === 'regex'
+}
+
+// Mirrors GraphExecutor._to_bool for the two rule flags that default to true.
+// A checkbox bound to `value !== false` would show "on" for an imported rule
+// carrying null, 0, "false" or "off" — all of which the executor reads as off.
+const FALSY_RULE_FLAGS = ['0', 'false', 'no', 'off', '']
+
+function replaceRuleFlag(rule, key) {
+  const value = rule[key]
+  if (value === undefined) return true
+  if (typeof value === 'string') return !FALSY_RULE_FLAGS.includes(value.trim().toLowerCase())
+  return Boolean(value)
+}
+
+function _cloneReplaceRules() {
+  return stringReplaceRules.value.map(rule => ({ ...rule }))
+}
+
+function _saveReplaceRules(rows) {
+  localData.value.rules = JSON.stringify(rows)
+  emitUpdate()
+}
+
+function addReplaceRule() {
+  _saveReplaceRules([..._cloneReplaceRules(), _defaultReplaceRule()])
+}
+
+function updateReplaceRule(i, key, value) {
+  const rows = _cloneReplaceRules()
+  if (!rows[i]) return
+  rows[i][key] = value
+  _saveReplaceRules(rows)
+}
+
+function removeReplaceRule(i) {
+  const rows = _cloneReplaceRules()
+  if (rows.length <= 1 || !rows[i]) return
+  rows.splice(i, 1)
+  _saveReplaceRules(rows)
+}
+
+function moveReplaceRule(i, delta) {
+  const rows = _cloneReplaceRules()
+  const target = i + delta
+  if (target < 0 || target >= rows.length) return
+  ;[rows[i], rows[target]] = [rows[target], rows[i]]
+  _saveReplaceRules(rows)
+}
+
+// ── sensor_watchdog: per-input timeout/fault-value rows (issue #1218) ─────
+// Own dedicated array field ("inputs"), same JSON-string persistence and
+// row-editing shape as string_replace's "rules" above — kept separate
+// rather than folded into it because the row schema (label/timeout_s/
+// fault_value) and the 1-input floor (vs. string_replace's 1) are unrelated
+// to search/replace's own fields.
+function _defaultWatchdogInput() {
+  return { label: '', timeout_s: 60, fault_value: null, repeat_s: 0 }
+}
+
+const watchdogInputs = computed(() => {
+  const rows = _parseRows(localData.value.inputs)
+  return rows.length ? rows : [_defaultWatchdogInput()]
+})
+
+function _cloneWatchdogInputs() {
+  return watchdogInputs.value.map(row => ({ ...row }))
+}
+
+function _saveWatchdogInputs(rows) {
+  localData.value.inputs = JSON.stringify(rows)
+  emitUpdate()
+}
+
+function addWatchdogInput() {
+  const rows = _cloneWatchdogInputs()
+  if (rows.length >= 10) return
+  rows.push(_defaultWatchdogInput())
+  _saveWatchdogInputs(rows)
+}
+
+function updateWatchdogInput(i, key, value) {
+  const rows = _cloneWatchdogInputs()
+  if (!rows[i]) return
+  rows[i][key] = key === 'timeout_s' || key === 'repeat_s' ? Number(value) : value
+  _saveWatchdogInputs(rows)
+}
+
+function removeWatchdogInput(i) {
+  const rows = _cloneWatchdogInputs()
+  if (rows.length <= 1 || !rows[i]) return
+  rows.splice(i, 1)
+  _saveWatchdogInputs(rows)
+}
+
 // ── Extractor: preview + path helpers ─────────────────────────────────────
 const activeExtractorRow = ref(null)
+
+// Debug tab lists extractor outputs under their configured names (issue #1104)
+const debugOutputLabels = computed(() => extractorOutputLabels(props.node, t))
 
 const extractorPreview = computed(() => {
   if (!props.node) return ''
   return props.nodeOutputs[props.node.id]?._preview ?? ''
 })
-
-// Flatten all dot-notation paths from a JSON object (max depth 6)
-function _flattenJsonPaths(obj, prefix = '', depth = 0) {
-  if (depth > 6 || obj === null || typeof obj !== 'object') {
-    return prefix ? [prefix] : []
-  }
-  const paths = []
-  if (Array.isArray(obj)) {
-    obj.forEach((item, i) => {
-      const key = `${prefix}[${i}]`
-      if (item !== null && typeof item === 'object') {
-        paths.push(..._flattenJsonPaths(item, key, depth + 1))
-      } else {
-        paths.push(key)
-      }
-    })
-  } else {
-    for (const [k, v] of Object.entries(obj)) {
-      const key = prefix ? `${prefix}.${k}` : k
-      if (v !== null && typeof v === 'object') {
-        paths.push(..._flattenJsonPaths(v, key, depth + 1))
-      } else {
-        paths.push(key)
-      }
-    }
-  }
-  return paths
-}
 
 // Collect XPath expressions from XML — simple .//tag plus positional .//tag[n]/child paths
 function _collectXmlPaths(rootEl) {
@@ -1616,51 +2199,40 @@ function _collectXmlPaths(rootEl) {
   return [...paths]
 }
 
+// Parsed once per received payload — the path list and every output row's
+// live preview read from this instead of re-parsing the (up to 256 KB)
+// snapshot on each render.
+const extractorParsedJson = computed(() => {
+  const preview = extractorPreview.value
+  if (!preview || props.node?.type !== 'json_extractor') return undefined
+  try { return parseExtractorJson(preview) } catch { return undefined }
+})
+
+// The backend pruned the snapshot (arrays/strings shortened) because the
+// document exceeded its size limit — row previews may then differ from the
+// block's real outputs.
+const extractorPreviewPruned = computed(() =>
+  !!props.node && props.nodeOutputs[props.node.id]?._preview_pruned === true
+)
+
+// JSON path scan — bounded; `truncated` drives the hint below the picker.
+const extractorJsonPathScan = computed(() => {
+  const obj = extractorParsedJson.value
+  return obj === undefined ? { paths: [], truncated: false } : collectJsonPaths(obj, EXTRACTOR_MAX_PATHS)
+})
+const extractorPathsTruncated = computed(() => extractorJsonPathScan.value.truncated)
+
 const extractorPaths = computed(() => {
   const preview = extractorPreview.value
   if (!preview) return []
   if (props.node?.type === 'json_extractor') {
-    try {
-      const obj = JSON.parse(preview)
-      return _flattenJsonPaths(obj)
-    } catch { return [] }
+    return extractorJsonPathScan.value.paths
   } else {
     try {
       const doc = new DOMParser().parseFromString(preview, 'text/xml')
       if (doc.querySelector('parsererror')) return []
       return _collectXmlPaths(doc.documentElement)
     } catch { return [] }
-  }
-})
-
-// Live-evaluate current path against preview to show resolved value
-const extractorPreviewValue = computed(() => {
-  const preview = extractorPreview.value
-  if (!preview) return null
-  if (props.node?.type === 'json_extractor') {
-    const path = (localData.value.json_path || '').trim()
-    if (!path) return null
-    try {
-      const obj = JSON.parse(preview)
-      // Traverse dotted path (same logic as backend _json_extract)
-      const normPath = path.replace(/\[(\d+)\]/g, '.$1')
-      const parts = normPath.split('.').filter(Boolean)
-      let cur = obj
-      for (const p of parts) {
-        if (cur === null || typeof cur !== 'object') return null
-        cur = Array.isArray(cur) ? cur[Number(p)] : cur[p]
-      }
-      return cur !== undefined ? cur : null
-    } catch { return null }
-  } else {
-    const path = (localData.value.xml_path || '').trim()
-    if (!path) return null
-    try {
-      const doc = new DOMParser().parseFromString(preview, 'text/xml')
-      if (doc.querySelector('parseerror')) return null
-      const el = doc.evaluate(path, doc, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue
-      return el ? el.textContent?.trim() ?? null : null
-    } catch { return null }
   }
 })
 
@@ -1699,12 +2271,11 @@ function updateJsonPath(i, key, value) {
 }
 
 function jsonPathPreview(i) {
-  const preview = extractorPreview.value
-  if (!preview) return null
+  const obj = extractorParsedJson.value
+  if (obj === undefined) return null
   const entry = jsonPaths.value[i]
   if (!entry?.path) return null
   try {
-    const obj = JSON.parse(preview)
     const normPath = entry.path.replace(/\[(\d+)\]/g, '.$1')
     const parts = normPath.split('.').filter(Boolean)
     let cur = obj
@@ -1835,12 +2406,34 @@ const substringRegex101Url = computed(() => {
   return `https://regex101.com/?${params.toString()}`
 })
 
-const configFields = computed(() => {
+// Every schema field the generic form owns. Keeps carrying fields that are
+// currently hidden, so they are still maintained when a sibling changes.
+const schemaFields = computed(() => {
   const schema = nodeDef.value?.config_schema ?? {}
   return Object.fromEntries(
     Object.entries(schema).filter(([k]) => !k.startsWith('datapoint_'))
   )
 })
+
+// The subset actually rendered right now.
+const configFields = computed(() =>
+  Object.fromEntries(Object.entries(schemaFields.value).filter(([, schema]) => isFieldVisible(schema)))
+)
+
+// A field may declare `visible_when: { field, not_in }` to hide itself while
+// another field makes it meaningless — e.g. an edge value while that direction
+// only pulses its trigger. An exclusion rather than an exact match, so a
+// setting the runtime still treats as value-sending (imported, or added later)
+// keeps its field visible. Resolved through configuredValue, so a node saved
+// before the referenced field existed takes its schema default while an
+// explicit null stays null — which the runtime also treats as "not one of the
+// excluded settings" and therefore as value-sending.
+function isFieldVisible(schema) {
+  const rule = schema?.visible_when
+  if (!rule) return true
+  const current = configuredValue(rule.field, schemaFields.value[rule.field])
+  return !rule.not_in.includes(current)
+}
 
 const formulaPreset = computed({
   get() {
@@ -1866,6 +2459,30 @@ const hasFilter    = computed(() => {
          !!(d.min_delta || d.min_delta_pct || d.throttle_value)
 })
 
+// One tab bar per block: the setting tabs a block already has (DataPoint
+// blocks) or a single "Settings" tab, plus the debug values while debug mode
+// is on. Blocks without setting tabs therefore show a bar only in debug mode.
+const panelTabs = computed(() => {
+  const settingsTabs = isDatapointNode.value
+    ? tabs.value.map(tab => ({ ...tab, debug: false }))
+    : [{ id: 'settings', label: t('logic.nodeConfig.panelTabs.settings'), dot: false, debug: false }]
+  if (!props.debugMode) return settingsTabs
+  return [...settingsTabs, { id: 'debug', label: t('logic.nodeConfig.panelTabs.debug'), dot: false, debug: true }]
+})
+
+function selectPanelTab(tab) {
+  panelTab.value = tab.debug ? 'debug' : 'settings'
+  if (!tab.debug && isDatapointNode.value) activeTab.value = tab.id
+}
+
+function isPanelTabActive(tab) {
+  if (tab.debug) return panelTab.value === 'debug'
+  if (panelTab.value === 'debug') return false
+  return !isDatapointNode.value || activeTab.value === tab.id
+}
+
+watch(() => props.debugMode, isDebugMode => { panelTab.value = isDebugMode ? 'debug' : 'settings' })
+
 const tabs = computed(() => [
   { id: 'connection', label: t('logic.nodeConfig.tabs.connection'), dot: false              },
   { id: 'transform',  label: t('logic.nodeConfig.tabs.transform'),  dot: hasTransform.value },
@@ -1885,6 +2502,121 @@ function nodeDescription(def) {
   if (!def?.type) return def?.description ?? ''
   const key = `logic.nodeDescriptions.${def.type}`
   return te(key) ? t(key) : (def.description ?? '')
+}
+
+// Enum options are stored as stable identifiers ("both", "bool", ...). Render
+// them through logic.nodeConfig.<type>.<field>Options.<value> so the editor
+// does not show raw English in a localized UI; the identifier itself remains
+// the fallback for schemas that declare no translations.
+function enumOptionLabel(nodeType, fieldKey, option) {
+  const key = `logic.nodeConfig.${nodeType}.${fieldKey}Options.${option}`
+  return te(key) ? t(key) : option
+}
+
+// A schema field may declare `value_type_field`, naming the sibling field that
+// decides how it is entered — a true/false dropdown, a number input, or plain
+// text. Returns '' when the field has no such dependency.
+function typedValueKind(schema) {
+  if (!schema?.value_type_field) return ''
+  // Mirrors node.data.get("data_type", <schema default>): only an ABSENT key
+  // takes the default. An explicit null is a configured type that
+  // _coerce_typed_value does not recognise, and it then returns the value
+  // uncoerced — so fall through to the plain text field rather than guessing
+  // a type and misstating what runs.
+  return (configuredValue(schema.value_type_field, schemaFields.value[schema.value_type_field]) ?? '')
+}
+
+// Boolean fields the backend reads by IDENTITY against False rather than by
+// truthiness. LogicManager excludes a node from the persisted snapshot only
+// for `n.data.get("persist_state") is False`, so an imported 0, "" or [] still
+// has its state saved and restored — rendering those as unchecked would state
+// the opposite of what runs. The field name is the key because that single
+// check covers every block type that declares the setting.
+const IDENTITY_FALSE_BOOLEAN_FIELDS = new Set(['persist_state'])
+
+// Whether a boolean schema field renders as checked. An explicit null is not
+// a boolean, and every backend consumer of these fields falls back to its own
+// default behaviour for one: LogicManager opts a node out of persistence only
+// for a literal False, the Gate tests negate_enable for truthiness, and the
+// API client passes verify_ssl to requests, which treats None as its default.
+// In each case that lands on the field's declared default, so show it.
+//
+// Known limit: for a configured value that is neither a boolean nor null —
+// 0, "", [] — the remaining consumers genuinely disagree, and a generic form
+// cannot encode per-field semantics beyond the identity list above. Those
+// consumers all read the raw value with Python's own truthiness (`if
+// d.get(...)`), which is what isPythonTruthy mirrors — `!!value` would call an
+// imported empty list or object enabled where the backend reads it as false.
+function schemaBooleanChecked(key, schema) {
+  const value = configuredValue(key, schema)
+  if (value === null || value === undefined) return !!(schema?.default ?? false)
+  if (IDENTITY_FALSE_BOOLEAN_FIELDS.has(key)) return value !== false
+  return isPythonTruthy(value)
+}
+
+// The value the enum dropdown shows: '' whenever the configured setting is
+// not one the schema lists, so the blank placeholder is selected rather than
+// the first real option.
+function enumDisplayValue(key, schema) {
+  const value = configuredValue(key, schema)
+  return schema?.enum?.includes(value) ? value : ''
+}
+
+// The backend reads a configured field as d.get(key, <schema default>), so an
+// absent key takes the default while an explicit null stays null and is
+// handled by the coercion itself. `??` cannot express that difference.
+function configuredValue(key, schema) {
+  return key in localData.value ? localData.value[key] : schema?.default
+}
+
+// Switching that sibling leaves the dependent values in the previous notation
+// ("true" once Number is selected). Re-normalize them so the widget always has
+// something valid to show and the backend never receives a stale notation.
+function onSchemaEnumChange(key, event) {
+  // Bound with :value rather than v-model so a missing field can render the
+  // schema default; that also means the pick has to be written here.
+  localData.value[key] = event.target.value
+  // Deliberately schemaFields, not configFields: a dependent value that is
+  // hidden right now must still be normalized, or it would resurface in the
+  // previous notation once its direction is switched back on.
+  for (const [fieldKey, fieldSchema] of Object.entries(schemaFields.value)) {
+    if (fieldSchema?.value_type_field !== key) continue
+    localData.value[fieldKey] = normaliseTypedValue(configuredValue(fieldKey, fieldSchema), localData.value[key])
+  }
+  emitUpdate()
+}
+
+// A directly entered value goes through the same rule as a type switch —
+// otherwise "1e309" is stored as JavaScript Infinity, which serializes to null.
+// Bound through normaliseTypedValue rather than v-model: an imported node may
+// carry a backend-supported spelling such as "False" or "off", which matches
+// neither option value and would leave the dropdown blank. Display is
+// normalized; the stored value is only rewritten once the user picks one.
+function onBooleanFieldChange(key, event) {
+  localData.value[key] = event.target.value
+  emitUpdate()
+}
+
+// Reads the DOM value, not localData: the input is bound through
+// normaliseTypedValue rather than v-model, so localData still holds the
+// pre-edit value at this point.
+// Same reason as onSchemaEnumChange: the checkbox renders the schema default
+// when the field is absent, so v-model cannot own the value.
+function onSchemaBooleanChange(key, event) {
+  localData.value[key] = event.target.checked
+  emitUpdate()
+}
+
+function onTypedValueChange(key, schema, event) {
+  localData.value[key] = normaliseTypedValue(event.target.value, typedValueKind(schema))
+  emitUpdate()
+}
+
+// Delegates to the shared rule so the panel and the block card cannot drift
+// apart; the caller resolves the configured value first (see configuredValue),
+// because only an ABSENT field takes the schema default at the backend.
+function normaliseTypedValue(value, kind) {
+  return coercedValueText(value, kind)
 }
 
 function fieldLabel(nodeType, fieldKey, fallback) {
@@ -1935,6 +2667,9 @@ watch(() => props.node, (n) => {
     if (n.type === 'api_client' && !localData.value.auth_type) {
       localData.value.auth_type = 'none'
     }
+    if (n.type === 'ical') {
+      localData.value.max_payload_size_mb = normaliseIcalPayloadSize(localData.value.max_payload_size_mb)
+    }
     if (n.type === 'api_client') {
       localData.value.variables = normaliseApiVariables(localData.value.variables)
       apiVariableSearches.value = localData.value.variables.map(v => v.datapoint_name || '')
@@ -1942,6 +2677,26 @@ watch(() => props.node, (n) => {
     } else {
       apiVariableSearches.value = []
       apiVariableResults.value = []
+    }
+    if (n.type === 'message_archive') {
+      if (!localData.value.type) localData.value.type = 'automation'
+      if (!localData.value.severity) localData.value.severity = 'info'
+      if (localData.value.archive_id) localData.value.archive_id = String(localData.value.archive_id).toLowerCase()
+      loadMessageArchives()
+    }
+    if (n.type === 'notify_message') loadMessageAdapters()
+    if (n.type === 'value_sequence') {
+      if (sequenceSearchNodeId.value !== n.id) {
+        sequenceSearchNodeId.value = n.id
+        sequenceSearchDrafts.value = []
+      }
+      let steps = n.data.steps
+      if (typeof steps === 'string') {
+        try { steps = JSON.parse(steps) } catch { steps = [] }
+      }
+      localData.value.steps = Array.isArray(steps) ? steps.filter(step => step && typeof step === 'object' && !Array.isArray(step)) : []
+      sequenceSearches.value = localData.value.steps.map((step, index) => step.datapoint_name || sequenceSearchDrafts.value[index] || '')
+      sequenceDpResults.value = localData.value.steps.map(() => [])
     }
     if (n.type === 'datapoint_read' || n.type === 'datapoint_write') {
       searchDps()
@@ -2019,6 +2774,15 @@ function onExtractorPathSelect(e) {
     activeExtractorRow.value = 0
   }
   e.target.value = ''
+  activeExtractorRow.value = null
+}
+
+function onExtractorControlsFocusOut(e) {
+  // Keep the selected row while focus moves between the shared picker and any
+  // output controls, including reverse keyboard traversal through a row.
+  // Clear it once focus leaves the complete control group.
+  if (e.currentTarget.contains(e.relatedTarget)) return
+  activeExtractorRow.value = null
 }
 
 function onValueMapCustomInput(e) {
@@ -2063,6 +2827,17 @@ function selectDp(dp) {
   dpResults.value = []
   emitUpdate()
 }
+
+function syncSequencePickerState() { sequenceSearches.value = sequenceSteps.value.map(step => step.datapoint_name || ''); sequenceDpResults.value = sequenceSteps.value.map(() => []) }
+function onSequenceSearchInput(index) { const steps = [...sequenceSteps.value]; if (steps[index]?.datapoint_id && sequenceSearches.value[index] !== steps[index].datapoint_name) { sequenceSearchDrafts.value[index] = sequenceSearches.value[index]; steps[index] = { ...steps[index], datapoint_id: '', datapoint_name: '' }; localData.value.steps = steps; emitUpdate() }; searchSequenceDps(index, sequenceSearches.value[index]) }
+function saveSequenceSteps() { localData.value.steps = sequenceSteps.value; syncSequencePickerState(); emitUpdate() }
+function addSequenceStep() { localData.value.steps = [...sequenceSteps.value, { datapoint_id: '', datapoint_name: '', value: '', delay_ms: 0 }]; syncSequencePickerState(); emitUpdate() }
+function removeSequenceStep(index) { const steps = [...sequenceSteps.value]; steps.splice(index, 1); localData.value.steps = steps; syncSequencePickerState(); emitUpdate() }
+function duplicateSequenceStep(index) { const steps = [...sequenceSteps.value]; steps.splice(index + 1, 0, { ...steps[index] }); localData.value.steps = steps; syncSequencePickerState(); emitUpdate() }
+function moveSequenceStep(index, delta) { const target = index + delta; if (target < 0 || target >= sequenceSteps.value.length) return; const steps = [...sequenceSteps.value]; [steps[index], steps[target]] = [steps[target], steps[index]]; localData.value.steps = steps; syncSequencePickerState(); emitUpdate() }
+function applySequencePreset() { localData.value.steps = [{ datapoint_id: '', datapoint_name: '', value: true, delay_ms: 500 }, { datapoint_id: '', datapoint_name: '', value: false, delay_ms: 500 }]; syncSequencePickerState(); emitUpdate() }
+async function searchSequenceDps(index, query) { try { const { data } = (query || '').length < 1 ? await dpApi.list(0, 50) : await searchApi.search({ q: query, size: 50 }); const next = sequenceDpResults.value.slice(); next[index] = data.items || data; sequenceDpResults.value = next } catch { sequenceDpResults.value = [] } }
+function selectSequenceDp(index, dp) { const steps = [...sequenceSteps.value]; steps[index] = { ...steps[index], datapoint_id: dp.id, datapoint_name: dp.name }; localData.value.steps = steps; sequenceSearchDrafts.value[index] = ''; sequenceSearches.value[index] = dp.name; const next = sequenceDpResults.value.slice(); next[index] = []; sequenceDpResults.value = next; emitUpdate() }
 
 function addApiVariable() {
   const variables = normaliseApiVariables(localData.value.variables)
@@ -2168,9 +2943,97 @@ async function allowApiClientTarget() {
   }
 }
 
+async function loadMessageArchives() {
+  try {
+    const { data } = await messageArchivesApi.list()
+    messageArchives.value = Array.isArray(data) ? data : (data?.archives ?? [])
+  } catch {
+    messageArchives.value = []
+  }
+}
+
+async function loadMessageAdapters() {
+  try {
+    const { data } = await adapterApi.listInstances()
+    messageAdapters.value = (Array.isArray(data) ? data : []).filter(instance => instance.adapter_type === 'MESSAGE' && instance.enabled)
+  } catch {
+    messageAdapters.value = []
+  }
+}
+
+function onNotificationAdapterChange() {
+  localData.value.providers = []
+  emitUpdate()
+}
+
+function notificationTargetSelected(target) {
+  const refs = Array.isArray(localData.value.providers) ? localData.value.providers : []
+  return refs.some(ref => ref.provider === target.provider && ref.target === target.target)
+}
+
+function toggleNotificationTarget(target, selected) {
+  const validKeys = new Set(notificationTargets.value.map(item => item.key))
+  const refs = (Array.isArray(localData.value.providers) ? localData.value.providers : [])
+    .filter(ref => validKeys.has(`${ref.provider}/${ref.target}`))
+  localData.value.providers = selected
+    ? [...refs.filter(ref => ref.provider !== target.provider || ref.target !== target.target), { provider: target.provider, target: target.target }]
+    : refs.filter(ref => ref.provider !== target.provider || ref.target !== target.target)
+  emitUpdate()
+}
+
+// ── Block name (issue #1157) ───────────────────────────────────────────────
+// Default title of the block type — the placeholder of the rename field and
+// the secondary type line, shown when no custom name is set.
+const defaultNodeTitle = computed(() => {
+  const key = `logic.nodeTypes.${props.node?.type}`
+  return te(key) ? t(key) : (nodeDef.value?.label ?? props.node?.type)
+})
+
+function onNodeLabelChange() {
+  const next = String(localData.value.label ?? '').trim()
+  localData.value.label = next
+  // Committing an untouched field (Enter on a block that was never renamed)
+  // must not write an empty `label` into the block and trigger a save.
+  if (next === String(props.node.data.label ?? '').trim()) return
+  emitUpdate()
+}
+
 // ── Emit ───────────────────────────────────────────────────────────────────
 function emitUpdate() {
   emit('update', { ...localData.value })
+}
+
+function onSchemaFieldChange(key, schema) {
+  if (schema.type === 'number' || schema.type === 'integer') {
+    emitBoundedUpdate(key, schema)
+    return
+  }
+  emitUpdate()
+}
+
+function emitBoundedUpdate(key, schema) {
+  if (key === 'max_payload_size_mb') {
+    localData.value[key] = normaliseIcalPayloadSize(localData.value[key])
+    emitUpdate()
+    return
+  }
+  const rawValue = localData.value[key]
+  if (rawValue === '' || rawValue === null || rawValue === undefined) {
+    emitUpdate()
+    return
+  }
+
+  const value = Number(rawValue)
+  if (Number.isFinite(value)) {
+    const minimum = schema.min ?? schema.minimum
+    const maximum = schema.max ?? schema.maximum
+    let bounded = value
+    if (minimum !== undefined) bounded = Math.max(minimum, bounded)
+    if (maximum !== undefined) bounded = Math.min(maximum, bounded)
+    if (schema.type === 'integer') bounded = Math.round(bounded)
+    localData.value[key] = bounded
+  }
+  emitUpdate()
 }
 </script>
 
@@ -2191,15 +3054,31 @@ function emitUpdate() {
   align-items: center;
   justify-content: center;
   gap: 3px;
+  /* Four tabs (DataPoint setting tabs + debug values) must still fit into the
+     narrowest panel width, so labels shrink and ellipsize instead of pushing
+     the bar wider than the panel. */
+  min-width: 0;
+}
+.tab-btn__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .tab-btn:hover   { color: #334155; }
 .tab-btn--active { color: #0f172a; border-bottom-color: #0d9488; }
 .tab-dot { color: #0d9488; font-size: 14px; line-height: 1; }
+.tab-btn--debug              { color: #b45309; }
+.tab-btn--debug:hover        { color: #92400e; }
+.tab-btn--debug.tab-btn--active { color: #b45309; border-bottom-color: #f59e0b; }
 
 :global(.dark) .tab-btn          { color: #64748b; }
 :global(.dark) .tab-btn:hover    { color: #94a3b8; }
 :global(.dark) .tab-btn--active  { color: #e2e8f0; border-bottom-color: #14b8a6; }
 :global(.dark) .tab-dot          { color: #14b8a6; }
+:global(.dark) .tab-btn--debug                  { color: #d97706; }
+:global(.dark) .tab-btn--debug:hover            { color: #fbbf24; }
+:global(.dark) .tab-btn--debug.tab-btn--active  { color: #fbbf24; border-bottom-color: #f59e0b; }
 
 .section-label {
   font-size: 9px;

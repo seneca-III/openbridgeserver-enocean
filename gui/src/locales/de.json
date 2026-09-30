@@ -1,20 +1,33 @@
 {
+  "datetimeNames": {
+    "weekdays": "Montag|Dienstag|Mittwoch|Donnerstag|Freitag|Samstag|Sonntag",
+    "weekdaysShort": "Mo.|Di.|Mi.|Do.|Fr.|Sa.|So.",
+    "weekdaysTwo": "Mo|Di|Mi|Do|Fr|Sa|So",
+    "months": "Januar|Februar|März|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember",
+    "monthsShort": "Jan.|Feb.|März|Apr.|Mai|Juni|Juli|Aug.|Sept.|Okt.|Nov.|Dez."
+  },
   "nav": {
     "dashboard": "Übersicht",
     "datapoints": "Objekte",
     "adapters": "Adapter",
+    "knxDevices": "KNX-Geräte",
     "history": "Historie",
     "ringbuffer": "Monitor",
+    "messageArchives": "Meldungsarchive",
     "logs": "Logs",
     "logic": "Logikmodul",
     "settings": "Einstellungen",
     "visu": "Visu"
   },
   "sidebar": {
+    "productName": "open bridge server",
+    "adapterWarningsTitle": "{label} — {count} Warnung(en)",
+    "visu": "Visu",
     "liveConnected": "Live verbunden",
     "disconnected": "Getrennt",
     "live": "Live",
-    "offline": "Offline"
+    "offline": "Offline",
+    "adapterWarningCount": "{count} Warnung(en)"
   },
   "login": {
     "username": "Benutzername",
@@ -22,6 +35,22 @@
     "submit": "Anmelden",
     "submitting": "Anmelden …",
     "logoAlt": "open bridge server"
+  },
+  "setup": {
+    "title": "Ersteinrichtung",
+    "intro": "Diese Installation hat noch kein Administratorkonto. Lege es jetzt an — danach ist die Oberfläche wie gewohnt erreichbar.",
+    "username": "Benutzername",
+    "password": "Passwort",
+    "passwordRepeat": "Passwort wiederholen",
+    "passwordHint": "Mindestens {n} Zeichen.",
+    "submit": "Konto anlegen",
+    "submitting": "Konto wird angelegt …",
+    "securityNote": "Führe diesen Schritt direkt nach der Installation aus: bis das Konto existiert, kann jeder, der den Server im Netzwerk erreicht, es anlegen.",
+    "errorUsernameRequired": "Bitte einen Benutzernamen eingeben.",
+    "errorPasswordTooShort": "Das Passwort muss mindestens {n} Zeichen lang sein.",
+    "errorPasswordMismatch": "Die beiden Passwörter stimmen nicht überein.",
+    "errorAlreadyDone": "Die Einrichtung wurde bereits abgeschlossen. Lade die Seite neu und melde dich an.",
+    "errorFailed": "Das Konto konnte nicht angelegt werden. Bitte erneut versuchen."
   },
   "dashboard": {
     "title": "Übersicht",
@@ -51,7 +80,23 @@
       "noDatapoints": "Keine Objekte vorhanden"
     },
     "activeWarnings": "Aktive Warnungen",
-    "toAdapters": "Zu Adaptern →"
+    "toAdapters": "Zu Adaptern →",
+    "ringbuffer": {
+      "title": "Monitor / Retention",
+      "toMonitor": "Zum Monitor →",
+      "loadError": "Monitor-Status konnte nicht geladen werden",
+      "disabledTitle": "Monitor deaktiviert",
+      "disabledHint": "Es werden keine Wertänderungen aufgezeichnet. Zum Aktivieren konfigurieren.",
+      "configure": "Konfigurieren",
+      "budget": "Budget-Auslastung",
+      "budgetPeakHint": "Ziel, kein harter Deckel – Spitze bis ~133 %",
+      "unlimited": "unbegrenzt",
+      "segments": "Segmente",
+      "segmentDetails": "Segment-Details",
+      "configuration": "Konfiguration",
+      "entries": "Einträge",
+      "diskUsage": "Belegter Speicherplatz"
+    }
   },
   "datapoints": {
     "title": "Objekte",
@@ -97,7 +142,24 @@
       "persistValueHint": "nach Neustart sofort verfügbar",
       "recordHistory": "Historisierung aktiv",
       "recordHistoryHint": "Werte in der Historie-DB speichern",
-      "saveError": "Fehler beim Speichern"
+      "externalWriteEnabled": "Externes Schreiben erlauben",
+      "externalWriteEnabledHint": "jeder MQTT-Client mit Broker-Zugriff kann diesen Wert dann setzen",
+      "saveError": "Fehler beim Speichern",
+      "unitCategories": {
+        "temperature": "Temperatur",
+        "humidityAirQuality": "Feuchte & Luftqualität",
+        "pressure": "Druck",
+        "electricity": "Elektrizität",
+        "light": "Licht",
+        "speedAcceleration": "Geschwindigkeit & Beschleunigung",
+        "angle": "Winkel",
+        "volumeFlow": "Volumen & Durchfluss",
+        "lengthArea": "Länge & Fläche",
+        "mass": "Masse",
+        "time": "Zeit",
+        "radiation": "Strahlung",
+        "other": "Sonstiges"
+      }
     },
     "delete": {
       "confirm": "Objekt wirklich löschen?",
@@ -119,6 +181,14 @@
     "createModal": "Neues Objekt",
     "deleteTitle": "Objekt löschen",
     "deleteWithBindings": "'{name}' und alle Verknüpfungen löschen?",
+    "duplicate": {
+      "action": "Duplizieren",
+      "title": "Objekt duplizieren",
+      "hint": "Alle Eigenschaften und Adapter-Verknüpfungen werden kopiert, mit Ausnahme der Zentraltechnik-Einstufung und der externen Schreibfreigabe — beide sind bei der Kopie immer deaktiviert. Aktuelle Werte und Historie werden nicht übernommen.",
+      "defaultName": "Kopie von {name}",
+      "saving": "Wird dupliziert …",
+      "error": "Das Objekt konnte nicht dupliziert werden."
+    },
     "quality": {
       "good": "Gut",
       "uncertain": "Unbekannt",
@@ -158,6 +228,10 @@
       "bindingRead": "Lesen",
       "bindingWrite": "Schreiben",
       "bindingReadWrite": "Lesen/Schreiben",
+      "knxMainGa": "GA",
+      "knxStateGa": "Rückmelde-GA",
+      "knxUnnamedGa": "Unbenannte Gruppenadresse",
+      "knxNoDevices": "Kein KNX-Gerät für diese GA importiert",
       "bindingDisabled": "Deaktiviert",
       "graphDisabled": "Deaktiviert"
     },
@@ -346,7 +420,11 @@
         "noEnoceanDatapointsFound": "Keine passenden EnOcean-Datenpunkte gefunden",
         "enoceanDevicesLoadFailed": "EnOcean-Geräte konnten nicht geladen werden",
         "enoceanDatapointsLoadFailed": "EnOcean-Datenpunkte konnten nicht geladen werden",
-        "selectAdapterInstance": "Bitte eine Adapter-Instanz wählen"
+        "selectAdapterInstance": "Bitte eine Adapter-Instanz wählen",
+        "selectOnewireInstanceFirst": "Bitte zuerst eine 1-Wire-Instanz wählen",
+        "noSensorsFound": "Keine Sensoren gefunden",
+        "onewireScanFailed": "1-Wire-Sensor-Scan fehlgeschlagen",
+        "onewireAliasSaveFailed": "Alias konnte nicht gespeichert werden"
       },
       "knxSection": "KNX-Verknüpfung",
       "dptLabel": "DPT *",
@@ -411,10 +489,12 @@
       "enoceanDatapointsCount": "Datenpunkte",
       "onewireSection": "1-Wire Binding",
       "onewireSensorIdLabel": "Sensor-ID *",
-      "onewireSensorIdPlaceholder": "z.B. 28-000000000001",
-      "onewireSensorTypeLabel": "Sensor-Typ",
-      "onewireSensorTypePlaceholder": "DS18B20",
-      "onewireSensorTypeHint": "Standard: DS18B20",
+      "onewireSensorIdPlaceholder": "z.B. 28.4B057F0A1C10",
+      "onewirePropertyLabel": "Property",
+      "onewirePropertyPlaceholder": "temperature",
+      "onewireScanButton": "Scannen",
+      "onewireAliasPlaceholder": "Label (z.B. Gästebad)",
+      "onewireAliasSave": "Speichern",
       "haSection": "Home Assistant Binding",
       "haEntityIdLabel": "Entity ID *",
       "haEntityIdPlaceholder": "z.B. light.living_room, sensor.temperature",
@@ -563,7 +643,22 @@
       "ztSelectHoliday": "— Feiertag wählen —",
       "ztOutputDivider": "Ausgabe",
       "ztOutputValueLabel": "Schalt-Wert",
-      "ztOutputValueHint": "z.B. 1 / 0 / true / false / 21.5 / Beliebiger Text",
+      "ztOutputValueHint_boolean": "Schaltet den Wert auf Ein (true) bzw. Aus (false).",
+      "ztOutputValueHint_integer": "Ganzzahl, z.B. 50 oder 0.",
+      "ztOutputValueHint_float": "Dezimalzahl, z.B. 21.5 oder 0.",
+      "ztOutputValueHint_date": "Datum im Format JJJJ-MM-TT, z.B. 2026-12-24.",
+      "ztOutputValueHint_time": "Uhrzeit im Format HH:MM:SS, z.B. 08:00:00.",
+      "ztOutputValueHint_datetime": "Datum und Uhrzeit (ISO 8601), z.B. 2026-12-24T08:00:00.",
+      "ztOutputValueHint_text": "Wird unverändert übernommen — auch 1, 0, on oder ein.",
+      "ztOutputValueOn": "Ein (true)",
+      "ztOutputValueOff": "Aus (false)",
+      "ztOutputValueErrorRequired": "Bitte einen Schaltwert angeben.",
+      "ztOutputValueErrorBoolean": "Kein gültiger Ja/Nein-Wert — erlaubt sind 1/0, true/false, on/off, ein/aus.",
+      "ztOutputValueErrorInteger": "Kein gültiger Ganzzahl-Wert.",
+      "ztOutputValueErrorFloat": "Kein gültiger Zahlenwert.",
+      "ztOutputValueErrorDate": "Kein gültiges Datum (erwartet JJJJ-MM-TT).",
+      "ztOutputValueErrorTime": "Keine gültige Uhrzeit (erwartet HH:MM oder HH:MM:SS).",
+      "ztOutputValueErrorDatetime": "Kein gültiger Zeitstempel (erwartet JJJJ-MM-TTTHH:MM:SS).",
       "anwSection": "Anwesenheitssimulation — Binding-Optionen",
       "anwOffsetOverrideLabel": "Versatz überschreiben",
       "anwDefaultAdapter": "Standard (Adapter)",
@@ -587,6 +682,13 @@
       "messageTemplateLabel": "Nachrichtenvorlage",
       "targetsLabel": "Ziele",
       "addTarget": "Ziel hinzufügen",
+      "messageArchiveStrategyLabel": "Aktion",
+      "messageArchiveStrategyNone": "Deaktiviert",
+      "messageArchiveStrategySendOnly": "Nur senden",
+      "messageArchiveStrategySendAndArchive": "Senden und archivieren",
+      "messageArchiveStrategyArchiveOnly": "Nur archivieren",
+      "messageArchiveLabel": "Meldungsarchiv",
+      "messageArchivePlaceholder": "Meldungsarchiv auswählen",
       "messageSendOnChange": "Nur beim Wechsel in den erfüllten Zustand senden",
       "snmpHostLabel": "Gerät (IP/DNS) *",
       "snmpHostPlaceholder": "z.B. 192.168.1.100 oder switch.local",
@@ -731,6 +833,10 @@
           "title": "Lesezugriffe serialisieren",
           "description": "Sendet Modbus-Requests nacheinander statt gleichzeitig. Empfohlen für einfache Geräte (Heizungsregler, Wechselrichter, Zähler), die nur einen Request gleichzeitig verarbeiten können. Deaktivieren bei leistungsstarken PLCs mit Multi-Request-Unterstützung."
         },
+        "shared_bus": {
+          "title": "Bus mit Instanzen gleicher IP:Port teilen",
+          "description": "Serialisiert I/O über ALLE Instanzen, die denselben Host:Port pollen (z.B. mehrere Geräte hinter einem RS485/Modbus-TCP-Gateway). Verhindert gleichzeitige Requests konkurrierender Instanzen am selben Bus."
+        },
         "startup_jitter_s": {
           "title": "Startup-Jitter (s)",
           "description": "Maximale zufällige Verzögerung (Sekunden) vor dem ersten Poll jedes Bindings. Verhindert einen Request-Burst wenn alle Tasks gleichzeitig starten. 0 = deaktiviert."
@@ -772,6 +878,27 @@
         },
         "priv_key": {
           "title": "Privacy-Key (v3)"
+        },
+        "host": {
+          "title": "Host (IP/DNS)"
+        },
+        "port": {
+          "title": "UDP-Port"
+        },
+        "oid": {
+          "title": "OID"
+        },
+        "data_type": {
+          "title": "Datentyp"
+        },
+        "poll_interval": {
+          "title": "Poll-Intervall (s)"
+        },
+        "timeout": {
+          "title": "Timeout (s)"
+        },
+        "retries": {
+          "title": "Wiederholungen"
         }
       },
       "ZEITSCHALTUHR": {
@@ -854,6 +981,66 @@
         "custom_holidays": {
           "title": "Benutzerdefinierte Feiertage",
           "description": "Benutzerdefinierte Feiertage als Liste von Ausdrücken. Formate: 'MM-TT[:Name]' (fixes Datum, z.B. '12-26:Stephanstag'), 'easter+N[:Name]' / 'easter-N[:Name]' (relativ zu Ostersonntag), 'advent+N[:Name]' / 'advent-N[:Name]' (relativ zum 1. Advent), 'last_WT_MON[:Name]' (letzter Wochentag des Monats), 'N_WT_MON[:Name]' (n-ter Wochentag). Wochentags-Kürzel: MO DI MI DO FR SA SO. Monats-Kürzel: JAN FEB MAR APR MAI JUN JUL AUG SEP OKT NOV DEZ. Mehrere Einträge durch Komma oder Zeilenumbruch trennen."
+        },
+        "timer_type": {
+          "description": "Schaltuhrentyp"
+        },
+        "meta_type": {
+          "description": "Metadaten-Typ (nur bei timer_type=meta)"
+        },
+        "weekdays": {
+          "description": "Aktive Wochentage (0=Mo, 1=Di, 2=Mi, 3=Do, 4=Fr, 5=Sa, 6=So)"
+        },
+        "months": {
+          "description": "Aktive Monate 1-12 (leer = alle; nur Jahresschaltuhr)"
+        },
+        "day_of_month": {
+          "description": "Tag im Monat (0 = alle; nur Jahresschaltuhr)"
+        },
+        "time_ref": {
+          "description": "Zeitreferenz"
+        },
+        "hour": {
+          "description": "Stunde (nur bei time_ref=absolute)"
+        },
+        "minute": {
+          "description": "Minute"
+        },
+        "offset_minutes": {
+          "description": "Offset in Minuten (positiv/negativ) relativ zur Zeitreferenz"
+        },
+        "solar_altitude_deg": {
+          "description": "Sonnenhöhenwinkel in Grad (−18 … 90) — nur bei time_ref=solar_altitude. Beispiele: 0° = Horizont, −6° = bürgerliche Dämmerung, 30° = mittlerer Vormittag"
+        },
+        "sun_direction": {
+          "description": "Richtung der Sonnenbewegung — nur bei time_ref=solar_altitude. rising = Sonne steigt (morgens), setting = Sonne sinkt (nachmittags/abends)"
+        },
+        "every_hour": {
+          "description": "Jede Stunde zur angegebenen Minute schalten"
+        },
+        "every_minute": {
+          "description": "Jede Minute schalten"
+        },
+        "holiday_mode": {
+          "description": "Feiertagsbehandlung"
+        },
+        "vacation_mode": {
+          "description": "Ferienbehandlung"
+        },
+        "selected_holidays": {
+          "description": "Ausgewählte Feiertage für timer_type=holiday (leer = alle Feiertage)"
+        },
+        "date_window_enabled": {
+          "description": "Datum-Fenster: nur innerhalb eines Zeitraums schalten"
+        },
+        "date_window_from": {
+          "description": "Fenster-Beginn (MM-TT | easter±N | advent±N | holiday:Name±N)"
+        },
+        "date_window_to": {
+          "description": "Fenster-Ende (MM-TT | easter±N | advent±N | holiday:Name±N)"
+        },
+        "value": {
+          "description": "Ausgabewert beim Schalten. Erlaubt: 0/1, true/false, on/off, ein/aus, Ganzzahl, Dezimalzahl oder String"
         }
       },
       "HOME_ASSISTANT": {
@@ -999,13 +1186,21 @@
         }
       },
       "ONEWIRE": {
+        "host": {
+          "title": "Host",
+          "description": "Hostname oder IP-Adresse eines laufenden owserver-Prozesses (lokaler Sidecar/Dienst oder extern — dieser Adapter startet ihn nicht)"
+        },
+        "port": {
+          "title": "Port",
+          "description": "owserver-Port (Standard: 4304)"
+        },
         "poll_interval": {
           "title": "Abfrageintervall (s)",
           "description": "Wie oft Sensoren gelesen werden, in Sekunden"
         },
-        "w1_path": {
-          "title": "1-Wire-Pfad",
-          "description": "Sysfs-Pfad zum 1-Wire-Bus (Standard: /sys/bus/w1/devices)"
+        "request_timeout": {
+          "title": "Anfrage-Timeout (s)",
+          "description": "Sekunden pro owserver-Aufruf, bevor er als Fehler gewertet wird"
         }
       }
     },
@@ -1029,8 +1224,6 @@
       "couldNotOpenPort": "{port} konnte nicht geöffnet werden",
       "modbusSerialConnected": "Verbunden ({port} @ {baudrate} Baud)",
       "modbusReconnectBackoff": "Modbus-TCP-Neuverbindung pausiert (Backoff aktiv)",
-      "pathNotFound": "{path} nicht gefunden",
-      "onewireBusAt": "1-Wire-Bus an {path}",
       "socketConnectFailed": "Socket.IO-Verbindung fehlgeschlagen",
       "socketDisconnected": "Socket.IO getrennt",
       "socketUnstable": "ioBroker Socket.IO-Verbindung instabil: mehrere Disconnects in kurzer Zeit.",
@@ -1046,6 +1239,7 @@
       "knxTunnelStable": "Tunnel-Pool wieder stabil.",
       "invalidBindingsSkipped": "{count} ungültige Verknüpfung(en) übersprungen ({examples})",
       "messageProviderFailures": "MESSAGE-Provider-Fehler: {count} Ziel(e)",
+      "messageArchiveWriteFailed": "Meldungsarchiv konnte nicht geschrieben werden",
       "messageSent": "MESSAGE gesendet"
     },
     "testResult": {
@@ -1142,6 +1336,7 @@
     "storageFixed": "Speichermodell ist serverseitig fix:",
     "maxDisk": "Max. Speicherplatz auf Platte",
     "maxDiskPlaceholder": "z. B. 500",
+    "effectiveStorageNote": "Effektiver Speicherbedarf: Das Budget ist ein Retention-Ziel, kein harter Momentan-Deckel. Ohne explizite Segmentgröße wird sie aus dem Speicherbudget als Budget/3 abgeleitet. Dann liegt der Spitzenwert bei bis zu ~133 %. Ohne Speicherbudget und ohne explizite Segmentgröße gibt es keine größenbasierte Rotation.",
     "maxRetention": "Max. Retention",
     "maxRetentionPlaceholder": "z. B. 30",
     "maxEntriesPlaceholder": "z. B. 10000",
@@ -1157,6 +1352,12 @@
     "validationMinEntries": "Max. Einträge muss mindestens 100 sein",
     "validationMinDisk": "Max. Speicherplatz muss grösser als 0 sein",
     "validationRetentionNaN": "Retention muss eine gültige Zahl sein",
+    "validationSegmentTriggerRequired": "Für den segmentierten Ringbuffer ist mindestens eine wirksame Segment-Rotationsgrenze erforderlich: explizit oder aus einer passenden Gesamtgrenze abgeleitet.",
+    "unboundedWarningTitle": "Gesamt-Retention unbegrenzt",
+    "unboundedWarningBody": "Es ist keine Grenze für Einträge, Speicherplatz oder Alter aktiv. Geschlossene Segmente werden daher nicht automatisch entfernt und der Ringbuffer kann unbegrenzt wachsen.",
+    "unboundedConfirmTitle": "Ringbuffer unbegrenzt wachsen lassen?",
+    "unboundedConfirmMessage": "Ohne Gesamtgrenze werden alte Segmente dauerhaft aufbewahrt. Der belegte Speicher wächst weiter, bis die Konfiguration geändert oder Speicher extern freigegeben wird.",
+    "unboundedConfirmLabel": "Unbegrenzt speichern",
     "export": {
       "csvFormat": "CSV-Format",
       "rfcResetTitle": "Setzt Trennzeichen, Anführungszeichen und Escape-Zeichen auf die RFC-4180-Vorgabe.",
@@ -1176,7 +1377,8 @@
       "export": "Exportieren",
       "failed": "Export fehlgeschlagen",
       "title": "Export",
-      "fileExtHint": "Dateiendung: {ext}."
+      "fileExtHint": "Dateiendung: {ext}.",
+      "escapeCharPlaceholder": "(leer)"
     },
     "topbar": {
       "activeTitle": "Aktiv — klicken zum Deaktivieren (nur für mich)",
@@ -1209,6 +1411,12 @@
       "liveFilterHint": "Live-Filter — auch zukünftige Objekte unter diesen Knoten.",
       "datapointsLabel": "Datenpunkte",
       "fixedSelectionHint": "Feste Auswahl.",
+      "devicesLabel": "KNX-Geräte",
+      "devicesHint": "Filtert über die Gruppenadressen der ausgewählten Geräte.",
+      "expandDeviceTitle": "Datenpunkte dieses Geräts übernehmen",
+      "expandDeviceError": "Datenpunkte des KNX-Geräts konnten nicht ermittelt werden.",
+      "expandingDevice": "Datenpunkte für {device} werden ermittelt. Das kann bei großen Geräten dauern.",
+      "expandingDeviceShort": "Lädt",
       "tagsLabel": "Tags",
       "adapterLabel": "Adapter",
       "fulltextLabel": "Volltextsuche (q)",
@@ -1272,6 +1480,166 @@
       "range": "Bereich {from} … {to}",
       "fromShort": "Ab {from}",
       "toShort": "Bis {to}"
+    },
+    "segmentSectionTitle": "Segmentierter Speicher",
+    "segmentTotalSize": "Gesamtgröße",
+    "segmentCount": "Segmente",
+    "segmentActive": "Aktives Segment",
+    "segmentOldestEvent": "Ältestes Event",
+    "segmentNewestEvent": "Neuestes Event",
+    "segmentsListTitle": "Segmente",
+    "segmentColId": "ID",
+    "segmentColStatus": "Status",
+    "segmentColRows": "Zeilen",
+    "segmentColSize": "Größe",
+    "segmentColTimespan": "Zeitspanne",
+    "segmentColIntegrity": "Integrität",
+    "segmentColRecovery": "Wiederherstellung",
+    "segmentLegacyNote": "Nur-Lese-Altdaten (vor Upgrade)",
+    "segmentStatus": {
+      "active": "Aktiv",
+      "closed": "Geschlossen",
+      "legacy": "Altdaten",
+      "checkpoint_pending": "Checkpoint ausstehend",
+      "quarantined": "Isoliert"
+    },
+    "integrityStatus": {
+      "ok": "OK",
+      "corrupt": "Beschädigt",
+      "unknown": "Unbekannt"
+    },
+    "recoveryStatus": {
+      "recovered": "Wiederhergestellt",
+      "quarantined": "Isoliert",
+      "pending": "Ausstehend",
+      "failed": "Fehlgeschlagen",
+      "dirty_wal": "Unsauberes WAL"
+    },
+    "walCheckpointTitle": "WAL / Checkpoint",
+    "walSize": "WAL-Größe",
+    "checkpointPending": "Checkpoint ausstehend",
+    "lastCheckpoint": "Letzter Checkpoint",
+    "checkpointBusyNotice": "Checkpoint war {n}-mal belegt und wurde verschoben.",
+    "retentionOverBudget": "Aufbewahrung über Budget: es liegen mehr Daten vor als die Retention-Grenzen erlauben.",
+    "retentionOverBudgetReason": "Aufbewahrung über Budget: {reason}",
+    "storageOnNetworkDrive": "Der Speicher liegt auf einem Netzlaufwerk. Das kann zu Datenverlust oder Sperren führen — lokaler Speicher wird empfohlen.",
+    "segmentMaxAge": "Segment-Rotation nach Alter",
+    "segmentMaxAgeHint": "Explizit aktivieren oder deaktivieren. Ohne expliziten Wert wird eine aktive Gesamt-Retention nach Alter durch drei geteilt.",
+    "segmentMaxAgePlaceholder": "z. B. 6",
+    "segmentAdvanced": "Erweitert",
+    "segmentAdvancedHint": "Jede Schwelle kann explizit gesetzt werden. Ist sie deaktiviert, wird sie aus der passenden Gesamtgrenze abgeleitet oder bleibt ohne passende Gesamtgrenze aus.",
+    "segmentMaxBytes": "Segment-Rotation nach Größe",
+    "segmentMaxRows": "Segment-Rotation nach Zeilen",
+    "segmentOptionalPlaceholder": "optional",
+    "segmentSourceExplicit": "Explizit: {value}",
+    "segmentSourceExplicitInvalid": "Explizit: gültigen Wert eingeben",
+    "segmentSourceDerived": "Abgeleitet aus Gesamtgrenze: {value}",
+    "segmentSourceDisabled": "Deaktiviert",
+    "segmentRatioHint": "Damit die Aufbewahrung segmentgenau greifen kann, muss jedes gesetzte Retention-Limit (Größe, Zeilen, Alter) mindestens das Dreifache der zugehörigen Segment-Schwelle betragen.",
+    "segmentRatioError": "Die Segmentierung ist zu grob für die gewählte Aufbewahrung: Jedes gesetzte Retention-Limit (Größe, Zeilen, Alter) muss mindestens das Dreifache der zugehörigen Segment-Schwelle betragen.",
+    "validationSegmentMaxAge": "Das Segment-Alter muss mindestens 5 Minuten betragen.",
+    "validationSegmentMaxBytes": "Die Segmentgröße muss größer als 0 sein.",
+    "validationSegmentMaxRows": "Die Segment-Zeilenzahl muss größer als 0 sein.",
+    "segmentsButton": "Segmente",
+    "segmentsButtonTitle": "Segmentierten Speicher anzeigen",
+    "segmentProblemsBadgeTitle": "Es gibt Segment-Probleme — zum Ansehen öffnen.",
+    "segmentProblemBadge": "Problem",
+    "segmentProblemPrefix": "Probleme:",
+    "segmentProblemCorrupt": "{n} beschädigt",
+    "segmentProblemQuarantined": "{n} isoliert",
+    "segmentProblemPending": "{n} Wiederherstellung ausstehend",
+    "segmentProblemDirtyWal": "{n} unsauberes WAL",
+    "segmentProblemCheckpointPending": "{n} Checkpoint ausstehend",
+    "retentionSignal": {
+      "budgetFloor": "Budget zu klein: aktive/isolierte Segmente überschreiten das Budget dauerhaft. Budget erhöhen oder Segmentgröße verringern.",
+      "belowTarget": "Retention unter Ziel: Budget reicht nur für ~{current}, konfiguriert sind ~{target}. Für das Ziel Budget ≥ {budget}.",
+      "belowTargetNoBudget": "Retention unter Ziel: Budget reicht nur für ~{current}, konfiguriert sind ~{target}."
+    },
+    "segmentQuarantineExplain": "Defektes Segment, zur Analyse isoliert.",
+    "unitMiB": "MiB",
+    "unitGiB": "GiB",
+    "unitSeconds": "Sekunden",
+    "unitMinutes": "Minuten",
+    "unitHours": "Stunden",
+    "prognosis": {
+      "title": "Prognose",
+      "warming": "Prognose läuft sich noch ein (zu wenige Segmente).",
+      "warmingLive": "Live-Daten werden gesammelt — erste Prognose in ~{seconds} s.",
+      "provisional": "Vorläufig aus {seconds} s Live-Daten; wird mit jedem Abruf genauer.",
+      "idle": "Seit {seconds} Sekunden keine neuen Events.",
+      "rate": "Aktuell ~{rows} Events/s — hochgerechnet ~{mib} MiB/h.",
+      "eventRateOnly": "Aktuell ~{rows} Events/s — Speicherwachstum wird noch gemessen.",
+      "storageRateOnly": "Hochgerechnet ~{mib} MiB/h — Eventrate noch unbekannt.",
+      "rotation": "Neues Segment ~alle {hours} h",
+      "rotationWithTrigger": "Neues Segment ~alle {hours} h — zuerst greift: {trigger}",
+      "rotationSizeCap": " — der Größen-Cap (~{cap} MiB) greift vor den eingestellten {age} h.",
+      "trigger": {
+        "age": "Alter",
+        "size": "Größe",
+        "rows": "Zeilen"
+      },
+      "history": "Budget {budget} reicht für ~{duration}.",
+      "historyUnlimited": "Budget unbegrenzt — Historie wächst.",
+      "historyOtherLimits": "Kein Speicherbudget — andere Gesamtgrenzen können alte Segmente entfernen.",
+      "unboundedGrowth": "Ohne Gesamtgrenze wachsen bei dieser Rate etwa {month} in 30 Tagen und {year} pro Jahr an.",
+      "budget": "Für ~{age}-h-Segmente: Budget ≥ {budget} (für mind. {segments} Segmente).",
+      "budgetRetention": "Für {retention} Retention: Budget ≥ {budget} (bei aktueller Rate).",
+      "hours": "{n} h",
+      "days": "{n} Tage"
+    },
+    "migration": {
+      "bannerTitle": "Alt-Daten gefunden – Migrations-Assistent",
+      "bannerBody": "Aus einer früheren Installation ist eine Alt-Historie vorhanden. Sie bleibt vor der Aufbewahrungs-Bereinigung geschützt, bis eine Entscheidung getroffen wird.",
+      "bannerEscalated": "Das Speicher-Budget ist erschöpft oder wird in Kürze erreicht – bitte jetzt über die Alt-Historie entscheiden.",
+      "openAssistant": "Assistent öffnen",
+      "later": "Später",
+      "title": "Migrations-Assistent",
+      "analysisTitle": "Ist-Analyse",
+      "legacySize": "Größe der Alt-Historie",
+      "rowEstimate": "Zeilen (geschätzt)",
+      "timespan": "Zeitspanne",
+      "budget": "Speicher-Budget",
+      "diskFree": "Freier Speicherplatz",
+      "noBudget": "Unbegrenzt",
+      "openConfig": "Konfiguration öffnen",
+      "migrateTitle": "Migrieren",
+      "migrateBody": "Kopiert die neuesten Alt-Daten bis zum Budget in Segmente; ältere Daten darüber hinaus werden verworfen. Danach ist die Migration abgeschlossen (endgültig).",
+      "diskOk": "Genug freier Speicherplatz für die Kopie ({free} frei, Budget {budget}).",
+      "diskLow": "Zu wenig freier Speicherplatz für die Kopie ({free} frei, Budget {budget}).",
+      "migrateStart": "Migration starten",
+      "migrateRunning": "Migration läuft …",
+      "progressRows": "{copied} von {total} Zeilen",
+      "progressDropped": "{n} Zeilen über Budget verworfen",
+      "migrateFailed": "Migration fehlgeschlagen: {error}",
+      "migrateDone": "Migration abgeschlossen – die neuesten Alt-Daten wurden übernommen.",
+      "statsRefreshFailed": "Migration abgeschlossen. Die aktuellen Segmentdaten konnten noch nicht geladen werden und werden beim nächsten Abruf erneut geprüft.",
+      "keepTitle": "Behalten",
+      "keepBody": "Die Alt-Historie bleibt lesbar erhalten. Der Schutz entfällt: Ist das Budget erschöpft, darf die Bereinigung die Alt-Historie später als Ganzes verwerfen. Revidierbar, solange die Alt-Historie existiert.",
+      "keepEta": "Voraussichtlich in ~{days} Tagen erzwingt das Budget die Rückgewinnung der Alt-Historie.",
+      "keepEtaNow": "Das Budget ist bereits überschritten – die Alt-Historie kann jederzeit als Ganzes wegfallen.",
+      "keepAction": "Behalten",
+      "keepDone": "Alt-Historie wird behalten. Die Entscheidung ist revidierbar, solange die Alt-Historie existiert.",
+      "discardTitle": "Verwerfen",
+      "discardBody": "Löscht die Alt-Historie sofort und endgültig.",
+      "discardFreed": "Freiwerdender Platz: {size}",
+      "discardAction": "Verwerfen",
+      "discardConfirmTitle": "Alt-Historie endgültig verwerfen?",
+      "discardConfirmMessage": "Die Alt-Historie ({size}) wird sofort und unwiderruflich gelöscht.",
+      "discardConfirmLabel": "Endgültig verwerfen",
+      "discardDone": "Die Alt-Historie wurde verworfen.",
+      "loadFailed": "Status des Migrations-Assistenten konnte nicht geladen werden.",
+      "actionFailed": "Aktion fehlgeschlagen.",
+      "assistantButton": "Migrations-Assistent",
+      "phase": {
+        "idle": "Bereit",
+        "starting": "Starte …",
+        "precheck": "Vorprüfung …",
+        "copying": "Kopiere …",
+        "committing": "Übernehme …",
+        "done": "Abgeschlossen",
+        "failed": "Fehlgeschlagen"
+      },
+      "budgetLossHint": "Budget zu klein für eine verlustfreie Übernahme: Bei der Migration werden die ältesten Alt-Events verworfen. Für die vollständige Historie das Budget vorher auf mindestens {recommended} erhöhen (Faustformel: 2 × Alt-Datenbank; nach der Migration bei Bedarf über ein Alterslimit statt über das Budget reduzieren). Bis zur Entscheidung bleibt die Alt-Historie geschützt – die Live-Aufzeichnung unterliegt aber weiterhin diesem Budget. Nach dem Erhöhen des Budgets zeitnah migrieren – die Live-Aufzeichnung wächst sonst in das neue Budget hinein und verdrängt beim Kopieren entsprechend viele Alt-Events."
     }
   },
   "logs": {
@@ -1303,26 +1671,43 @@
     "openSheet": "Logic-Sheet öffnen",
     "renameGraph": "Graph umbenennen",
     "duplicateGraph": "Graph duplizieren",
+    "duplicateNameSuffix": " (Kopie)",
     "exportJson": "Graph als JSON exportieren",
     "importJson": "Graph aus JSON importieren",
     "searchNodes": "Knoten suchen — z.B. Raum, Heizung …",
     "searchNodesPalette": "Knoten suchen …",
     "negateOutput": "Ausgang negieren",
     "debugMode": "Debug-Modus: zeigt Werte nach Ausführen",
+    "snapToGrid": "Einrasten",
+    "snapToGridTitle": "Funktionsblöcke am Raster einrasten",
+    "gridVisible": "Raster",
+    "gridShowTitle": "Raster einblenden",
+    "gridHideTitle": "Raster ausblenden",
+    "gridSize": "Rastermaß",
     "deleteBlock": "Block löschen",
     "deleteNode": "Ast löschen",
     "init": "Init",
+    "blockName": {
+      "label": "Blockname",
+      "editTitle": "{name} — Doppelklick zum Umbenennen",
+      "panelHint": "Eigener Name für diesen Block. Leer lassen für den Standardtitel des Blocktyps.",
+      "typeAndId": "{type} · {id}"
+    },
     "nodeTypes": {
       "divide": "Dividieren",
       "const_value": "Festwert",
+      "comment": "Kommentar",
       "and": "AND",
       "or": "OR",
       "not": "NOT",
       "xor": "XOR",
       "gate": "TOR",
       "memory": "Speicher",
+      "change_filter": "Änderungsfilter",
+      "edge_detect": "Flankenerkennung",
       "compare": "Vergleich",
       "hysteresis": "Hysterese",
+      "merge": "Klemme",
       "decision": "Entscheidung",
       "value_mapping": "Zuordnung",
       "datapoint_read": "Objekt lesen",
@@ -1334,18 +1719,24 @@
       "statistics": "Statistik",
       "avg_multi": "Mittelwert",
       "string_concat": "String Verketten",
+      "string_replace": "String Suchen/Ersetzen",
       "heating_circuit": "Sommer/Winter (DIN)",
       "min_max_tracker": "Min/Max Tracker",
       "consumption_counter": "Verbrauchszähler",
       "timer_delay": "Verzögerung",
       "timer_pulse": "Impuls",
+      "value_sequence": "Sequenz",
       "timer_cron": "Trigger",
+      "datetime": "Datum/Zeit",
       "operating_hours": "Betriebsstd.",
+      "sensor_watchdog": "Sensor Watchdog",
       "python_script": "Python Script",
       "ai_logic": "AI Logic",
       "astro_sun": "Astro Sonne",
       "notify_pushover": "Pushover",
       "notify_sms": "SMS (seven.io)",
+      "notify_message": "Benachrichtigung",
+      "message_archive": "Meldungsarchiv",
       "wake_on_lan": "Wake on LAN",
       "host_check": "Host Check",
       "json_extractor": "JSON Extraktor",
@@ -1359,7 +1750,7 @@
     "newGraphBtn": "+ Neu",
     "run": "Ausführen",
     "graphDisabledSuffix": " (deaktiviert)",
-    "runTitle": "Graph ausführen",
+    "runTitle": "Berechtigungen prüfen und Graph ausführen",
     "runDisabledTitle": "Graph ist deaktiviert — kein Ausführen möglich",
     "toggleActive": "✓ Aktiv",
     "toggleDisabled": "⊘ Deaktiviert",
@@ -1369,8 +1760,30 @@
     "deactivated": "Graph deaktiviert",
     "errorToggle": "Fehler beim Ändern des Status",
     "debugBtn": "Debug",
+    "debugInspector": {
+      "inputs": "Eingänge",
+      "outputs": "Ausgänge",
+      "incoming": "Eingehender Wert",
+      "effective": "Effektiver Wert",
+      "override": "Temporäre Überschreibung",
+      "overridePlaceholder": "JSON oder Text; leer bedeutet keine Überschreibung",
+      "overridden": "Überschrieben",
+      "clearAll": "Alle Überschreibungen löschen",
+      "copyAll": "Nutzdaten kopieren",
+      "copy": "Kopieren",
+      "copied": "Kopiert!",
+      "noValues": "Keine Eingänge",
+      "noExecution": "Logikblatt ausführen, um Ausgänge zu prüfen.",
+      "timestamp": "Ausgeführt",
+      "duration": "Dauer",
+      "overrideExecution": "Diese Ausführung verwendete temporäre Eingangsüberschreibungen."
+    },
     "rename": "Umbenennen",
     "duplicate": "Duplizieren",
+    "copySelection": "Kopieren",
+    "copySelectionTitle": "Markierte Blöcke kopieren",
+    "pasteSelection": "Einfügen",
+    "pasteSelectionTitle": "Kopierte Blöcke einfügen",
     "export": "Exportieren",
     "import": "Importieren",
     "emptyHint": "Logikblatt wählen oder neu erstellen",
@@ -1381,15 +1794,37 @@
     "create": "Erstellen",
     "saved": "Graph gespeichert",
     "errorSave": "Fehler beim Speichern",
+    "errorLoad": "Fehler beim Laden des Graphen",
     "runResult": "Graph ausgeführt — {count} Nodes evaluiert",
+    "preflightTitle": "Graph-Ausführung prüfen",
+    "preflightDescription": "Prüfe den Graphen und alle externen Auswirkungen vor der Ausführung.",
+    "preflightError": "Die benötigten Berechtigungen konnten nicht geprüft werden.",
+    "preflightGraph": "Graph {id} aktivieren",
+    "preflightGraphState": "Graph ist aktiviert",
+    "preflightCapability": "Capability: {capability}",
+    "preflightDatapoint": "Datenpunkt {id}",
+    "preflightNodes": "Verwendet von Nodes: {nodes}",
+    "preflightReasons": {
+      "explicit_deny": "Eine ausdrückliche Sperre greift.",
+      "missing_allow": "Die benötigte Freigabe fehlt.",
+      "graph_disabled": "Der Graph ist deaktiviert und kann nicht ausgeführt werden.",
+      "undeclared_capability": "Für diesen Seiteneffekt ist keine Capability deklariert; er wird standardmäßig gesperrt."
+    },
     "runResultWithWarnings": "Graph ausgeführt — {count} Nodes geprüft, {warnings} Warnungen",
     "nodeError": "⚠ Fehler",
     "graphValidationCycle": "Zyklus erkannt: {count} Node(s) benötigen eine Speicher-Node als Tick-Grenze.",
     "graphValidationConnectBlocked": "Verbindung nicht erstellt: Zyklus erkannt ({count} Node(s)). Nutze eine Speicher-Node für Rückkopplungen.",
     "graphValidationSaveBlocked": "Speichern blockiert: Zyklus erkannt ({count} Node(s)). Nutze eine Speicher-Node für Rückkopplungen.",
     "graphValidationNodeError": "Zyklus erkannt; direkte Rückkopplung benötigt eine Speicher-Node.",
+    "graphValidationDuplicateHandle": "Mehrfachverbindung erkannt: {count} Eingang/Eingänge haben mehr als eine Verbindung. Nutze eine Klemme-Node, um mehrere Quellen zusammenzuführen.",
+    "graphValidationConnectBlockedDuplicateHandle": "Verbindung nicht erstellt: Dieser Eingang hat bereits eine Verbindung. Nutze eine Klemme-Node, um mehrere Quellen zusammenzuführen.",
+    "graphValidationSaveBlockedDuplicateHandle": "Speichern blockiert: {count} Eingang/Eingänge haben mehr als eine Verbindung. Nutze eine Klemme-Node, um mehrere Quellen zusammenzuführen.",
+    "graphValidationNodeErrorDuplicateHandle": "Mehrfachverbindung erkannt; nur eine Verbindung pro Eingang möglich. Nutze eine Klemme-Node.",
     "duplicated": "Graph dupliziert als „{name}“",
     "errorDuplicate": "Fehler beim Duplizieren",
+    "copiedNodes": "{count} Block(e) kopiert",
+    "copySelectionEmpty": "Keine Blöcke markiert",
+    "pastedNodes": "{count} Block(e) eingefügt",
     "errorExport": "Fehler beim Exportieren",
     "renamed": "Graph umbenannt",
     "errorRename": "Fehler beim Umbenennen",
@@ -1397,6 +1832,8 @@
     "imported": "Graph „{name}“ importiert",
     "errorImport": "Ungültige oder fehlerhafte Export-Datei",
     "newGraphPlaceholder": "z.B. Licht Erdgeschoss",
+    "hierarchyNodes": "Hierarchie-Knoten",
+    "hierarchyNodesHint": "Optional — direkt bei der Erstellung einem oder mehreren Knoten der Logik-Hierarchie zuordnen. Ohne Auswahl bleibt die Logik wie bisher nicht zugeordnet.",
     "notSelected": "— nicht gewählt —",
     "filterBadge": "Filter / Transformation aktiv",
     "negatePort": "{id} negieren",
@@ -1421,6 +1858,8 @@
       "value": "Wert",
       "trigger": "Trigger",
       "changed": "Geändert",
+      "rising": "Trigger-Steigend",
+      "falling": "Trigger-Fallend",
       "object": "Objekt",
       "result": "Ergebnis",
       "enable": "Freigabe",
@@ -1428,10 +1867,17 @@
       "output": "Ausgang",
       "out": "Out",
       "in_n": "IN {n}",
+      "in_n_changed": "IN {n} Geändert",
+      "out_n": "OUT {n}",
       "data": "Daten",
+      "text": "Text",
       "body": "Body",
       "done": "Fertig",
+      "running": "Läuft",
+      "cancelled": "Abgebrochen",
+      "condition": "Bedingung",
       "sent": "Gesendet",
+      "stored": "Gespeichert",
       "active": "Aktiv",
       "reset": "Reset",
       "message": "Nachricht",
@@ -1443,12 +1889,20 @@
       "count": "N",
       "min": "Min",
       "max": "Max",
-      "avg": "∅"
+      "avg": "∅",
+      "date": "Datum",
+      "time": "Zeit",
+      "custom": "Benutzerdefiniert"
     },
     "summary": {
       "inputs": "{n} Eingänge",
       "parts": "{n} Teile",
       "rules": "{n} Regeln",
+      "replaceModes": {
+        "plain": "Plain",
+        "regex": "RegEx"
+      },
+      "sequence": "{n} Schritte · {mode}",
       "hold": "→ halten",
       "filters": "{n} Filter",
       "negateEnable": "¬Freigabe",
@@ -1465,6 +1919,19 @@
       "ariaLabel": "Unbekannter Block-Typ"
     },
     "nodeConfig": {
+      "datetime": {
+        "custom_format": "Benutzerdefiniertes Format",
+        "tokens": "Token: H/HH Stunde, m/mm Minute, s/ss Sekunde, d/dd Tag, EE = Mo, EEE = Mo., EEEE = Montag, M/MM/MMM/MMMM Monat, yy/yyyy Jahr. Namen folgen der gewählten Sprache."
+      },
+      "comment": {
+        "text": "Text",
+        "textPlaceholder": "Notiztext…",
+        "empty": "Leerer Kommentar — im Panel bearbeiten"
+      },
+      "panelTabs": {
+        "settings": "Einstellungen",
+        "debug": "Debug-Werte"
+      },
       "tabs": {
         "connection": "Verbindung",
         "transform": "Transformation",
@@ -1632,6 +2099,37 @@
         "staticHint": "Verbundene Eingänge überschreiben den statischen Text. Leere Felder ergeben einen leeren Teilstring.",
         "inputPlaceholder": "Eingang {n} …"
       },
+      "stringReplace": {
+        "rules": "Regeln",
+        "moveUp": "Regel nach oben",
+        "moveDown": "Regel nach unten",
+        "orderHint": "Die Regeln werden von oben nach unten nacheinander angewendet — jede Regel arbeitet auf dem Ergebnis der vorherigen.",
+        "modes": {
+          "plain": "Suchtext (Plain)",
+          "regex": "Regulärer Ausdruck (RegEx)"
+        },
+        "searchLabel": "Suchen nach",
+        "searchPlaceholder": "z.B. alt",
+        "patternLabel": "RegEx-Muster",
+        "patternPlaceholder": "z.B. (\\d+)",
+        "replaceLabel": "Ersetzen durch",
+        "replacePlaceholder": "leer = Treffer entfernen",
+        "groupHint": "Gruppenverweise wie \\1 oder \\g<name> sind möglich.",
+        "replaceAll": "Alle Vorkommen ersetzen"
+      },
+      "sensorWatchdog": {
+        "inputs": "Überwachte Eingänge",
+        "add": "+ Eingang",
+        "remove": "Eingang entfernen",
+        "removeShort": "−",
+        "labelPlaceholder": "Anzeigename",
+        "timeoutLabel": "Timeout (Sekunden)",
+        "faultValueLabel": "Fault-Value",
+        "faultValuePlaceholder": "Ersatzwert",
+        "repeatLabel": "Wiederholung (Sekunden)",
+        "repeatPlaceholder": "0 = keine Wiederholung",
+        "repeatHint": "Löst den Fehlertrigger zusätzlich in diesem Intervall erneut aus, solange der Eingang weiter ausbleibt. 0 = nur einmalig beim Auslösen."
+      },
       "rules": {
         "add": "+ Regel",
         "remove": "Regel entfernen",
@@ -1690,7 +2188,9 @@
         "valueN": "Wert {n}",
         "outputsCount": "Ausgänge ({n})",
         "labelPlaceholder": "Bezeichnung",
-        "pathExample": "z.B. data.temperature"
+        "pathExample": "z.B. data.temperature",
+        "previewPruned": "Vorschau gekürzt: Das Dokument überschreitet die Vorschaugrösse, Arrays und lange Texte wurden verkürzt. Die Live-Werte je Ausgang können vom tatsächlichen Ergebnis abweichen.",
+        "pathListTruncated": "Pfadliste auf {n} Einträge gekürzt — weitere Pfade bitte direkt eingeben."
       },
       "substr": {
         "modeLabel": "Modus",
@@ -1725,6 +2225,8 @@
         "urlLabel": "iCal-URL",
         "refreshLabel": "Aktualisierungsintervall (Minuten)",
         "refreshHint": "Kalender wird höchstens alle N Minuten neu geladen.",
+        "maxPayloadSizeLabel": "Maximale Kalendergrösse (MiB)",
+        "maxPayloadSizeHint": "Downloads, die diesen Wert überschreiten, werden abgebrochen (1–50 MiB).",
         "rawInfo": "Der RAW-Ausgang liefert immer den rohen iCal-Text. Für erweiterte Auswertungen können Filter hinzugefügt werden.",
         "filtersSection": "Filter / Instanzen",
         "addFilter": "+ Filter hinzufügen",
@@ -1748,12 +2250,16 @@
         "descriptionPlaceholder": "z.B. Biotonne",
         "url": "iCal-URL",
         "refresh_interval_min": "Aktualisierungsintervall (Minuten)",
+        "max_payload_size_mb": "Maximale Kalendergrösse (MiB)",
         "filter_count": "Anzahl Filter",
         "filters": "Filter (JSON)"
       },
       "invalidJson": "Ungültiges JSON: {msg}",
       "common": {
-        "optional": "(optional)"
+        "optional": "(optional)",
+        "boolTrue": "Wahr",
+        "boolFalse": "Falsch",
+        "unsetEnum": "Nicht gesetzt"
       },
       "const_value": {
         "value": "Wert",
@@ -1777,6 +2283,36 @@
       "memory": {
         "initial_value": "Initialwert",
         "data_type": "Datentyp",
+        "persist_state": "Zustand nach Neustart wiederherstellen"
+      },
+      "merge": {
+        "input_count": "Anzahl Eingänge",
+        "persist_state": "Zustand nach Neustart wiederherstellen"
+      },
+      "change_filter": {
+        "persist_state": "Zustand nach Neustart wiederherstellen"
+      },
+      "edge_detect": {
+        "on_rising": "Steigende Flanke",
+        "on_risingOptions": {
+          "value": "Trigger + Wert",
+          "trigger": "Nur Trigger",
+          "off": "Aus"
+        },
+        "value_rising": "Wert bei steigender Flanke",
+        "on_falling": "Fallende Flanke",
+        "on_fallingOptions": {
+          "value": "Trigger + Wert",
+          "trigger": "Nur Trigger",
+          "off": "Aus"
+        },
+        "value_falling": "Wert bei fallender Flanke",
+        "data_type": "Datentyp",
+        "data_typeOptions": {
+          "bool": "Boolean",
+          "number": "Zahl",
+          "string": "Text"
+        },
         "persist_state": "Zustand nach Neustart wiederherstellen"
       },
       "hysteresis": {
@@ -1846,6 +2382,28 @@
       "timer_pulse": {
         "duration_s": "Dauer (s)"
       },
+      "value_sequence": {
+        "run_mode": "Ausführung",
+        "repeat_count": "Wiederholungen",
+        "restart_policy": "Bei neuem Trigger",
+        "cancel_when_condition_false": "Abbrechen, wenn Bedingung false wird",
+        "add": "Schritt hinzufügen",
+        "blink": "Blink-Vorlage",
+        "step": "Schritt {n}",
+        "duplicate": "Duplizieren",
+        "object": "Objekt (leer = Pause)",
+        "value": "Wert",
+        "modes": {
+          "once": "Einmal",
+          "repeat_count": "Feste Anzahl",
+          "while_condition": "Solange Bedingung wahr ist"
+        },
+        "policies": {
+          "ignore": "Ignorieren",
+          "restart": "Neu starten",
+          "queue": "Einreihen"
+        }
+      },
       "timer_cron": {
         "cron": "Cron-Ausdruck"
       },
@@ -1874,6 +2432,28 @@
         "to": "Empfänger (+41…)",
         "sender": "Absender (max 11 Zeichen)",
         "message": "Nachricht (Fallback)"
+      },
+      "notification": {
+        "adapter": "Message-/Benachrichtigungsadapter",
+        "selectAdapter": "Adapter auswählen",
+        "targets": "Ziele",
+        "noTargets": "Keine aktiven, konfigurierten Ziele vorhanden.",
+        "title": "Titel",
+        "fallback": "Nachricht (Fallback)",
+        "placeholders": "Der Logikblock hat keinen Datenpunkt-Kontext; MESSAGE-Platzhalter werden unverändert gesendet.",
+        "priority": "Priorität",
+        "legacy": "Legacy-Block. Für neue Benachrichtigungen bitte den Block Benachrichtigung verwenden."
+      },
+      "messageArchive": {
+        "archive": "Meldungsarchiv",
+        "selectArchive": "Meldungsarchiv auswählen",
+        "missingArchive": "Meldungsarchiv nicht gefunden",
+        "type": "Meldungstyp",
+        "severity": "Schweregrad",
+        "title": "Titel (Fallback)",
+        "titlePlaceholder": "Optional, kann über Eingang überschrieben werden",
+        "message": "Nachricht (Fallback)",
+        "messagePlaceholder": "Wird verwendet, wenn kein Nachricht-Eingang verbunden ist"
       },
       "host_check": {
         "host": "Host / IP-Adresse",
@@ -1916,13 +2496,13 @@
         "response_type": "Response Content-Typ",
         "verify_ssl": "SSL-Zertifikat prüfen",
         "headers": "Header (JSON-Objekt, optional)",
-        "headers_secret_file": "Header aus Secret-Datei (JSON-Objekt, optional)",
+        "headers_value_file": "Header aus Datei (JSON-Objekt, optional)",
         "timeout_s": "Timeout (s)",
         "auth_type": "Authentifizierung",
         "auth_username": "Benutzername (Basic/Digest)",
         "auth_password": "Passwort (Basic/Digest)",
         "auth_token": "Bearer Token",
-        "auth_token_file": "Bearer Token aus Secret-Datei"
+        "auth_value_file": "Bearer Token aus Datei"
       },
       "math_formula": {
         "formula": "Formel",
@@ -1933,7 +2513,8 @@
         "in_max": "Eingang Max",
         "out_min": "Ausgang Min",
         "out_max": "Ausgang Max"
-      }
+      },
+      "resizeHandle": "Ziehen, um die Panel-Breite zu ändern"
     },
     "portLabels": {
       "heizmode": "Heizmodus",
@@ -1945,6 +2526,7 @@
       "sunset": "Untergang",
       "isDay": "Tagsüber",
       "urlTitle": "URL-Titel",
+      "title": "Titel",
       "imageUrl": "Bild-URL",
       "avgNow": "∅ aktuell",
       "avg1m": "∅ 1 min",
@@ -1980,18 +2562,25 @@
       "icalTomorrow": "Morgen",
       "icalToday": "Heute",
       "reachable": "Erreichbar",
-      "latencyMs": "Latenz (ms)"
+      "latencyMs": "Latenz (ms)",
+      "faultText": "Fehlertext",
+      "faultTrigger": "Fehler-Trigger"
     },
     "nodeDescriptions": {
+      "datetime": "Gibt aktuelles Datum und Uhrzeit in der konfigurierten Zeitzone und im gewählten Format aus.",
       "const_value": "Gibt einen festen Wert aus — Zahl, Bool oder Text. Nützlich als Schwellwert oder Referenz.",
+      "comment": "Freier Mehrzeilen-Text zur Dokumentation direkt auf dem Graph-Canvas. Rein visuell, hat keinen Effekt auf die Ausführung.",
       "and": "Ausgang ist true wenn ALLE Eingänge true sind. Eingänge (2–30) und Ausgang einzeln negierbar.",
       "or": "Ausgang ist true wenn MINDESTENS EIN Eingang true ist. Eingänge (2–30) und Ausgang einzeln negierbar.",
       "not": "Invertiert den Eingang",
       "xor": "Ausgang ist true wenn GENAU EIN Eingang true ist. Eingänge (2–30) und Ausgang einzeln negierbar.",
       "gate": "Signal-Tor: lässt den Eingang durch wenn Freigabe=true, sperrt sonst. Verhalten bei gesperrtem Tor: letzten Wert halten (retain) oder Standardwert ausgeben.",
       "memory": "Gibt den gespeicherten Wert aus dem vorherigen Logiklauf aus und speichert den aktuellen Eingangswert für den nächsten Lauf. Explizite Tick-Grenze für kontrollierte Rückkopplungen.",
+      "change_filter": "Gibt den Eingangswert aus und setzt den Geändert-Trigger nur dann, wenn er sich vom zuletzt empfangenen Wert unterscheidet. Wiederholt gleiche Werte werden unterdrückt.",
+      "edge_detect": "Wertet den Eingang boolesch aus und reagiert auf den Wechsel: Bei steigender Flanke (falsch → wahr) wird der Wert für steigende Flanken ausgegeben und der Steigend-Trigger gesetzt, bei fallender Flanke (wahr → falsch) entsprechend der Wert für fallende Flanken und der Fallend-Trigger. Ohne Flanke wird nichts auf den Ausgang gesendet.",
       "compare": "Vergleicht zwei Werte (>, <, =, >=, <=, !=)",
       "hysteresis": "Schaltet bei Überschreitung ON, erst bei Unterschreitung OFF",
+      "merge": "Bündelt mehrere unabhängige Wertquellen auf einen gemeinsamen Ausgang: wer zuletzt einen neuen Wert liefert, wird durchgereicht (Edomi-Klemme).",
       "decision": "Prüft einen Eingangswert gegen mehrere unabhängige Bedingungen. Jeder Ausgang liefert unabhängig TRUE oder FALSE; mehrere Ausgänge können gleichzeitig TRUE sein.",
       "value_mapping": "Prüft eine geordnete Regelliste und gibt den Rückgabewert der ersten passenden Regel aus. Optional liefert ein Sonst-Wert ein Ergebnis, wenn keine Regel passt.",
       "datapoint_read": "Gibt den aktuellen Wert eines DataPoints aus. Triggert bei Wertänderung.",
@@ -2003,17 +2592,22 @@
       "statistics": "Berechnet Min/Max/Mittelwert laufend über alle empfangenen Werte. Reset-Eingang setzt zurück.",
       "avg_multi": "Berechnet den Mittelwert von 2–20 Eingängen (aktuell) und gleitende Mittelwerte über Zeitfenster: 1 min, 1 h, 1 Tag, 7/14/30/180/365 Tage. Jeder neue Wert wird mit Zeitstempel gespeichert. Die Zeitfensterwerte bleiben nach einem Neustart erhalten (konfigurierbar).",
       "string_concat": "Verkettet 2–20 Texte zu einem Ergebnis. Jeder Eingang kann dynamisch verbunden oder statisch vorbelegt sein. Ist ein Eingang verbunden, hat er Vorrang vor dem statischen Text.",
+      "string_replace": "Ersetzt Treffer in einem Text. Mehrere Regeln werden in der angegebenen Reihenfolge nacheinander auf das Zwischenergebnis angewendet. Je Regel wählbar: Suchtext (Plain) oder regulärer Ausdruck (RegEx, Gruppenverweise wie \\1 im Ersetzen-Feld), Gross-/Kleinschreibung und alle oder nur das erste Vorkommen.",
       "heating_circuit": "Sommer/Winter-Umschaltung nach DIN (Mannheimer Methode). Eingang: Aussentemperatur. Messzeitpunkte (Erste-Kreuzung): T1 = anliegender Wert ab 07:00, T2 = ab 14:00, T3 = ab 21:00. Funktioniert auch wenn der Sensor die Messstunden nicht exakt trifft. Jeder Slot wird pro Tag nur einmal erfasst. Tagesmittel: T_avg = (T1 + T2 + 2×T3) / 4. Monatsmittel: gleitender Mittelwert der letzten 31 Tagesmittel. Heizmodus EIN wenn T_avg < Grenztemperatur, AUS wenn T_avg ≥ Grenztemperatur + Hysterese. Fehlende Slots werden beim Start aus der Historie ergänzt. Zustand bleibt über Neustarts erhalten.",
       "min_max_tracker": "Verfolgt Minimum und Maximum über Zeitperioden (täglich, wöchentlich, monatlich, jährlich, absolut). Periodenwerte werden automatisch am Tages-/Wochen-/Monats-/Jahreswechsel zurückgesetzt.",
       "consumption_counter": "Berechnet Verbrauchswerte (täglich, wöchentlich, monatlich, jährlich) aus einem fortlaufenden Zählerwert. Speichert zusätzlich den Verbrauch der Vorperiode für Vergleiche.",
       "timer_delay": "Verzögert ein Signal um N Sekunden",
       "timer_pulse": "Gibt einen Impuls für N Sekunden aus",
+      "value_sequence": "Schreibt konfigurierte Werte und Pausen als Sequenz ohne die Logikausführung zu blockieren.",
       "timer_cron": "Löst automatisch nach einem Cron-Zeitplan aus (Minute Stunde Tag Monat Wochentag).",
       "operating_hours": "Zählt Betriebsstunden solange 'Aktiv' wahr ist. Reset setzt den Zähler zurück.",
+      "sensor_watchdog": "Überwacht bis zu 10 Eingänge auf das Ausbleiben neuer Werte. Bleibt ein Eingang länger als sein konfigurierter Timeout ohne neuen Wert, wird sein Ausgang durch den konfigurierten Fault-Value ersetzt und ein Fehlertext samt Trigger ausgegeben. Arbeitet autonom über einen internen Scheduler.",
       "python_script": "Führt ein Python-Skript aus. Verfügbar: inputs dict → return value",
       "astro_sun": "Berechnet Sonnenauf- und -untergang basierend auf Breitengrad/Längengrad. Benötigt: pip install astral",
+      "notify_message": "Sendet eine Benachrichtigung über die konfigurierten Ziele eines Message-/Benachrichtigungsadapters.",
       "notify_pushover": "Sendet eine Push-Benachrichtigung via Pushover API (api.pushover.net). Wird automatisch ausgelöst wenn eine Nachricht am Eingang ankommt.",
       "notify_sms": "Sendet eine SMS via seven.io Gateway (gateway.seven.io). Wird automatisch ausgelöst wenn eine Nachricht am Eingang ankommt.",
+      "message_archive": "Schreibt eine Meldung in ein Meldungsarchiv. Wird automatisch ausgelöst wenn eine Nachricht am Eingang ankommt oder der Trigger wahr ist.",
       "wake_on_lan": "Sendet ein Wake-on-LAN Magic-Paket an ein Gerät per UDP-Broadcast. Wird ausgelöst wenn der Trigger-Eingang true ist.",
       "host_check": "Pingt einen Host und liefert den Erreichbarkeitsstatus (true/false) sowie die Latenz in Millisekunden. Wird bei steigender Flanke am Trigger-Eingang ausgeführt. Empfehlung: mit einem Timer/Cron-Knoten verbinden.",
       "json_extractor": "Parst einen JSON-String und extrahiert einen oder mehrere Werte anhand von Schlüsselpfaden (Punkt-Notation, z.B. sensors.temperature). Mehrere Ausgänge konfigurierbar über + im Konfigurations-Panel.",
@@ -2021,7 +2615,39 @@
       "substring_extractor": "Extrahiert Text aus einem String per Substring-Operation oder regulärem Ausdruck. Modi: links_von / rechts_von (erstes oder letztes Vorkommen), zwischen (zwei Markierungen), ausschneiden (Position + Länge), regex (Python re-Syntax, Gruppen wählbar).",
       "ical": "Lädt ein iCal-/ICS-File von einer URL und wertet Termine aus. RAW-Ausgang liefert den rohen Kalendertext. Pro Filter gibt es 4 Ausgänge: Array (alle Termine), Nächstes Datum, Morgen (Bool), Heute (Bool). Filter können auf Summary, Location und/oder Description angewendet werden.",
       "api_client": "Sendet HTTP-Anfragen (GET/POST/PUT…) an externe APIs. Trigger-Eingang steuert die Ausführung."
+    },
+    "graphPicker": {
+      "title": "Logik öffnen",
+      "breadcrumbRoot": "Alle Hierarchien",
+      "noTrees": "Es sind noch keine Hierarchien vorhanden.",
+      "unassigned": "Nicht zugeordnete Logiken",
+      "empty": "Dieser Ordner ist leer.",
+      "organize": "Logik-Hierarchie bearbeiten",
+      "loading": "Wird geladen …",
+      "errorLoading": "Konnte nicht geladen werden.",
+      "assign": "Hierarchie zuweisen",
+      "assignHint": "Diese Logik einer oder mehreren Hierarchie-Positionen zuweisen — bestehende Zuordnungen bleiben erhalten.",
+      "assignConfirm": "Zuweisen",
+      "assignError": "Die Hierarchie-Zuweisung ist fehlgeschlagen.",
+      "currentGraph": "aktuell geöffnet",
+      "removeHere": "Aus Hierarchie entfernen",
+      "removeHereTitle": "Entfernt die Logik nur aus dieser Hierarchie-Position. Ist dies die letzte Position, erscheint die Logik danach oben bei „Nicht zugeordnet“.",
+      "deleteHereTitle": "Diese Logik ist keiner Hierarchie zugeordnet — hier löschen entfernt sie unwiderruflich.",
+      "deleteTitle": "Löscht diesen Logik-Graphen unwiderruflich, inklusive aller Hierarchie-Zuordnungen.",
+      "deleteConfirm": "Der Logik-Graph „{name}“ wird unwiderruflich gelöscht.",
+      "showAll": "Liste aller Logiken",
+      "noGraphs": "Es sind noch keine Logikblätter vorhanden.",
+      "links": "Verknüpfungen",
+      "linksModalTitle": "Hierarchie-Verknüpfungen: {name}",
+      "linksEmpty": "Diese Logik ist aktuell keiner Hierarchie-Position zugeordnet."
     }
+  },
+  "authzPreflight": {
+    "allowed": "Erlaubt",
+    "denied": "Verboten",
+    "ready": "Alle benötigten Berechtigungen sind vorhanden.",
+    "blocked": "Diese Aktion ist wegen fehlender Berechtigungen gesperrt.",
+    "noRequirements": "Es werden keine zusätzlichen Berechtigungen benötigt."
   },
   "settings": {
     "title": "Einstellungen",
@@ -2045,6 +2671,9 @@
       "title": "Allgemeine Einstellungen",
       "timezone": "Zeitzone",
       "timezoneHint": "Alle Zeitangaben im System werden in dieser Zeitzone dargestellt.",
+      "dateFormat": "Standard-Datumsformat",
+      "timeFormat": "Standard-Zeitformat",
+      "formatHint": "Token: d/dd Tag, EE = Mo, EEE = Mo., EEEE = Montag, M/MM/MMM/MMMM Monat, yy/yyyy Jahr; H/HH Stunde, m/mm Minute, s/ss Sekunde.",
       "timezonePlaceholder": "Suchen … z.B. Zurich, Berlin, UTC",
       "noResults": "Keine Treffer",
       "save": "Speichern",
@@ -2058,7 +2687,13 @@
       "themeLightDesc": "Helles Erscheinungsbild",
       "themeDark": "Dunkel",
       "themeDarkDesc": "Dunkles Erscheinungsbild",
-      "tzSaved": "Zeitzone auf «{tz}» gesetzt"
+      "tzSaved": "Zeitzone auf «{tz}» gesetzt",
+      "regionFormat": "Regionalformat",
+      "regionFormatHint": "Bestimmt Zahlen-, Währungs- und Datumsformate. Unabhängig von der Sprache — Deutsch in der Schweiz formatiert anders als Deutsch in Deutschland.",
+      "regionFormatAuto": "Automatisch (aus Sprache: {format} · {sample})",
+      "currency": "Währung",
+      "currencyAuto": "Automatisch (aus Regionalformat: {currency})",
+      "formatPreview": "Vorschau"
     },
     "security": {
       "title": "URL-Ziel-Allowlist",
@@ -2188,14 +2823,33 @@
     "users": {
       "deleteUser": "Benutzer löschen",
       "deleteUserConfirm": "Benutzer '{name}' wirklich löschen?",
+      "deleteImpact": "Prüfe vor dem Löschen alle Auswirkungen:",
+      "deletePages": "{n} Visu-Seiten werden übertragen",
+      "deleteGraphs": "{n} Logikblätter werden übertragen",
+      "deleteFiltersets": "{n} RingBuffer-Filtersets werden übertragen",
+      "deleteKeys": "{n} API-Schlüssel werden sofort widerrufen",
+      "deleteReferences": "{n} Zugriffsreferenzen werden entfernt",
+      "successor": "Nachfolger für eigene Artefakte",
+      "selectSuccessor": "Nachfolger auswählen",
+      "deleteKeyWarning": "API-Schlüssel werden nie übertragen. Da der bisherige Inhaber das Geheimnis noch kennen kann, werden sie widerrufen.",
       "count": "{n} Benutzer",
+      "empty": "Keine Benutzer vorhanden",
       "addButton": "+ Benutzer",
       "colUsername": "Benutzername",
       "colAdmin": "Admin",
       "colMqtt": "MQTT",
       "colCreated": "Erstellt",
+      "currentAccount": "Du",
+      "roleAdmin": "Admin",
+      "roleUser": "Benutzer",
+      "status": "Status",
+      "statusCurrent": "Aktuelles Konto",
+      "statusReady": "Bereit",
+      "statusWarning": "MQTT ohne Passwort",
       "mqttActive": "Aktiv",
       "mqttOff": "Aus",
+      "mqttPasswordSetShort": "Passwort gesetzt",
+      "mqttPasswordMissing": "Passwort fehlt",
       "mqttSetTitle": "MQTT-Passwort setzen",
       "mqttDisableTitle": "MQTT deaktivieren",
       "createTitle": "Neuer Benutzer",
@@ -2206,7 +2860,114 @@
       "mqttFor": "Benutzer: {username}",
       "newMqttPassword": "Neues MQTT-Passwort",
       "mqttPasswordSet": "MQTT-Passwort gesetzt",
-      "create": "Erstellen"
+      "create": "Erstellen",
+      "rights": {
+        "openButton": "Rechte bearbeiten",
+        "summary": "{roles} · {n} Bereiche",
+        "summaryNone": "Keine zugewiesenen Bereiche",
+        "title": "Rechte für {username}",
+        "progress": "Fortschritt im Rechte-Editor",
+        "steps": {
+          "role": "Rolle",
+          "scopes": "Bereiche",
+          "preview": "Vorschau",
+          "confirm": "Bestätigen"
+        },
+        "roleTitle": "Rolle auswählen",
+        "roleHint": "Jede Rolle startet mit ihren gespeicherten direkten Zuweisungen; neue Rollen beginnen ohne Bereiche oder Zusatzrechte.",
+        "mixedRoleWarning": "Dieser Benutzer hat derzeit unterschiedliche Rollen in seinen Zuweisungen. Beim Hinzufügen oder Entfernen von Bereichen bleiben fremde Rollen unverändert.",
+        "bulkRoleTitle": "Alle beibehaltenen bestehenden Bereiche neu zuweisen",
+        "bulkRoleHint": "Die ausgewählte Rolle ausdrücklich auf jeden bestehenden Bereich anwenden, der ausgewählt bleibt.",
+        "roles": {
+          "guest": {
+            "label": "Gast",
+            "description": "Nur Lesezugriff."
+          },
+          "resident": {
+            "label": "Bewohner",
+            "description": "Lesen, Schreiben und Aktivieren."
+          },
+          "operator": {
+            "label": "Operator",
+            "description": "Voller Betriebszugriff einschließlich Erzeugen."
+          },
+          "owner": {
+            "label": "Eigentümer",
+            "description": "Alle Aktionen in den ausgewählten Bereichen."
+          }
+        },
+        "scopeTitle": "Hierarchie-Bereiche auswählen",
+        "scopeHint": "Lege pro Bereich fest, ob die Rolle vererbt, ausdrücklich erlaubt oder ausdrücklich verweigert wird.",
+        "scopeStateLabel": "Zugriffszustand für {scope}",
+        "scopeStates": {
+          "inherit": "Vererbt",
+          "allow": "Allow",
+          "deny": "Deny"
+        },
+        "scopeStateCounts": "{allow} Allow · {deny} Deny",
+        "scopeSearchPlaceholder": "Bereiche filtern …",
+        "scopeSearchNoMatch": "Keine passenden Bereiche gefunden.",
+        "noScopes": "Es sind keine Hierarchie-Bereiche verfügbar.",
+        "unknownScope": "Dieser gespeicherte Bereich ist nicht mehr in der Hierarchie-Liste vorhanden.",
+        "deniedScopePreserved": "Für diesen Bereich besteht eine direkte Verbots-Zuweisung, die erhalten bleibt; hier kann keine Erlaubnis hinzugefügt werden.",
+        "orphanedScopeBlock": "{n} ausgewählte Zuweisungen lassen sich keinem Hierarchie-Bereich mehr zuordnen. Entferne sie ausdrücklich oder brich ab; solange sie ausgewählt sind, ist das Speichern gesperrt.",
+        "newScopeRoleRequired": "Wähle eine Rolle aus, bevor du neue Hierarchie-Bereiche hinzufügst.",
+        "selectedScopes": "{n} Bereiche ausgewählt",
+        "logicCreateTitle": "Logikblätter erstellen",
+        "logicCreateHint": "Erlaubt diesem Benutzer, neue Logikblätter zu erstellen, zu importieren und zu duplizieren.",
+        "capabilityUnavailableForRole": "Für die Rolle {role} nicht verfügbar.",
+        "nonStandardLogicGrantPreserved": "Eine bestehende, nicht standardmäßige Zuweisung bleibt als erweitertes Recht erhalten und kann hier nicht geändert werden.",
+        "logicCreateDenied": "Eine direkte Verbots-Zuweisung für das Erstellen von Logikblättern bleibt erhalten und kann hier nicht überschrieben werden.",
+        "logicCreateCentralControl": "Auch Logikblätter für Zentralanlagen erstellen",
+        "centralControl": "Zentralanlagen steuern",
+        "centralControlEnabled": "Zentralsteuerung aktiviert",
+        "centralControlDisabled": "Zentralsteuerung deaktiviert",
+        "centralControlSummary": "Zentralanlagensteuerung je Bereich",
+        "previewTitle": "Effektive Rechte",
+        "previewHint": "Prüfe vor dem Speichern die berechnete Entscheidung und ihre Begründung für jede Aktion.",
+        "emptyPreview": "Es gibt keine bearbeitbaren oder fortgeschrittenen Zuweisungsziele zu prüfen. Eine Server-Vorschau ist nicht erforderlich.",
+        "refreshPreview": "Vorschau aktualisieren",
+        "allowed": "Erlaubt",
+        "denied": "Verboten",
+        "actions": {
+          "read": "Lesen",
+          "write": "Schreiben",
+          "activate": "Aktivieren",
+          "generate": "Erzeugen"
+        },
+        "reasons": {
+          "admin": "Durch die Administrator-Brücke erlaubt.",
+          "allowed": "Durch eine passende Rollenzuweisung erlaubt.",
+          "direct_datapoint_grant": "Durch eine direkte Datenpunkt-Zuweisung erlaubt.",
+          "explicit_deny": "Durch eine ausdrückliche Verbots-Zuweisung verweigert.",
+          "central_control_required": "Verweigert, weil die Zentralanlagensteuerung für diesen Bereich nicht aktiviert ist.",
+          "missing_allow": "Verweigert, weil keine passende Erlaubnis-Zuweisung gilt.",
+          "no_targets": "Verweigert, weil das Ziel nicht aufgelöst werden konnte."
+        },
+        "confirmTitle": "Änderungen bestätigen",
+        "confirmHint": "Beim Speichern werden die bearbeitbaren Zuweisungen atomar ersetzt.",
+        "enabled": "Aktiviert",
+        "disabled": "Deaktiviert",
+        "selectedRole": "Rolle",
+        "roleHandling": "Rollenbehandlung",
+        "roleSummaryBulk": "Alle ausgewählten Bereiche werden der Rolle {role} neu zugewiesen.",
+        "roleSummaryNew": "Bestehende Bereichsrollen bleiben unverändert; neue Bereiche verwenden {role}.",
+        "roleSummaryCurrent": "Direkte Zuweisungen der Rolle {role} werden bearbeitet; andere Rollen bleiben erhalten.",
+        "existingRolesPreserved": "Bestehende Rollen bleiben erhalten",
+        "selectedAreas": "Bereiche",
+        "advancedPreserved": "{n} fortgeschrittene Zuweisungen bleiben unverändert erhalten.",
+        "advancedTitle": "Fortgeschrittene Zuweisungen",
+        "advancedDescription": "{effect} · {role} · {nodeType} · {nodeId}",
+        "advancedTarget": "{nodeType} · {nodeId}",
+        "removeAdvanced": "Entfernen",
+        "back": "Zurück",
+        "next": "Weiter",
+        "save": "Rechte speichern",
+        "loadError": "Die Rechte konnten nicht geladen werden.",
+        "previewError": "Die effektive Vorschau konnte nicht geladen werden.",
+        "saveError": "Die Rechte konnten nicht gespeichert werden.",
+        "concurrentChange": "Die Zuweisungen wurden nach dem Öffnen des Editors geändert. Lade den Editor neu und prüfe vor dem Speichern den aktuellen Stand."
+      }
     },
     "apikeys": {
       "keyName": "API-Key-Name",
@@ -2220,7 +2981,28 @@
       "nameLabel": "Beschreibung / Name",
       "namePlaceholder": "z.B. Home Assistant",
       "create": "Erstellen",
-      "modalTitle": "API Key Name"
+      "modalTitle": "API Key Name",
+      "capabilities": {
+        "open": "Capabilities konfigurieren",
+        "title": "Konfigurations-Capabilities des API-Keys",
+        "target": "Ziel-API-Key: {name}",
+        "warning": "Diese Berechtigungen erlauben dem ausgewählten API-Key Konfiguration zu ändern. Bestehende Zielrechte, Denies und Readonly-Grenzen gelten weiterhin.",
+        "confirm": "Ich bestätige den vollständigen Capability-Ersatz für {name}.",
+        "save": "Capabilities ersetzen",
+        "loadError": "Capabilities konnten nicht geladen werden.",
+        "saveError": "Capabilities konnten nicht gespeichert werden.",
+        "concurrentChange": "Die Capabilities wurden nach dem Öffnen geändert. Lade den aktuellen Stand neu und prüfe ihn.",
+        "effects": {
+          "visu.page_config.write": {
+            "title": "Visu-Seitenkonfiguration schreiben",
+            "description": "Erlaubt nur das Speichern der Konfiguration einer ansonsten beschreibbaren Visu-Seite."
+          },
+          "datapoint.metadata.write": {
+            "title": "DataPoint-Metadaten schreiben",
+            "description": "Erlaubt Metadatenänderungen für DataPoints mit passendem WRITE-Grant; Laufzeitwerte bleiben getrennt."
+          }
+        }
+      }
     },
     "password": {
       "title": "Passwort ändern",
@@ -2247,6 +3029,14 @@
       "dbImportWarning2": "Die Historiendaten werden durch den Inhalt der hochgeladenen Datei ersetzt",
       "dbImportWarning3": "Adapter und Logik-Engine werden nach dem Restore neu gestartet",
       "dbImportWarning4": "Nicht in der Sicherung enthaltene Daten gehen verloren",
+      "messageArchiveDbExportTitle": "Meldungsarchiv sichern (download)",
+      "messageArchiveDbExportDesc": "Die separate SQLite-Datenbank der Meldungsarchive als Datei sichern.",
+      "messageArchiveDbExportButton": "Meldungsarchiv-SQLite herunterladen",
+      "messageArchiveDbImportTitle": "Meldungsarchiv wiederherstellen (upload)",
+      "messageArchiveDbImportDesc": "SQLite-Datenbankdatei der Meldungsarchive hochladen und einspielen.",
+      "messageArchiveDbImportWarning": "⚠ Achtung — diese Aktion überschreibt alle aktuellen Meldungsarchive!",
+      "messageArchiveDbImportWarning1": "Alle aktuellen Meldungsarchive und Meldungen werden ersetzt",
+      "messageArchiveDbImportWarning2": "Die OBS-Konfigurationsdatenbank bleibt unverändert",
       "autobackupTitle": "Autobackup",
       "autobackupDesc": "Täglich automatische JSON-Sicherung aller Konfigurationsdaten (Adapter, Objekte, Logikmodul, Visu, Icons usw.). Die Sicherungen werden lokal im Datenverzeichnis gespeichert.",
       "autobackupEnable": "Autobackup aktivieren",
@@ -2314,7 +3104,9 @@
       "error_NO_GROUP_ADDRESSES": "Keine Gruppenadressen gefunden. Bitte das richtige ETS-Projekt exportieren.",
       "error_PARSE_ERROR": "Fehler beim Parsen der .knxproj-Datei.",
       "dbImportResultOk": "Datenbankwiederherstellung OK: {message} ({adapters} Adapter neu gestartet). Bitte Seite neu laden.",
-      "dbImportFailed": "Datenbankwiederherstellung fehlgeschlagen"
+      "dbImportFailed": "Datenbankwiederherstellung fehlgeschlagen",
+      "messageArchiveDbImportResultOk": "Meldungsarchiv-Wiederherstellung OK: {message}",
+      "messageArchiveDbImportFailed": "Meldungsarchiv-Wiederherstellung fehlgeschlagen"
     },
     "history": {
       "dbTitle": "Historie DB",
@@ -2459,6 +3251,49 @@
       }
     }
   },
+  "knxDevices": {
+    "title": "KNX-Geräte",
+    "subtitle": "{count} importierte Geräte",
+    "refresh": "Aktualisieren",
+    "reload": "Neu laden",
+    "snapshotHint": "Stand aus dem zuletzt importierten KNX-Projekt.",
+    "importProject": "KNX-Projekt importieren",
+    "searchPlaceholder": "PA, Name, Hersteller, Bestellnummer …",
+    "deviceSelectPlaceholder": "KNX-Gerät suchen …",
+    "noDeviceMatches": "Keine KNX-Geräte gefunden",
+    "manufacturerPlaceholder": "Hersteller",
+    "orderNumberPlaceholder": "Bestellnummer",
+    "hierarchyFilterPlaceholder": "Nach Hierarchie filtern …",
+    "hierarchyAssignPlaceholder": "Hierarchie-Knoten zuordnen …",
+    "hierarchyAssignments": "Hierarchie-Zuordnung",
+    "noHierarchyLinks": "Keine Zuordnung",
+    "assignmentError": "Hierarchie-Zuordnung konnte nicht gespeichert werden.",
+    "empty": "Keine KNX-Geräte importiert.",
+    "loadError": "KNX-Geräte konnten nicht geladen werden.",
+    "detailError": "KNX-Gerät konnte nicht geladen werden.",
+    "errorStateHint": "Die Geräte konnten nicht angezeigt werden. Bitte erneut aktualisieren.",
+    "selectHint": "Gerät auswählen, um Kommunikationsobjekte und Gruppenadressen zu sehen.",
+    "commObjectsTitle": "Kommunikationsobjekte ({count})",
+    "noCommObjects": "Keine Kommunikationsobjekte vorhanden.",
+    "noGaLinks": "Keine Gruppenadresse",
+    "boundDatapoints": "Gebundene Datenpunkte",
+    "noBoundDatapoints": "Keine Datenpunkte für diese GA gebunden.",
+    "bindingRead": "Lesen",
+    "bindingWrite": "Schreiben",
+    "bindingReadWrite": "Lesen/Schreiben",
+    "bindingDisabled": "Deaktiviert",
+    "pageLabel": "Seite {page} von {pages}",
+    "previous": "Zurück",
+    "next": "Weiter",
+    "table": {
+      "pa": "PA",
+      "name": "Name",
+      "manufacturer": "Hersteller",
+      "orderNumber": "Bestellnummer",
+      "hierarchies": "Hierarchien",
+      "appRef": "Applikation"
+    }
+  },
   "common": {
     "save": "Speichern",
     "saving": "Speichern …",
@@ -2474,6 +3309,8 @@
     "success": "Erfolgreich",
     "details": "Details",
     "remove": "Entfernen",
+    "clear": "Leeren",
+    "selected": "Ausgewählt",
     "enabled": "Aktiviert",
     "active": "Aktiv",
     "inactive": "Inaktiv",
@@ -2534,7 +3371,7 @@
     "noFileSelected": "Keine Datei ausgewählt"
   },
   "hierarchy": {
-    "title": "Gerätestruktur",
+    "title": "Hierarchien",
     "deleteNode": "Ast löschen",
     "newHierarchy": "Neue Hierarchie",
     "importFromEts": "Aus ETS importieren",
@@ -2604,9 +3441,88 @@
       "trades": "Gewerke",
       "mid": "Mittelgruppen",
       "flat": "Flach (nur GA)"
-    }
+    },
+    "addChildNode": "Unterknoten hinzufügen",
+    "moveUp": "Nach oben",
+    "moveDown": "Nach unten",
+    "renameNode": "Umbenennen"
   },
   "topbar": {
     "logout": "Abmelden"
+  },
+  "messageArchives": {
+    "title": "Meldungsarchive",
+    "subtitle": "Administrative Verwaltung der separaten Archiv-Datenbank",
+    "newArchive": "Neues Archiv",
+    "archives": "Archive",
+    "noArchives": "Keine Archive vorhanden",
+    "loadError": "Meldungsarchive konnten nicht geladen werden",
+    "selectArchive": "Archiv auswählen oder neu erstellen.",
+    "dbPath": "Archiv-DB",
+    "integrityCheck": "Integrität prüfen",
+    "integrityResult": "Integritätsprüfung",
+    "exportJsonl": "JSONL exportieren",
+    "exportCsv": "CSV exportieren",
+    "clear": "Leeren",
+    "refresh": "Aktualisieren",
+    "entries": "Einträge",
+    "noEntries": "Keine Meldungen gefunden",
+    "confirmClear": "{count} Einträge endgültig aus diesem Archiv löschen?",
+    "confirmDelete": "Archiv und {count} Einträge endgültig löschen?",
+    "form": {
+      "id": "Archiv-ID",
+      "name": "Name",
+      "description": "Beschreibung",
+      "defaultType": "Standard-Meldungstyp",
+      "defaultTypeNone": "Kein Standard",
+      "defaultTypeCustom": "Benutzerdefiniert …",
+      "defaultTypeCustomPlaceholder": "z.B. maintenance",
+      "defaultTypeHint": "Optionaler Default für neue Einträge, z.B. system, security oder notification.",
+      "color": "Farbe",
+      "maxEntries": "Maximale Einträge",
+      "maxAgeDays": "Maximales Alter (Tage)"
+    },
+    "filters": {
+      "search": "Titel oder Text suchen …",
+      "allSeverities": "Alle Schweregrade",
+      "allStatuses": "Alle Status",
+      "allTypes": "Alle Typen"
+    },
+    "table": {
+      "time": "Zeit",
+      "message": "Meldung",
+      "type": "Typ",
+      "severity": "Schweregrad",
+      "status": "Status",
+      "source": "Quelle"
+    },
+    "types": {
+      "system": "System",
+      "security": "Sicherheit",
+      "notification": "Benachrichtigung",
+      "automation": "Automatisierung",
+      "adapter": "Adapter",
+      "diagnostic": "Diagnose"
+    },
+    "severities": {
+      "info": "Info",
+      "success": "Erfolg",
+      "warning": "Warnung",
+      "error": "Fehler",
+      "critical": "Kritisch"
+    },
+    "statuses": {
+      "new": "Neu",
+      "open": "Offen",
+      "acknowledged": "Quittiert",
+      "closed": "Geschlossen"
+    }
+  },
+  "help": {
+    "title": "Hilfe",
+    "openLabel": "Hilfe zu diesem Bereich öffnen",
+    "unavailable": "Für diesen Bereich ist noch keine Hilfe verfügbar.",
+    "systemUnavailable": "Die Hilfe-Inhalte sind auf diesem Server aktuell nicht verfügbar.",
+    "openInNewTab": "In neuem Tab öffnen"
   }
 }

@@ -12,9 +12,12 @@
         <h2 class="text-xl font-bold text-slate-800 dark:text-slate-100">{{ $t('adapters.title') }}</h2>
         <p class="text-sm text-slate-500 mt-0.5">{{ $t('adapters.subtitle') }}</p>
       </div>
-      <button v-if="!isDemo" @click="openCreate" class="btn-primary btn-sm" data-testid="btn-new-instance">
-        {{ $t('adapters.newInstance') }}
-      </button>
+      <div class="flex items-center gap-2">
+        <HelpButton help-id="adapters-list" />
+        <button v-if="!isDemo" @click="openCreate" class="btn-primary btn-sm" data-testid="btn-new-instance">
+          {{ $t('adapters.newInstance') }}
+        </button>
+      </div>
     </div>
 
     <div v-if="store.loading" class="flex justify-center py-20"><Spinner size="lg" /></div>
@@ -25,11 +28,14 @@
       <div v-if="creating" class="card border border-blue-500/40">
         <div class="card-header">
           <h3 class="font-semibold text-slate-800 dark:text-slate-100">{{ $t('adapters.createTitle') }}</h3>
-          <button @click="cancelCreate" class="btn-icon">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-            </svg>
-          </button>
+          <div class="flex items-center gap-2">
+            <HelpButton help-id="adapters-create" />
+            <button @click="cancelCreate" class="btn-icon">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
         </div>
         <div class="p-5 flex flex-col gap-4">
           <div class="grid grid-cols-2 gap-4">
@@ -67,7 +73,7 @@
                 :schema="newSchema"
                 v-model="newForm.config"
                 :adapter-type="newForm.adapter_type"
-                :exclude="newForm.adapter_type.toLowerCase() === 'zeitschaltuhr' ? ['custom_holidays'] : []"
+                :exclude="excludedSchemaFields(newForm.adapter_type)"
               />
               <ZeitschaltuhrCustomHolidaysEditor
                 v-if="newForm.adapter_type.toLowerCase() === 'zeitschaltuhr'"
@@ -144,6 +150,9 @@
 
         <!-- Expanded Config Panel -->
         <div v-if="expanded[a.id]" class="border-t border-slate-200 dark:border-slate-700/60 p-5 flex flex-col gap-4">
+          <div class="flex justify-end -mb-2">
+            <HelpButton help-id="adapters-instance-actions" />
+          </div>
           <div :class="{ 'pointer-events-none select-none opacity-50': isDemo }">
             <div class="form-group">
               <label class="label">{{ $t('adapters.nameLabel') }}</label>
@@ -184,7 +193,7 @@
                   :schema="schemas[a.adapter_type]"
                   v-model="drafts[a.id].config"
                   :adapter-type="a.adapter_type"
-                  :exclude="a.adapter_type.toLowerCase() === 'zeitschaltuhr' ? ['custom_holidays'] : []"
+                  :exclude="excludedSchemaFields(a.adapter_type)"
                 />
                 <ZeitschaltuhrCustomHolidaysEditor
                   v-if="a.adapter_type.toLowerCase() === 'zeitschaltuhr'"
@@ -403,6 +412,7 @@ import { adapterApi } from '@/api/client'
 import { useAdapterStore } from '@/stores/adapters'
 import { useAuthStore } from '@/stores/auth'
 import Badge         from '@/components/ui/Badge.vue'
+import HelpButton    from '@/components/ui/HelpButton.vue'
 import Spinner       from '@/components/ui/Spinner.vue'
 import ConfirmDialog from '@/components/ui/ConfirmDialog.vue'
 import SchemaForm    from '@/components/adapters/SchemaForm.vue'
@@ -416,6 +426,22 @@ import { adapterDotClass as dotClass, adapterBadgeVariant as statusBadgeVariant,
 
 const { t, te } = useI18n()
 const statusDetailText = (a) => adapterStatusDetailText(a, t, te)
+// Fields rendered by a dedicated component instead of the generic SchemaForm.
+function excludedSchemaFields(adapterType) {
+  const type = adapterType.toLowerCase()
+  if (type === 'zeitschaltuhr') return ['custom_holidays']
+  if (type === 'onewire') return ['aliases'] // edited inline via the binding-form sensor scan
+  return []
+}
+// Subset of excludedSchemaFields() that is edited entirely outside drafts[a.id].config
+// (e.g. onewire aliases, mutated via a separate PATCH from the binding-form sensor scan)
+// and can therefore go stale in the draft — saveInstance() merges the live value back in
+// for these only. zeitschaltuhr's custom_holidays is excluded from SchemaForm too, but its
+// dedicated editor writes directly into drafts[a.id].config, so merging the live value here
+// would discard the user's in-form edit instead of protecting it.
+function fieldsEditedOutsideDraft(adapterType) {
+  return adapterType.toLowerCase() === 'onewire' ? ['aliases'] : []
+}
 // Issue #779: TestResult / action feedback may carry a backend detail_code
 // (adapters.testResult.*) with params; translate it, else show the raw detail.
 function feedbackText(fb) {
@@ -648,9 +674,24 @@ async function saveInstance(a) {
   busy[a.id] = 'save'
   delete feedback[a.id]
   try {
+    // Fields in fieldsEditedOutsideDraft() are edited outside this form (e.g. onewire
+    // aliases via the binding-form sensor scan) and can have changed on the backend
+    // since drafts[a.id] was initialized. The 10 s background poll is silent and only
+    // patches status fields (see stores/adapters.js), so it cannot be relied on to
+    // have picked up such a change — refresh explicitly and merge the live value for
+    // those fields instead of the possibly-stale draft copy, so this save can't
+    // clobber them. Skipped for adapter types without such fields to avoid an
+    // unnecessary round-trip/loading flash on every save.
+    const excluded = fieldsEditedOutsideDraft(a.adapter_type)
+    if (excluded.length) await refreshInstances()
+    const live = store.instances.find(i => i.id === a.id) ?? a
+    const config = { ...drafts[a.id].config }
+    for (const key of excluded) {
+      if (key in live.config) config[key] = live.config[key]
+    }
     await store.updateInstance(a.id, {
       name:    drafts[a.id].name,
-      config:  drafts[a.id].config,
+      config,
       enabled: drafts[a.id].enabled,
     })
     feedback[a.id] = { success: true, detail: t('adapters.savedReconnected') }

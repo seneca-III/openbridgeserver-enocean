@@ -6,6 +6,7 @@ const apiMocks = vi.hoisted(() => ({
   dpApi: {
     get: vi.fn(),
     listBindings: vi.fn(),
+    knxContext: vi.fn(),
     writeValue: vi.fn(),
   },
   logicApi: {
@@ -56,8 +57,26 @@ describe('DataPointDetailView', () => {
       },
     })
     apiMocks.dpApi.listBindings.mockResolvedValue({ data: [] })
+    apiMocks.dpApi.knxContext.mockResolvedValue({ data: { datapoint_id: 'dp-internal', group_addresses: [] } })
     apiMocks.logicApi.datapointUsages.mockResolvedValue({ data: [] })
     apiMocks.dpApi.writeValue.mockResolvedValue({})
+  })
+
+  it('shows the live value in the regional format and its live timestamp (#1073)', async () => {
+    const { useWebSocketStore } = await import('@/stores/websocket')
+    useWebSocketStore().liveValues['dp-internal'] = {
+      value: 1234.5,
+      quality: 'good',
+      ts: '2026-06-12T08:30:00+00:00',
+    }
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('1.234,5 °C')
+    expect(wrapper.text()).toContain('12.06.2026')
+
+    delete useWebSocketStore().liveValues['dp-internal']
   })
 
   it('allows writing an internal datapoint without writable adapter bindings', async () => {
@@ -179,5 +198,94 @@ describe('DataPointDetailView', () => {
     expect(wrapper.text()).toContain('Logik liest im verlinkten Blatt dieses Objekt')
     expect(wrapper.text()).toContain('Write back')
     expect(wrapper.text()).toContain('Logik schreibt im verlinkten Blatt auf dieses Objekt')
+  })
+
+  it('renders KNX group address context instead of raw binding JSON', async () => {
+    apiMocks.dpApi.listBindings.mockResolvedValue({
+      data: [
+        {
+          id: 'binding-knx',
+          enabled: true,
+          direction: 'BOTH',
+          adapter_type: 'KNX',
+          config: { group_address: '1/2/3', state_group_address: '1/2/4' },
+        },
+      ],
+    })
+    apiMocks.dpApi.knxContext.mockResolvedValue({
+      data: {
+        datapoint_id: 'dp-internal',
+        group_addresses: [
+          {
+            address: '1/2/3',
+            name: 'Licht Küche',
+            description: '',
+            dpt: 'DPT1.001',
+            roles: ['group_address'],
+            devices: [
+              {
+                pa: '1.1.10',
+                name: 'Küche Aktor',
+                comm_objects: [{ id: 'co-1', number: '1', name: 'Schalten', datapoint_type: 'DPT1.001' }],
+              },
+            ],
+          },
+          {
+            address: '1/2/4',
+            name: 'Status Küche',
+            description: '',
+            dpt: 'DPT1.001',
+            roles: ['state_group_address'],
+            devices: [],
+          },
+        ],
+      },
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="datapoint-knx-context"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('1/2/3')
+    expect(wrapper.text()).toContain('Licht Küche')
+    expect(wrapper.text()).toContain('1.1.10')
+    expect(wrapper.text()).toContain('Küche Aktor')
+    expect(wrapper.text()).toContain('Rückmelde-GA')
+    expect(wrapper.text()).not.toContain('"group_address"')
+  })
+
+  it('renders KNX context when adapter_type is lowercase "knx"', async () => {
+    apiMocks.dpApi.listBindings.mockResolvedValue({
+      data: [
+        {
+          id: 'binding-knx-lower',
+          enabled: true,
+          direction: 'BOTH',
+          adapter_type: 'knx',
+          config: { group_address: '2/3/4' },
+        },
+      ],
+    })
+    apiMocks.dpApi.knxContext.mockResolvedValue({
+      data: {
+        datapoint_id: 'dp-internal',
+        group_addresses: [
+          {
+            address: '2/3/4',
+            name: 'Licht Bad',
+            description: '',
+            dpt: 'DPT1.001',
+            roles: ['group_address'],
+            devices: [],
+          },
+        ],
+      },
+    })
+
+    const wrapper = mountView()
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="datapoint-knx-context"]').exists()).toBe(true)
+    expect(wrapper.text()).toContain('2/3/4')
   })
 })

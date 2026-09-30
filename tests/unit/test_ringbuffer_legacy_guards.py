@@ -71,10 +71,10 @@ async def test_guard_paths_when_connection_is_missing():
         source_adapter="api",
         quality="good",
     )
-    await rb._trim(reference_ts="2026-01-01T00:00:00.000Z")  # noqa: SLF001
-    assert await rb._trim_by_count() == 0  # noqa: SLF001
-    assert await rb._delete_oldest(0) == 0  # noqa: SLF001
-    assert await rb._count_entries() == 0  # noqa: SLF001
+    await rb._trim(reference_ts="2026-01-01T00:00:00.000Z")
+    assert await rb._trim_by_count() == 0
+    assert await rb._delete_oldest(0) == 0
+    assert await rb._count_entries() == 0
     stats = await rb.stats()
     assert stats["total"] == 0
 
@@ -84,7 +84,7 @@ async def test_trim_by_age_without_reference_on_empty_buffer_returns_zero():
     rb = RingBuffer(storage="memory", max_entries=5, max_age=10)
     await rb.start()
     try:
-        assert await rb._trim_by_age(reference_ts=None) == 0  # noqa: SLF001
+        assert await rb._trim_by_age(reference_ts=None) == 0
     finally:
         await rb.stop()
 
@@ -202,7 +202,7 @@ def test_safe_loads_and_singleton_guard_paths():
 async def test_init_ringbuffer_start_failure_keeps_disabled_state(monkeypatch, tmp_path):
     rb_mod.set_ringbuffer_enabled(False)
 
-    async def _fail_start(self):  # noqa: ARG001
+    async def _fail_start(self):
         raise OSError("cannot open ringbuffer")
 
     monkeypatch.setattr(rb_mod.RingBuffer, "start", _fail_start)
@@ -329,6 +329,81 @@ def test_delete_ringbuffer_storage_files_surfaces_partial_unlink_failures(tmp_pa
     assert not wal_path.exists()
     assert not db_path.exists()
     assert len(list(tmp_path.glob("obs_ringbuffer.db.deleting-*-test"))) == 1
+
+
+def test_delete_ringbuffer_storage_files_keeps_segments_when_legacy_rename_fails(tmp_path, monkeypatch):
+    """Regression (#951): the segment dir must survive a failed legacy rename.
+
+    Wenn der Legacy-Teil scheitert und der Aufrufer den Monitor wieder auf
+    enabled setzt, dürfen die v2-Segmentdaten nicht bereits unwiderruflich weg
+    sein. Die Segment-Löschung erfolgt daher erst nach dem erfolgreichen Legacy-Teil.
+    """
+    db_path = tmp_path / "obs_ringbuffer.db"
+    wal_path = tmp_path / "obs_ringbuffer.db-wal"
+    for path in (db_path, wal_path):
+        path.write_text(path.name, encoding="utf-8")
+    segments_root = tmp_path / "obs_ringbuffer_segments"
+    segments_root.mkdir()
+    (segments_root / "manifest.json").write_text("{}", encoding="utf-8")
+
+    original_replace = rb_mod.os.replace
+
+    def fail_on_wal(src, dst):
+        if str(src).endswith("-wal"):
+            raise PermissionError("locked wal")
+        original_replace(src, dst)
+
+    monkeypatch.setattr(rb_mod.os, "replace", fail_on_wal)
+
+    with pytest.raises(PermissionError, match="locked wal"):
+        rb_mod.delete_ringbuffer_storage_files(str(db_path))
+
+    assert segments_root.exists()
+    assert (segments_root / "manifest.json").exists()
+    assert db_path.read_text(encoding="utf-8") == "obs_ringbuffer.db"
+    assert wal_path.read_text(encoding="utf-8") == "obs_ringbuffer.db-wal"
+
+
+def test_delete_ringbuffer_storage_files_keeps_segments_when_first_unlink_fails(tmp_path, monkeypatch):
+    """Regression (#951): a rolled-back first unlink must not remove the segments."""
+    db_path = tmp_path / "obs_ringbuffer.db"
+    wal_path = tmp_path / "obs_ringbuffer.db-wal"
+    for path in (db_path, wal_path):
+        path.write_text(path.name, encoding="utf-8")
+    segments_root = tmp_path / "obs_ringbuffer_segments"
+    segments_root.mkdir()
+    (segments_root / "manifest.json").write_text("{}", encoding="utf-8")
+
+    original_remove = rb_mod.os.remove
+
+    def fail_on_wal(path):
+        if "-wal.deleting-" in str(path):
+            raise PermissionError("locked wal")
+        original_remove(path)
+
+    monkeypatch.setattr(rb_mod, "uuid4", lambda: SimpleNamespace(hex="test"))
+    monkeypatch.setattr(rb_mod.os, "remove", fail_on_wal)
+
+    with pytest.raises(PermissionError, match="locked wal"):
+        rb_mod.delete_ringbuffer_storage_files(str(db_path))
+
+    assert segments_root.exists()
+    assert db_path.read_text(encoding="utf-8") == "obs_ringbuffer.db"
+    assert wal_path.read_text(encoding="utf-8") == "obs_ringbuffer.db-wal"
+
+
+def test_delete_ringbuffer_storage_files_removes_segments_after_legacy_success(tmp_path):
+    """The segment dir is still removed once the legacy delete completes."""
+    db_path = tmp_path / "obs_ringbuffer.db"
+    db_path.write_text("x", encoding="utf-8")
+    segments_root = tmp_path / "obs_ringbuffer_segments"
+    segments_root.mkdir()
+    (segments_root / "manifest.json").write_text("{}", encoding="utf-8")
+
+    rb_mod.delete_ringbuffer_storage_files(str(db_path))
+
+    assert not db_path.exists()
+    assert not segments_root.exists()
 
 
 def test_default_ringbuffer_disk_path_never_reuses_app_database_path():
