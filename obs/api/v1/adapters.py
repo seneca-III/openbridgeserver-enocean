@@ -865,11 +865,25 @@ async def test_instance(
             ),
         )
 
+    raw = row["config"] or "{}"
+    stored_config = json.loads(raw) if isinstance(raw, str) else raw
     if body and body.config:
         config_dict = body.config  # bereits dict durch Pydantic
+        if row["adapter_type"] == "ENOCEAN":
+            try:
+                config_dict = _preserve_redacted_enocean_token(stored_config, config_dict)
+            except ValueError as exc:
+                return _failed_test_result(
+                    request,
+                    TestResult(
+                        success=False,
+                        detail=f"Config-Fehler: {exc}",
+                        detail_code="configError",
+                        detail_params={"error": str(exc)},
+                    ),
+                )
     else:
-        raw = row["config"] or "{}"
-        config_dict = json.loads(raw) if isinstance(raw, str) else raw
+        config_dict = stored_config
 
     try:
         cls.config_schema(**config_dict)

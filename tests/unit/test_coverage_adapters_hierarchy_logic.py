@@ -962,6 +962,35 @@ class TestTestInstance:
         assert "Config-Fehler" in result.detail
 
     @pytest.mark.asyncio
+    async def test_test_enocean_instance_restores_redacted_token(self, monkeypatch):
+        from obs.api.v1 import adapters as adp_api
+        from obs.api.v1.redaction import REDACTED
+
+        stored_config = {"host": "gateway", "port": 8001, "token": "stored-token", "timeout": 10.0}
+        row = _inst_row(adapter_type="ENOCEAN", config=stored_config)
+        db = _DbStub(one=row)
+        mock_cls = MagicMock()
+        mock_cls.config_schema.return_value = MagicMock()
+        inst = MagicMock()
+        inst.connected = True
+        inst.connect = AsyncMock()
+        inst.disconnect = AsyncMock()
+        mock_cls.return_value = inst
+        monkeypatch.setattr(adp_api.adapter_registry, "get_class", lambda adapter_type: mock_cls)
+
+        body = adp_api.TestRequest(
+            config={"host": "gateway", "port": 8001, "token": REDACTED, "timeout": 10.0}
+        )
+        result = await adp_api.test_instance(
+            instance_id=uuid.UUID(row["id"]), body=body, db=db, _user="admin"
+        )
+
+        assert result.success is True
+        expected_config = {"host": "gateway", "port": 8001, "token": "stored-token", "timeout": 10.0}
+        mock_cls.config_schema.assert_called_once_with(**expected_config)
+        mock_cls.assert_called_once_with(event_bus=mock_cls.call_args.kwargs["event_bus"], config=expected_config)
+
+    @pytest.mark.asyncio
     async def test_test_instance_connection_fails(self, monkeypatch):
         from obs.api.v1 import adapters as adp_api
 
