@@ -7,11 +7,14 @@ import httpx
 import pytest
 
 from obs.adapters.enocean_mqtt.adapter import (
+    GATEWAY_DEVICE_ID,
     EnoceanMqttAdapter,
     EnoceanMqttAdapterConfig,
     EnoceanMqttBindingConfig,
     extract_value,
 )
+from obs.api.v1 import adapters as adapters_api
+from obs.api.v1.redaction import REDACTED
 from tests.adapters.conftest import make_binding
 
 
@@ -28,6 +31,21 @@ def test_config_normalizes_host():
 
     assert cfg.host == "gateway"
     assert cfg.base_url == "http://gateway:8001"
+
+
+def test_api_config_redacts_and_preserves_token():
+    stored = {"host": "gateway", "port": 8001, "token": "secret-token"}
+
+    visible = adapters_api._redact_instance_config("ENOCEAN", stored)
+    merged = adapters_api._preserve_redacted_enocean_token(stored, visible)
+
+    assert visible == {"host": "gateway", "port": 8001, "token": REDACTED}
+    assert merged == stored
+
+
+def test_redacted_token_without_stored_secret_is_rejected():
+    with pytest.raises(ValueError, match="re-enter credentials"):
+        adapters_api._preserve_redacted_enocean_token({}, {"token": REDACTED})
 
 
 def test_config_migrates_legacy_base_url():
@@ -101,6 +119,41 @@ async def test_read_fetches_datapoint_value(mock_bus):
 
 
 @pytest.mark.asyncio
+async def test_write_posts_datapoint_value(mock_bus):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "POST"
+        assert request.url.path == "/api/v1/datapoints/thermostat.setpoint/value"
+        assert request.content == b'{"value":21.5}'
+        return httpx.Response(
+            200,
+            json={
+                "status": "accepted",
+                "datapoint_id": "thermostat.setpoint",
+                "value": 21.5,
+            },
+        )
+
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    adapter._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://gateway:8001",
+    )
+    binding = make_binding({"datapoint_id": "thermostat.setpoint"})
+
+    await adapter.write(binding, 21.5)
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_write_requires_connection(mock_bus):
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    binding = make_binding({"datapoint_id": "thermostat.setpoint"})
+
+    with pytest.raises(RuntimeError, match="not connected"):
+        await adapter.write(binding, 21.5)
+
+
+@pytest.mark.asyncio
 async def test_browse_devices_normalizes_api_payload(mock_bus):
     async def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/api/v1/devices"
@@ -124,7 +177,9 @@ async def test_browse_devices_normalizes_api_payload(mock_bus):
     adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
     adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
 
-    assert await adapter.browse_devices() == [
+    devices = await adapter.browse_devices()
+
+    assert devices[0] == (
         {
             "id": "th_sensor",
             "device_name": "TH Sensor",
@@ -138,7 +193,10 @@ async def test_browse_devices_normalizes_api_payload(mock_bus):
             "writable": False,
             "datapoints_count": 1,
         }
-    ]
+    )
+    assert devices[1]["id"] == GATEWAY_DEVICE_ID
+    assert devices[1]["device_name"] == "enocean-mqtt Gateway"
+    assert devices[1]["datapoints_count"] == 5
 
     await adapter.disconnect()
 
@@ -170,10 +228,54 @@ async def test_browse_devices_filters_by_direction(mock_bus):
     writable = await adapter.browse_devices("DEST")
     all_devices = await adapter.browse_devices("BOTH")
 
-    assert [item["id"] for item in readable] == ["physical_sensor"]
+    assert [item["id"] for item in readable] == ["physical_sensor", GATEWAY_DEVICE_ID]
     assert [item["id"] for item in writable] == ["virtual_sensor"]
-    assert [item["id"] for item in all_devices] == ["physical_sensor", "virtual_sensor"]
+    assert [item["id"] for item in all_devices] == [
+        "physical_sensor",
+        "virtual_sensor",
+        GATEWAY_DEVICE_ID,
+    ]
 
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_browse_gateway_status_datapoints(mock_bus):
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    adapter._client = AsyncMock()
+
+    datapoints = await adapter.browse_datapoints(GATEWAY_DEVICE_ID, "SOURCE")
+
+    assert [item["id"] for item in datapoints] == [
+        "gateway.online",
+        "gateway.enocean_connected",
+        "gateway.tx_enabled",
+        "gateway.mqtt_connected",
+        "gateway.devices_total",
+    ]
+    assert datapoints[-1]["data_type"] == "INTEGER"
+    adapter._client.get.assert_not_called()
+
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_read_fetches_gateway_status_value(mock_bus):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/gateway/adapter-status"
+        return httpx.Response(
+            200,
+            json={"values": {"gateway.devices_total": 17}},
+        )
+
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    adapter._client = httpx.AsyncClient(
+        transport=httpx.MockTransport(handler),
+        base_url="http://gateway:8001",
+    )
+    binding = make_binding({"datapoint_id": "gateway.devices_total"})
+
+    assert await adapter.read(binding) == 17
     await adapter.disconnect()
 
 
@@ -264,3 +366,30 @@ async def test_dispatch_sse_ignores_unbound_datapoint(mock_bus):
     )
 
     mock_bus.publish.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_gateway_status_event_publishes_bound_values(mock_bus):
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    online = make_binding({"datapoint_id": "gateway.online"})
+    devices = make_binding({"datapoint_id": "gateway.devices_total"})
+    adapter._datapoint_map = {
+        "gateway.online": [online],
+        "gateway.devices_total": [devices],
+    }
+
+    await adapter._dispatch_sse_event(
+        "gateway_status",
+        [
+            (
+                '{"values":{"gateway.online":true,'
+                '"gateway.devices_total":17}}'
+            )
+        ],
+    )
+
+    events = [call.args[0] for call in mock_bus.publish.call_args_list]
+    assert [(event.binding_id, event.value, event.quality) for event in events] == [
+        (online.id, True, "good"),
+        (devices.id, 17, "good"),
+    ]

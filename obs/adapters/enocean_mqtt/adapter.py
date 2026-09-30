@@ -1,8 +1,8 @@
 """enocean-mqtt REST API adapter.
 
-Consumes the enocean-mqtt API v1 as a read-only semantic source. EnOcean,
-EEP and datapoint semantics stay in enocean-mqtt; this adapter only maps API
-datapoint values into open bridge DataValueEvents.
+Consumes the enocean-mqtt API v1 as a semantic source and destination.
+EnOcean, EEP and datapoint semantics stay in enocean-mqtt; this adapter maps
+API datapoint values and writes to open bridge bindings.
 """
 
 from __future__ import annotations
@@ -22,6 +22,55 @@ from obs.core.event_bus import DataValueEvent
 
 logger = logging.getLogger(__name__)
 SSE_RECONNECT_DELAY_SECONDS = 10.0
+GATEWAY_DEVICE_ID = "__gateway__"
+GATEWAY_STATUS_DATAPOINTS: tuple[dict[str, Any], ...] = (
+    {
+        "id": "gateway.online",
+        "device_id": GATEWAY_DEVICE_ID,
+        "name": "Online",
+        "data_type": "BOOLEAN",
+        "readable": True,
+        "writable": False,
+        "role": "system.gateway.online",
+    },
+    {
+        "id": "gateway.enocean_connected",
+        "device_id": GATEWAY_DEVICE_ID,
+        "name": "EnOcean verbunden",
+        "data_type": "BOOLEAN",
+        "readable": True,
+        "writable": False,
+        "role": "system.enocean.connected",
+    },
+    {
+        "id": "gateway.tx_enabled",
+        "device_id": GATEWAY_DEVICE_ID,
+        "name": "EnOcean TX aktiviert",
+        "data_type": "BOOLEAN",
+        "readable": True,
+        "writable": False,
+        "role": "system.enocean.tx_enabled",
+    },
+    {
+        "id": "gateway.mqtt_connected",
+        "device_id": GATEWAY_DEVICE_ID,
+        "name": "MQTT verbunden",
+        "data_type": "BOOLEAN",
+        "readable": True,
+        "writable": False,
+        "role": "system.mqtt.connected",
+    },
+    {
+        "id": "gateway.devices_total",
+        "device_id": GATEWAY_DEVICE_ID,
+        "name": "Geräte gesamt",
+        "data_type": "INTEGER",
+        "readable": True,
+        "writable": False,
+        "role": "system.devices.count",
+    },
+)
+GATEWAY_STATUS_IDS = frozenset(item["id"] for item in GATEWAY_STATUS_DATAPOINTS)
 
 
 class EnoceanMqttAdapterConfig(BaseModel):
@@ -165,9 +214,18 @@ class EnoceanMqttAdapter(AdapterBase):
         )
 
     async def _stream_loop(self) -> None:
+        paths = []
+        if any(datapoint_id not in GATEWAY_STATUS_IDS for datapoint_id in self._datapoint_map):
+            paths.append("/api/v1/datapoints/stream")
+        if any(datapoint_id in GATEWAY_STATUS_IDS for datapoint_id in self._datapoint_map):
+            paths.append("/api/v1/gateway/adapter-status/stream")
+
+        await asyncio.gather(*(self._stream_endpoint_loop(path) for path in paths))
+
+    async def _stream_endpoint_loop(self, path: str) -> None:
         while True:
             try:
-                await self._consume_stream()
+                await self._consume_stream(path)
             except asyncio.CancelledError:
                 return
             except Exception as exc:
@@ -182,16 +240,18 @@ class EnoceanMqttAdapter(AdapterBase):
                     severity="warning",
                     code="sseReconnecting",
                 )
+                if path == "/api/v1/gateway/adapter-status/stream":
+                    await self._publish_gateway_online(False, quality="bad")
                 await self._read_bound_values_once()
             await asyncio.sleep(SSE_RECONNECT_DELAY_SECONDS)
 
-    async def _consume_stream(self) -> None:
+    async def _consume_stream(self, path: str) -> None:
         if self._client is None:
             return
 
         async with self._client.stream(
             "GET",
-            "/api/v1/datapoints/stream",
+            path,
             params={"include_initial": "true"},
         ) as response:
             response.raise_for_status()
@@ -223,10 +283,18 @@ class EnoceanMqttAdapter(AdapterBase):
         event_name: str | None,
         data_lines: list[str],
     ) -> None:
-        if event_name != "datapoint" or not data_lines:
+        if not data_lines:
             return
 
         payload = json.loads("\n".join(data_lines))
+        if event_name == "gateway_status":
+            values = payload.get("values")
+            if isinstance(values, dict):
+                await self._dispatch_gateway_values(values)
+            return
+        if event_name != "datapoint":
+            return
+
         datapoint_id = str(payload.get("datapoint_id") or "")
         entries = self._datapoint_map.get(datapoint_id)
         if not entries:
@@ -241,6 +309,22 @@ class EnoceanMqttAdapter(AdapterBase):
                 value,
                 quality=quality,
             )
+
+    async def _dispatch_gateway_values(self, values: dict[str, Any]) -> None:
+        for definition in GATEWAY_STATUS_DATAPOINTS:
+            datapoint_id = definition["id"]
+            if datapoint_id not in values:
+                continue
+            for binding in self._datapoint_map.get(datapoint_id, []):
+                await self._publish_binding_value(
+                    binding,
+                    values[datapoint_id],
+                    quality="good",
+                )
+
+    async def _publish_gateway_online(self, value: bool, *, quality: str) -> None:
+        for binding in self._datapoint_map.get("gateway.online", []):
+            await self._publish_binding_value(binding, value, quality=quality)
 
     async def _read_bound_values_once(self) -> None:
         for entries in list(self._datapoint_map.values()):
@@ -302,13 +386,30 @@ class EnoceanMqttAdapter(AdapterBase):
             return None
 
         cfg = EnoceanMqttBindingConfig(**binding.config)
+        if cfg.datapoint_id in GATEWAY_STATUS_IDS:
+            response = await self._client.get("/api/v1/gateway/adapter-status")
+            response.raise_for_status()
+            values = response.json().get("values", {})
+            if cfg.datapoint_id not in values:
+                raise RuntimeError(f"enocean-mqtt status value is missing: {cfg.datapoint_id}")
+            return values[cfg.datapoint_id]
+
         datapoint_id = quote(cfg.datapoint_id, safe="")
         response = await self._client.get(f"/api/v1/datapoints/{datapoint_id}/value")
         response.raise_for_status()
         return extract_value(response.json())
 
     async def write(self, binding: Any, value: Any) -> None:
-        logger.debug("enocean-mqtt write ignored — REST adapter is read-only (binding %s)", binding.id)
+        if self._client is None:
+            raise RuntimeError("enocean-mqtt adapter is not connected")
+
+        cfg = EnoceanMqttBindingConfig(**binding.config)
+        datapoint_id = quote(cfg.datapoint_id, safe="")
+        response = await self._client.post(
+            f"/api/v1/datapoints/{datapoint_id}/value",
+            json={"value": value},
+        )
+        response.raise_for_status()
 
     async def browse_devices(self, direction: str = "BOTH") -> list[dict[str, Any]]:
         if self._client is None:
@@ -317,11 +418,34 @@ class EnoceanMqttAdapter(AdapterBase):
         response = await self._client.get("/api/v1/devices")
         response.raise_for_status()
         devices = [_normalize_device(item) for item in _payload_items(response.json(), "devices")]
+        if direction.upper() != "DEST":
+            devices.append(
+                {
+                    "id": GATEWAY_DEVICE_ID,
+                    "device_name": "enocean-mqtt Gateway",
+                    "name": "enocean-mqtt Gateway",
+                    "alias": None,
+                    "eep": None,
+                    "manufacturer": None,
+                    "source_type": "gateway",
+                    "virtual_device_id": None,
+                    "readable": True,
+                    "writable": False,
+                    "datapoints_count": len(GATEWAY_STATUS_DATAPOINTS),
+                }
+            )
         return [device for device in devices if _matches_direction(device, direction)]
 
     async def browse_datapoints(self, device_id: str, direction: str = "SOURCE") -> list[dict[str, Any]]:
         if self._client is None:
             return []
+
+        if device_id == GATEWAY_DEVICE_ID:
+            return [
+                dict(item)
+                for item in GATEWAY_STATUS_DATAPOINTS
+                if _matches_direction(item, direction)
+            ]
 
         quoted_device_id = quote(device_id, safe="")
         response = await self._client.get(f"/api/v1/devices/{quoted_device_id}/datapoints")

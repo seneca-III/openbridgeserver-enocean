@@ -264,6 +264,32 @@ async def test_iobroker_discovery_hides_instance_without_read_grant(db: Database
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["devices", "datapoints"])
+async def test_enocean_discovery_hides_instance_without_read_grant(operation: str, db: Database):
+    instance_id = uuid.uuid4()
+    await _insert_instance(db, instance_id, "ENOCEAN")
+
+    with pytest.raises(HTTPException) as exc_info:
+        if operation == "devices":
+            await adapters_api.enocean_mqtt_browse_devices(
+                instance_id,
+                direction="BOTH",
+                _user=_principal(),
+                db=db,
+            )
+        else:
+            await adapters_api.enocean_mqtt_browse_datapoints(
+                instance_id,
+                device_id="device",
+                direction="SOURCE",
+                _user=_principal(),
+                db=db,
+            )
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
 async def test_snmp_discovery_hides_instance_without_read_grant(db: Database):
     instance_id = uuid.uuid4()
     await _insert_instance(db, instance_id, "SNMP")

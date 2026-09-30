@@ -252,10 +252,15 @@ class ConfigPatch(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _enocean_mqtt_adapter_for_instance(instance_id: uuid.UUID, db: Database) -> tuple[Any, bool]:
+async def _enocean_mqtt_adapter_for_instance(
+    instance_id: uuid.UUID,
+    db: Database,
+    principal: Principal,
+) -> tuple[Any, bool]:
     row = await db.fetchone("SELECT * FROM adapter_instances WHERE id=?", (str(instance_id),))
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Instanz nicht gefunden")
+    await _ensure_instance_read(db, principal, str(instance_id))
     if row["adapter_type"] != "ENOCEAN":
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Nur für EnOcean-Instanzen verfügbar")
 
@@ -440,7 +445,25 @@ def _preserve_redacted_message_config_secrets(stored_config: dict[str, Any], inc
 def _redact_instance_config(adapter_type: str, config: dict[str, Any]) -> dict[str, Any]:
     if adapter_type == "MESSAGE":
         return _redact_message_config(config)
+    if adapter_type == "ENOCEAN":
+        redacted = dict(config)
+        if redacted.get("token"):
+            redacted["token"] = REDACTED
+        return redacted
     return config
+
+
+def _preserve_redacted_enocean_token(
+    stored_config: dict[str, Any],
+    incoming_config: dict[str, Any],
+) -> dict[str, Any]:
+    merged = dict(incoming_config)
+    if merged.get("token") != REDACTED:
+        return merged
+    if not stored_config.get("token"):
+        raise ValueError("Unresolved redacted EnOcean token; please re-enter credentials")
+    merged["token"] = stored_config["token"]
+    return merged
 
 
 def _instance_out(row: Any, instance: Any | None) -> AdapterInstanceOut:
@@ -608,6 +631,11 @@ async def create_instance(
             _reject_unresolved_redacted_message_config(body.config)
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    if body.adapter_type == "ENOCEAN" and body.config.get("token") == REDACTED:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "Unresolved redacted EnOcean token; please re-enter credentials",
+        )
     # Config validieren
     try:
         cls.config_schema(**body.config)
@@ -713,6 +741,12 @@ async def update_instance(
                 try:
                     config_new = _preserve_redacted_message_config_secrets(stored_config, body.config)
                     _reject_unresolved_redacted_message_config(config_new)
+                except ValueError as exc:
+                    raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+            if row["adapter_type"] == "ENOCEAN":
+                stored_config = json.loads(config_raw) if config_raw else {}
+                try:
+                    config_new = _preserve_redacted_enocean_token(stored_config, body.config)
                 except ValueError as exc:
                     raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
             if row["adapter_type"] == "ONEWIRE":
@@ -1152,10 +1186,14 @@ async def mqtt_browse_topics(
 async def enocean_mqtt_browse_devices(
     instance_id: uuid.UUID,
     direction: str = Query("BOTH", pattern="^(SOURCE|DEST|BOTH)$"),
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> list[EnoceanMqttDeviceOut]:
-    adapter, close_after = await _enocean_mqtt_adapter_for_instance(instance_id, db)
+    adapter, close_after = await _enocean_mqtt_adapter_for_instance(
+        instance_id,
+        db,
+        _principal_from_dependency(_user),
+    )
     try:
         return [EnoceanMqttDeviceOut(**item) for item in await adapter.browse_devices(direction)]
     except Exception as exc:
@@ -1176,10 +1214,14 @@ async def enocean_mqtt_browse_datapoints(
     instance_id: uuid.UUID,
     device_id: str,
     direction: str = Query("SOURCE", pattern="^(SOURCE|DEST|BOTH)$"),
-    _user: str = Depends(get_current_user),
+    _user: Principal | str = Depends(get_current_principal),
     db: Database = Depends(lambda: get_db()),
 ) -> list[EnoceanMqttDatapointOut]:
-    adapter, close_after = await _enocean_mqtt_adapter_for_instance(instance_id, db)
+    adapter, close_after = await _enocean_mqtt_adapter_for_instance(
+        instance_id,
+        db,
+        _principal_from_dependency(_user),
+    )
     try:
         return [
             EnoceanMqttDatapointOut(**item)
@@ -2060,6 +2102,13 @@ async def update_adapter_config(
         try:
             config_new = _preserve_redacted_message_config_secrets(stored_config, body.config)
             _reject_unresolved_redacted_message_config(config_new)
+        except ValueError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
+    if adapter_type == "ENOCEAN":
+        row = await db.fetchone("SELECT * FROM adapter_configs WHERE adapter_type=?", (adapter_type,))
+        stored_config = json.loads(row["config"]) if row is not None and row["config"] else {}
+        try:
+            config_new = _preserve_redacted_enocean_token(stored_config, body.config)
         except ValueError as exc:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from exc
     try:

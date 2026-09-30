@@ -1148,7 +1148,7 @@
         },
         "token": {
           "title": "API-Token",
-          "description": "Bearer-Token für /api/v1, falls in enocean-mqtt aktiviert"
+          "description": "Bearer-Token für /api/v1; Lesen benötigt die Rolle read, Schreiben die Rolle admin"
         },
         "timeout": {
           "title": "Timeout (s)",
