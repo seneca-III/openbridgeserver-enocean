@@ -94,6 +94,7 @@
       <BindingFormEnoceanMqtt
         v-if="selectedAdapterType === 'ENOCEAN'"
           :cfg="cfg"
+          :direction="form.direction"
           :selected-instance-id="selectedInstanceId"
           :enocean-devices="enoceanDevices"
           :enocean-devices-loading="enoceanDevicesLoading"
@@ -401,7 +402,7 @@ const cfg = reactive({
   byte_order: 'big', word_order: 'big',
   topic: '', publish_topic: '', retain: false, payload_template: '',
   source_data_type: '', json_key: '', xml_path: '',
-  datapoint_id: '', device_id: '',
+  datapoint_id: '', device_id: '', representation: 'value',
   sensor_id: '', property: 'temperature',
   // HOME_ASSISTANT
   entity_id: '', attribute: '', service_domain: '', service_name: '', service_data_key: '',
@@ -660,6 +661,7 @@ watch(() => props.initial, val => {
   if (cfg.xml_path           == null) cfg.xml_path = ''
   if (cfg.datapoint_id       == null) cfg.datapoint_id = ''
   if (cfg.device_id          == null) cfg.device_id = ''
+  if (cfg.representation     == null) cfg.representation = 'value'
   // HOME_ASSISTANT defaults when loading
   if (cfg.entity_id        == null) cfg.entity_id        = ''
   if (cfg.attribute        == null) cfg.attribute        = ''
@@ -829,6 +831,7 @@ async function browseEnoceanDevices() {
 function selectEnoceanDevice(deviceId) {
   cfg.device_id = deviceId
   cfg.datapoint_id = ''
+  cfg.representation = 'value'
   enoceanDatapoints.value = []
   enoceanDatapointsError.value = null
   if (deviceId) browseEnoceanDatapoints()
@@ -849,6 +852,7 @@ async function browseEnoceanDatapoints() {
   try {
     const { data } = await adapterApi.enoceanMqttBrowseDatapoints(instanceId, cfg.device_id, form.direction)
     enoceanDatapoints.value = data
+    if (cfg.datapoint_id) selectEnoceanDatapoint(cfg.datapoint_id)
     if (data.length === 0) enoceanDatapointsError.value = t('adapters.bindingForm.errors.noEnoceanDatapointsFound')
   } catch (e) {
     enoceanDatapointsError.value = e.response?.data?.detail ?? t('adapters.bindingForm.errors.enoceanDatapointsLoadFailed')
@@ -859,6 +863,16 @@ async function browseEnoceanDatapoints() {
 
 function selectEnoceanDatapoint(datapointId) {
   cfg.datapoint_id = datapointId
+  const datapoint = enoceanDatapoints.value.find(item => String(item.id) === String(datapointId))
+  const representations = Array.isArray(datapoint?.representations) ? datapoint.representations : []
+  const selectable = form.direction === 'SOURCE'
+    ? representations.filter(item => item.readable)
+    : representations.filter(item => item.writable && item.field !== 'meaning')
+  if (selectable.length > 0 && !selectable.some(item => item.field === cfg.representation)) {
+    cfg.representation = selectable[0].field
+  } else if (representations.length === 0) {
+    cfg.representation = 'value'
+  }
   enoceanDatapointsError.value = null
 }
 
@@ -1050,6 +1064,7 @@ watch(() => form.direction, () => {
       browseEnoceanDevices()
     }
     cfg.datapoint_id = ''
+    cfg.representation = 'value'
     enoceanDatapoints.value = []
     if (!hadDevices && cfg.device_id) browseEnoceanDatapoints()
   }
@@ -1062,6 +1077,7 @@ watch(selectedInstanceId, (newId, oldId) => {
   if (oldId && newId !== oldId && selectedAdapterType.value === 'ENOCEAN') {
     cfg.device_id = ''
     cfg.datapoint_id = ''
+    cfg.representation = 'value'
     enoceanDevices.value = []
     enoceanDatapoints.value = []
     enoceanDevicesError.value = null
@@ -1346,7 +1362,7 @@ function buildConfig() {
     return c
   }
   if (type === 'ENOCEAN') {
-    const c = { datapoint_id: cfg.datapoint_id }
+    const c = { datapoint_id: cfg.datapoint_id, representation: cfg.representation || 'value' }
     if (cfg.device_id?.trim()) c.device_id = cfg.device_id.trim()
     return c
   }

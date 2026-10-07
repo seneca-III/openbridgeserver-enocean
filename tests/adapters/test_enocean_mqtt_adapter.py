@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import httpx
@@ -11,6 +12,7 @@ from obs.adapters.enocean_mqtt.adapter import (
     EnoceanMqttAdapter,
     EnoceanMqttAdapterConfig,
     EnoceanMqttBindingConfig,
+    extract_observation,
     extract_value,
 )
 from obs.api.v1 import adapters as adapters_api
@@ -61,6 +63,17 @@ def test_binding_rejects_empty_datapoint_id():
         EnoceanMqttBindingConfig(datapoint_id=" ")
 
 
+def test_binding_defaults_to_numeric_value_representation():
+    legacy = EnoceanMqttBindingConfig(datapoint_id="front_door.lock_contact")
+    meaning = EnoceanMqttBindingConfig(
+        datapoint_id="front_door.lock_contact",
+        representation="meaning",
+    )
+
+    assert legacy.representation == "value"
+    assert meaning.representation == "meaning"
+
+
 @pytest.mark.parametrize(
     ("payload", "expected"),
     [
@@ -73,6 +86,19 @@ def test_binding_rejects_empty_datapoint_id():
 )
 def test_extract_value(payload, expected):
     assert extract_value(payload) == expected
+
+
+def test_extract_observation_marks_missing_meaning_unavailable_without_losing_timestamp():
+    timestamp = "2026-10-07T12:34:56Z"
+
+    value, quality, parsed_timestamp = extract_observation(
+        {"datapoint_id": "front_door.lock_contact", "value": 7, "quality": "good", "timestamp": timestamp},
+        "meaning",
+    )
+
+    assert value is None
+    assert quality == "bad"
+    assert parsed_timestamp == datetime(2026, 10, 7, 12, 34, 56, tzinfo=UTC)
 
 
 @pytest.mark.asyncio
@@ -118,6 +144,39 @@ async def test_read_fetches_datapoint_value(mock_bus):
     await adapter.disconnect()
 
 
+@pytest.mark.parametrize("protocol_value", [0, 1])
+@pytest.mark.asyncio
+async def test_read_keeps_enum_protocol_value_numeric(mock_bus, protocol_value):
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"value": {"value": protocol_value, "meaning": "label", "quality": "good"}},
+        )
+
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
+    binding = make_binding({"datapoint_id": "front_door.lock_contact", "representation": "value"})
+
+    assert await adapter.read(binding) == protocol_value
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_read_selects_meaning_from_same_observation(mock_bus):
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"value": {"value": 1, "meaning": "door_unlocked", "quality": "good"}},
+        )
+
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
+    binding = make_binding({"datapoint_id": "front_door.lock_contact", "representation": "meaning"})
+
+    assert await adapter.read(binding) == "door_unlocked"
+    await adapter.disconnect()
+
+
 @pytest.mark.asyncio
 async def test_write_posts_datapoint_value(mock_bus):
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -151,6 +210,26 @@ async def test_write_requires_connection(mock_bus):
 
     with pytest.raises(RuntimeError, match="not connected"):
         await adapter.write(binding, 21.5)
+
+
+@pytest.mark.asyncio
+async def test_write_rejects_meaning_without_sending_request(mock_bus):
+    request_seen = False
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal request_seen
+        request_seen = True
+        return httpx.Response(200)
+
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
+    binding = make_binding({"datapoint_id": "front_door.lock_contact", "representation": "meaning"}, direction="DEST")
+
+    with pytest.raises(ValueError, match="read-only"):
+        await adapter.write(binding, "door_locked")
+
+    assert request_seen is False
+    await adapter.disconnect()
 
 
 @pytest.mark.asyncio
@@ -311,6 +390,90 @@ async def test_browse_datapoints_filters_by_direction_and_maps_type(mock_bus):
 
 
 @pytest.mark.asyncio
+async def test_browse_datapoints_preserves_enum_contract_and_runtime_value(mock_bus):
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["include_values"] == "true"
+        return httpx.Response(
+            200,
+            json={
+                "datapoints": [
+                    {
+                        "id": "front_door.lock_contact",
+                        "device_id": "front_door",
+                        "name": "lock_contact",
+                        "display_name": "Lock contact",
+                        "description": "Door lock state",
+                        "semantic_role": "security.lock",
+                        "data_type": "integer",
+                        "readable": True,
+                        "writable": False,
+                        "representations": [
+                            {"field": "value", "data_type": "integer", "readable": True, "writable": False},
+                            {"field": "meaning", "data_type": "string", "readable": True, "writable": False},
+                        ],
+                        "enum": [
+                            {"value": 0, "label": "door_locked", "semantic_value": True},
+                            {"value": 1, "label": "door_unlocked", "semantic_value": False},
+                        ],
+                        "runtime_value": {
+                            "datapoint_id": "front_door.lock_contact",
+                            "value": 1,
+                            "meaning": "door_unlocked",
+                            "quality": "good",
+                            "timestamp": "2026-10-07T12:34:56Z",
+                        },
+                    }
+                ]
+            },
+        )
+
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
+
+    datapoint = (await adapter.browse_datapoints("front_door", "SOURCE"))[0]
+
+    assert datapoint["id"] == "front_door.lock_contact"
+    assert datapoint["data_type"] == "INTEGER"
+    assert [item["data_type"] for item in datapoint["representations"]] == ["INTEGER", "STRING"]
+    assert datapoint["enum"][0]["semantic_value"] is True
+    assert datapoint["enum"][1]["semantic_value"] is False
+    assert datapoint["description"] == "Door lock state"
+    assert datapoint["role"] == "security.lock"
+    assert datapoint["value"] == 1
+    assert datapoint["meaning"] == "door_unlocked"
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_browse_datapoints_refreshes_changed_representation_contract(mock_bus):
+    calls = 0
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        representations = None if calls == 1 else [
+            {"field": "value", "data_type": "integer", "readable": True, "writable": False},
+            {"field": "meaning", "data_type": "string", "readable": True, "writable": False},
+        ]
+        datapoint = {"id": "door.state", "data_type": "enum", "readable": True}
+        if representations is not None:
+            datapoint.update(data_type="integer", representations=representations)
+        return httpx.Response(200, json={"datapoints": [datapoint]})
+
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
+
+    legacy = (await adapter.browse_datapoints("door", "SOURCE"))[0]
+    refreshed = (await adapter.browse_datapoints("door", "SOURCE"))[0]
+
+    assert legacy["data_type"] == "STRING"
+    assert legacy["representations"] is None
+    assert refreshed["data_type"] == "INTEGER"
+    assert [item["field"] for item in refreshed["representations"]] == ["value", "meaning"]
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_on_bindings_reloaded_starts_source_stream_task(mock_bus):
     adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
     adapter._client = AsyncMock()
@@ -341,7 +504,8 @@ async def test_dispatch_sse_datapoint_event_publishes_bound_value(mock_bus):
         [
             (
                 '{"datapoint_id":"th_sensor.temperature",'
-                '"value":22.4,"quality":"good","unit":"°C"}'
+                '"value":22.4,"quality":"good","unit":"°C",'
+                '"timestamp":"2026-10-07T12:34:56Z"}'
             )
         ],
     )
@@ -351,8 +515,75 @@ async def test_dispatch_sse_datapoint_event_publishes_bound_value(mock_bus):
     assert event.datapoint_id == binding.datapoint_id
     assert event.value == 22.4
     assert event.quality == "good"
+    assert event.ts == datetime(2026, 10, 7, 12, 34, 56, tzinfo=UTC)
     assert event.source_adapter == "ENOCEAN"
     assert event.binding_id == binding.id
+
+
+@pytest.mark.asyncio
+async def test_dispatch_sse_selects_both_representations_and_clears_stale_meaning(mock_bus):
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    value_binding = make_binding({"datapoint_id": "front_door.lock_contact", "representation": "value"})
+    meaning_binding = make_binding({"datapoint_id": "front_door.lock_contact", "representation": "meaning"})
+    adapter._datapoint_map = {"front_door.lock_contact": [value_binding, meaning_binding]}
+
+    await adapter._dispatch_sse_event(
+        "datapoint",
+        [
+            (
+                '{"datapoint_id":"front_door.lock_contact","value":1,'
+                '"meaning":"door_unlocked","quality":"good","timestamp":"2026-10-07T12:34:56Z"}'
+            )
+        ],
+    )
+    await adapter._dispatch_sse_event(
+        "datapoint",
+        [
+            (
+                '{"datapoint_id":"front_door.lock_contact","value":7,'
+                '"quality":"good","timestamp":"2026-10-07T12:35:00Z"}'
+            )
+        ],
+    )
+
+    events = [call.args[0] for call in mock_bus.publish.call_args_list]
+    assert [(event.binding_id, event.value, event.quality) for event in events] == [
+        (value_binding.id, 1, "good"),
+        (meaning_binding.id, "door_unlocked", "good"),
+        (value_binding.id, 7, "good"),
+        (meaning_binding.id, None, "bad"),
+    ]
+    assert events[1].ts == datetime(2026, 10, 7, 12, 34, 56, tzinfo=UTC)
+    assert events[3].ts == datetime(2026, 10, 7, 12, 35, tzinfo=UTC)
+
+
+@pytest.mark.asyncio
+async def test_fallback_read_propagates_quality_and_timestamp(mock_bus):
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "value": {
+                    "value": 0,
+                    "meaning": "door_locked",
+                    "quality": "good",
+                    "timestamp": "2026-10-07T12:34:56Z",
+                }
+            },
+        )
+
+    adapter = EnoceanMqttAdapter(mock_bus, {"host": "gateway", "port": 8001})
+    adapter._client = httpx.AsyncClient(transport=httpx.MockTransport(handler), base_url="http://gateway:8001")
+    binding = make_binding({"datapoint_id": "front_door.lock_contact", "representation": "meaning"})
+    adapter._datapoint_map = {"front_door.lock_contact": [binding]}
+
+    await adapter._read_bound_values_once()
+
+    event = mock_bus.publish.call_args.args[0]
+    assert event.value == "door_locked"
+    assert event.quality == "good"
+    assert event.ts == datetime(2026, 10, 7, 12, 34, 56, tzinfo=UTC)
+    await adapter.disconnect()
 
 
 @pytest.mark.asyncio

@@ -487,6 +487,14 @@
       "enoceanDatapointPlaceholder": "Kanal wählen …",
       "enoceanDatapointHint": "Die Liste folgt der gewählten Richtung: Lesen zeigt RO, Schreiben zeigt WO.",
       "enoceanDatapointsCount": "Datenpunkte",
+      "enoceanRepresentationLabel": "Darstellung *",
+      "enoceanRepresentationValue": "Value",
+      "enoceanRepresentationMeaning": "Meaning",
+      "enoceanRepresentationHint": "Value liefert den numerischen Protokollwert, Meaning die vom Server gelieferte Bezeichnung.",
+      "enoceanMeaningUnavailable": "Für den aktuellen Zahlenwert ist keine Meaning-Bezeichnung verfügbar.",
+      "enoceanEnumLabel": "Enum-Werte",
+      "enoceanSemanticTrue": "semantische Polarität: wahr",
+      "enoceanSemanticFalse": "semantische Polarität: falsch",
       "onewireSection": "1-Wire Binding",
       "onewireSensorIdLabel": "Sensor-ID *",
       "onewireSensorIdPlaceholder": "z.B. 28.4B057F0A1C10",
@@ -1153,6 +1161,18 @@
         "timeout": {
           "title": "Timeout (s)",
           "description": "HTTP-Timeout für Verbindungstest und API-Anfragen in Sekunden"
+        },
+        "datapoint_id": {
+          "title": "Datenpunkt-ID",
+          "description": "Unveränderte Datenpunkt-ID der enocean-mqtt API"
+        },
+        "device_id": {
+          "title": "Geräte-ID",
+          "description": "Geräte-ID der enocean-mqtt API"
+        },
+        "representation": {
+          "title": "Darstellung",
+          "description": "Ausgewählte Darstellung des Datenpunkts: Value oder Meaning"
         }
       },
       "MQTT": {

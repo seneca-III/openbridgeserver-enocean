@@ -192,13 +192,27 @@ class EnoceanMqttDatapointOut(BaseModel):
     id: str
     device_id: str | None = None
     name: str | None = None
+    display_name: str | None = None
     channel: str | None = None
     data_type: str = "UNKNOWN"
     unit: str | None = None
     readable: bool = True
     writable: bool = False
     role: str | None = None
+    object_type: str | None = None
+    stateful: bool | None = None
+    description: str | None = None
+    enum: list[dict[str, Any]] | None = None
+    ranges: list[dict[str, Any]] | None = None
+    default_value: Any = None
+    value_resolution: float | None = None
+    value_precision: int | None = None
+    metadata: dict[str, Any] | None = None
+    source: dict[str, Any] | str | None = None
+    representations: list[dict[str, Any]] | None = None
+    runtime_value: dict[str, Any] | None = None
     value: Any = None
+    meaning: str | None = None
 
 
 class OneWireSensorOut(BaseModel):

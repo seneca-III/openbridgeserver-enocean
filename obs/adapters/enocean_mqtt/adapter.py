@@ -10,7 +10,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Any
+from datetime import datetime
+from typing import Any, Literal
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -114,6 +115,10 @@ class EnoceanMqttAdapterConfig(BaseModel):
 class EnoceanMqttBindingConfig(BaseModel):
     datapoint_id: str = Field(description="enocean-mqtt API datapoint id")
     device_id: str | None = Field(default=None, description="enocean-mqtt API device id")
+    representation: Literal["value", "meaning"] = Field(
+        default="value",
+        description="Selected enocean-mqtt datapoint representation",
+    )
 
     @field_validator("datapoint_id")
     @classmethod
@@ -300,14 +305,14 @@ class EnoceanMqttAdapter(AdapterBase):
         if not entries:
             return
 
-        value = extract_value({"value": payload})
-        quality = "good" if payload.get("quality") == "good" else "bad"
-
         for binding in entries:
+            cfg = EnoceanMqttBindingConfig(**binding.config)
+            value, quality, timestamp = extract_observation(payload, cfg.representation)
             await self._publish_binding_value(
                 binding,
                 value,
                 quality=quality,
+                timestamp=timestamp,
             )
 
     async def _dispatch_gateway_values(self, values: dict[str, Any]) -> None:
@@ -330,11 +335,12 @@ class EnoceanMqttAdapter(AdapterBase):
         for entries in list(self._datapoint_map.values()):
             for binding in entries:
                 try:
-                    value = await self.read(binding)
+                    value, quality, timestamp = await self._read_observation(binding)
                     await self._publish_binding_value(
                         binding,
                         value,
-                        quality="good",
+                        quality=quality,
+                        timestamp=timestamp,
                     )
                 except asyncio.CancelledError:
                     raise
@@ -356,6 +362,7 @@ class EnoceanMqttAdapter(AdapterBase):
         value: Any,
         *,
         quality: str,
+        timestamp: datetime | None = None,
     ) -> None:
         try:
             if binding.value_formula and value is not None:
@@ -371,19 +378,24 @@ class EnoceanMqttAdapter(AdapterBase):
             quality = "bad"
             value = None
 
-        await self._bus.publish(
-            DataValueEvent(
-                datapoint_id=binding.datapoint_id,
-                value=value,
-                quality=quality,
-                source_adapter=self.adapter_type,
-                binding_id=binding.id,
-            ),
-        )
+        event_kwargs = {
+            "datapoint_id": binding.datapoint_id,
+            "value": value,
+            "quality": quality,
+            "source_adapter": self.adapter_type,
+            "binding_id": binding.id,
+        }
+        if timestamp is not None:
+            event_kwargs["ts"] = timestamp
+        await self._bus.publish(DataValueEvent(**event_kwargs))
 
     async def read(self, binding: Any) -> Any:
+        value, _quality, _timestamp = await self._read_observation(binding)
+        return value
+
+    async def _read_observation(self, binding: Any) -> tuple[Any, str, datetime | None]:
         if self._client is None:
-            return None
+            return None, "bad", None
 
         cfg = EnoceanMqttBindingConfig(**binding.config)
         if cfg.datapoint_id in GATEWAY_STATUS_IDS:
@@ -392,18 +404,20 @@ class EnoceanMqttAdapter(AdapterBase):
             values = response.json().get("values", {})
             if cfg.datapoint_id not in values:
                 raise RuntimeError(f"enocean-mqtt status value is missing: {cfg.datapoint_id}")
-            return values[cfg.datapoint_id]
+            return values[cfg.datapoint_id], "good", None
 
         datapoint_id = quote(cfg.datapoint_id, safe="")
         response = await self._client.get(f"/api/v1/datapoints/{datapoint_id}/value")
         response.raise_for_status()
-        return extract_value(response.json())
+        return extract_observation(response.json(), cfg.representation)
 
     async def write(self, binding: Any, value: Any) -> None:
         if self._client is None:
             raise RuntimeError("enocean-mqtt adapter is not connected")
 
         cfg = EnoceanMqttBindingConfig(**binding.config)
+        if cfg.representation == "meaning":
+            raise ValueError("enocean-mqtt meaning representation is read-only")
         datapoint_id = quote(cfg.datapoint_id, safe="")
         response = await self._client.post(
             f"/api/v1/datapoints/{datapoint_id}/value",
@@ -448,7 +462,10 @@ class EnoceanMqttAdapter(AdapterBase):
             ]
 
         quoted_device_id = quote(device_id, safe="")
-        response = await self._client.get(f"/api/v1/devices/{quoted_device_id}/datapoints")
+        response = await self._client.get(
+            f"/api/v1/devices/{quoted_device_id}/datapoints",
+            params={"include_values": "true"},
+        )
         response.raise_for_status()
         items = [_normalize_datapoint(item, device_id=device_id) for item in _payload_items(response.json(), "datapoints")]
         return [item for item in items if _matches_direction(item, direction)]
@@ -470,6 +487,42 @@ def extract_value(payload: Any) -> Any:
         return datapoint["value"]
 
     return payload
+
+
+def extract_observation(
+    payload: Any,
+    representation: Literal["value", "meaning"] = "value",
+) -> tuple[Any, str, datetime | None]:
+    """Select one representation while retaining observation metadata."""
+    observation = _observation_payload(payload)
+    timestamp = _parse_timestamp(observation.get("timestamp"))
+    quality = "good" if observation.get("quality", "good") == "good" else "bad"
+    if representation == "meaning":
+        if "meaning" not in observation or observation["meaning"] is None:
+            return None, "bad", timestamp
+        return observation["meaning"], quality, timestamp
+    return extract_value(payload), quality, timestamp
+
+
+def _observation_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"value": payload}
+    value = payload.get("value")
+    if isinstance(value, dict):
+        return value
+    datapoint = payload.get("datapoint")
+    if isinstance(datapoint, dict):
+        return datapoint
+    return payload
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 def _payload_items(payload: Any, key: str) -> list[Any]:
@@ -549,22 +602,49 @@ def _normalize_datapoint(item: Any, device_id: str | None = None) -> dict[str, A
 
     datapoint_id = str(item.get("id") or item.get("datapoint_id") or item.get("key") or "")
     raw_type = item.get("data_type") or item.get("type") or item.get("value_type")
+    advertised_representations = item.get("representations")
+    has_representation_contract = isinstance(advertised_representations, list)
     readable = _flag(item, "readable", "read", default=_direction_allows(item, {"read", "ro", "source"}))
     writable = _flag(item, "writable", "write", default=_direction_allows(item, {"write", "wo", "dest"}))
     if "direction" not in item and "access" not in item and "readable" not in item and "writable" not in item:
         readable = True
         writable = False
+    representations = None
+    if has_representation_contract:
+        representations = [
+            {
+                **representation,
+                "data_type": _obs_data_type(representation.get("data_type")),
+            }
+            for representation in advertised_representations
+            if isinstance(representation, dict) and representation.get("field") in {"value", "meaning"}
+        ]
+    runtime_value = item.get("runtime_value") if isinstance(item.get("runtime_value"), dict) else None
     return {
         "id": datapoint_id,
         "device_id": item.get("device_id") or device_id,
         "name": item.get("name") or item.get("display_name") or item.get("channel") or datapoint_id,
+        "display_name": item.get("display_name"),
         "channel": item.get("channel"),
         "data_type": _obs_data_type(raw_type),
         "unit": item.get("unit"),
         "readable": readable,
         "writable": writable,
         "role": item.get("role") or item.get("semantic_role"),
-        "value": extract_value(item) if "value" in item else None,
+        "object_type": item.get("object_type"),
+        "stateful": item.get("stateful"),
+        "description": item.get("description"),
+        "enum": item.get("enum"),
+        "ranges": item.get("ranges"),
+        "default_value": item.get("default_value"),
+        "value_resolution": item.get("value_resolution"),
+        "value_precision": item.get("value_precision"),
+        "metadata": item.get("metadata"),
+        "source": item.get("source"),
+        "representations": representations,
+        "runtime_value": runtime_value,
+        "value": extract_value(runtime_value) if runtime_value is not None else (extract_value(item) if "value" in item else None),
+        "meaning": runtime_value.get("meaning") if runtime_value is not None else item.get("meaning"),
     }
 
 

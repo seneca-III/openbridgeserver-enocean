@@ -9,6 +9,7 @@ const ALL_INSTANCES = [
   { id: 'knx-1',    name: 'KNX Test',           adapter_type: 'KNX' },
   { id: 'modbus-1', name: 'Modbus Test',         adapter_type: 'MODBUS_TCP' },
   { id: 'ow-1',     name: 'Onewire Test',        adapter_type: 'ONEWIRE' },
+  { id: 'enocean-1', name: 'EnOcean Test',        adapter_type: 'ENOCEAN' },
   { id: 'ha-1',     name: 'Home Assistant Test', adapter_type: 'HOME_ASSISTANT' },
   { id: 'iob-1',    name: 'ioBroker Test',       adapter_type: 'IOBROKER' },
   { id: 'zt-1',     name: 'Timer Test',          adapter_type: 'ZEITSCHALTUHR' },
@@ -40,6 +41,8 @@ beforeEach(() => {
       knxGroupAddresses:  vi.fn().mockResolvedValue({ data: [] }),
       mqttBrowseTopics:   vi.fn().mockResolvedValue({ data: [] }),
       mqttSamplePayload:  vi.fn().mockResolvedValue({ data: { payload: '{}' } }),
+      enoceanMqttBrowseDevices: vi.fn().mockResolvedValue({ data: [] }),
+      enoceanMqttBrowseDatapoints: vi.fn().mockResolvedValue({ data: [] }),
       iobrokerBrowseStates: vi.fn().mockResolvedValue({ data: [] }),
       snmpWalk:           vi.fn().mockResolvedValue({ data: [] }),
       getZsuHolidays:     vi.fn().mockResolvedValue({ data: [] }),
@@ -135,6 +138,50 @@ describe('BindingForm — ONEWIRE create submit', () => {
     expect(createBinding).toHaveBeenCalledWith('dp-1', expect.objectContaining({
       adapter_instance_id: 'ow-1',
       config:              expect.objectContaining({ property: 'temperature' }),
+    }))
+    w.unmount()
+  })
+})
+
+// ─── EnOcean submit ──────────────────────────────────────────────────────────
+
+describe('BindingForm — ENOCEAN submit', () => {
+  it('persists the selected representation separately from the datapoint id', async () => {
+    const w = await mountForm()
+    await selectInstance(w, 'enocean-1')
+    w.vm.cfg.datapoint_id = 'front_door.lock_contact'
+    w.vm.cfg.device_id = 'front_door'
+    w.vm.cfg.representation = 'meaning'
+
+    await submit(w)
+
+    expect(createBinding).toHaveBeenCalledWith('dp-1', expect.objectContaining({
+      adapter_instance_id: 'enocean-1',
+      config: {
+        datapoint_id: 'front_door.lock_contact',
+        device_id: 'front_door',
+        representation: 'meaning',
+      },
+    }))
+    w.unmount()
+  })
+
+  it('defaults an existing binding without a selector to value', async () => {
+    const w = await mountForm({
+      initial: {
+        id: 'binding-enocean',
+        adapter_type: 'ENOCEAN',
+        adapter_instance_id: 'enocean-1',
+        direction: 'SOURCE',
+        enabled: true,
+        config: { datapoint_id: 'front_door.lock_contact', device_id: 'front_door' },
+      },
+    })
+
+    await submit(w)
+
+    expect(updateBinding).toHaveBeenCalledWith('dp-1', 'binding-enocean', expect.objectContaining({
+      config: expect.objectContaining({ representation: 'value' }),
     }))
     w.unmount()
   })

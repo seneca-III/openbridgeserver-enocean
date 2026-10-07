@@ -93,6 +93,40 @@
     </div>
     <p v-if="enoceanDatapointsError" class="text-xs text-red-400 mt-1">{{ enoceanDatapointsError }}</p>
   </div>
+
+  <div v-if="selectableRepresentations.length > 0" class="form-group">
+    <label class="label">{{ $t('adapters.bindingForm.enoceanRepresentationLabel') }}</label>
+    <select v-model="cfg.representation" class="input" required data-testid="enocean-representation">
+      <option
+        v-for="representation in selectableRepresentations"
+        :key="representation.field"
+        :value="representation.field"
+      >
+        {{ $t(representation.field === 'meaning'
+          ? 'adapters.bindingForm.enoceanRepresentationMeaning'
+          : 'adapters.bindingForm.enoceanRepresentationValue') }}
+        ({{ representation.data_type || 'UNKNOWN' }})
+      </option>
+    </select>
+    <p class="hint">{{ $t('adapters.bindingForm.enoceanRepresentationHint') }}</p>
+    <p
+      v-if="cfg.representation === 'meaning' && selectedDatapoint?.runtime_value && selectedDatapoint.runtime_value.meaning == null"
+      class="text-xs text-amber-600 dark:text-amber-400 mt-1"
+    >
+      {{ $t('adapters.bindingForm.enoceanMeaningUnavailable') }}
+    </p>
+  </div>
+
+  <div v-if="selectedDatapoint?.enum?.length" class="form-group">
+    <label class="label">{{ $t('adapters.bindingForm.enoceanEnumLabel') }}</label>
+    <div class="border border-slate-200 dark:border-slate-700 rounded-lg divide-y divide-slate-100 dark:divide-slate-700/50 bg-white dark:bg-slate-800">
+      <div v-for="entry in selectedDatapoint.enum" :key="entry.value" class="px-3 py-2 text-xs flex flex-wrap gap-x-2">
+        <span class="font-mono text-slate-700 dark:text-slate-100">{{ entry.value }} = {{ entry.label }}</span>
+        <span v-if="entry.semantic_value === true" class="text-slate-500">{{ $t('adapters.bindingForm.enoceanSemanticTrue') }}</span>
+        <span v-else-if="entry.semantic_value === false" class="text-slate-500">{{ $t('adapters.bindingForm.enoceanSemanticFalse') }}</span>
+      </div>
+    </div>
+  </div>
 </template>
 
 <script setup>
@@ -100,6 +134,7 @@ import { computed } from 'vue'
 
 const props = defineProps({
   cfg: { type: Object, required: true },
+  direction: { type: String, default: 'SOURCE' },
   selectedInstanceId: { type: [String, Number, null], default: null },
   enoceanDevices: { type: Array, required: true },
   enoceanDevicesLoading: { type: Boolean, required: true },
@@ -119,6 +154,17 @@ defineEmits([
 const selectedDevice = computed(() =>
   props.enoceanDevices.find(device => String(device.id) === String(props.cfg.device_id)) ?? null
 )
+
+const selectedDatapoint = computed(() =>
+  props.enoceanDatapoints.find(datapoint => String(datapoint.id) === String(props.cfg.datapoint_id)) ?? null
+)
+
+const selectableRepresentations = computed(() => {
+  const representations = selectedDatapoint.value?.representations
+  if (!Array.isArray(representations)) return []
+  if (props.direction === 'SOURCE') return representations.filter(item => item.readable)
+  return representations.filter(item => item.writable && item.field !== 'meaning')
+})
 
 const selectedDeviceMeta = computed(() => {
   if (!selectedDevice.value) return []
