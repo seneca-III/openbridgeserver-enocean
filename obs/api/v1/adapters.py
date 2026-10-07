@@ -1251,10 +1251,7 @@ async def enocean_mqtt_browse_datapoints(
         _principal_from_dependency(_user),
     )
     try:
-        return [
-            EnoceanMqttDatapointOut(**item)
-            for item in await adapter.browse_datapoints(device_id, direction)
-        ]
+        return [EnoceanMqttDatapointOut(**item) for item in await adapter.browse_datapoints(device_id, direction)]
     except Exception as exc:
         raise HTTPException(
             status.HTTP_503_SERVICE_UNAVAILABLE,

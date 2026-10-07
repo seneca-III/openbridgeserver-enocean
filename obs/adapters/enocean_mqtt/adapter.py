@@ -15,7 +15,7 @@ from typing import Any, Literal
 from urllib.parse import quote, urlparse
 
 import httpx
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from obs.adapters.base import AdapterBase
 from obs.adapters.registry import register
@@ -157,7 +157,7 @@ class EnoceanMqttAdapter(AdapterBase):
         try:
             response = await self._client.get("/api/v1/gateway/status")
             response.raise_for_status()
-        except Exception as exc:
+        except httpx.HTTPError as exc:
             logger.warning("enocean-mqtt connection test failed: %s", exc)
             await self._publish_status(False, f"Connection failed: {exc}")
             return
@@ -202,7 +202,7 @@ class EnoceanMqttAdapter(AdapterBase):
                 continue
             try:
                 cfg = EnoceanMqttBindingConfig(**binding.config)
-            except Exception:
+            except ValidationError:
                 logger.warning("Invalid enocean-mqtt binding config for %s — skipped", binding.id)
                 continue
             self._datapoint_map.setdefault(cfg.datapoint_id, []).append(binding)
@@ -233,7 +233,7 @@ class EnoceanMqttAdapter(AdapterBase):
                 await self._consume_stream(path)
             except asyncio.CancelledError:
                 return
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - stream boundary must reconnect after any failure
                 logger.warning(
                     "enocean-mqtt SSE stream failed, retrying in %.1f s: %s",
                     SSE_RECONNECT_DELAY_SECONDS,
@@ -344,7 +344,7 @@ class EnoceanMqttAdapter(AdapterBase):
                     )
                 except asyncio.CancelledError:
                     raise
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - isolate failed fallback reads
                     logger.warning(
                         "enocean-mqtt fallback read failed for binding %s: %s",
                         binding.id,
@@ -455,11 +455,7 @@ class EnoceanMqttAdapter(AdapterBase):
             return []
 
         if device_id == GATEWAY_DEVICE_ID:
-            return [
-                dict(item)
-                for item in GATEWAY_STATUS_DATAPOINTS
-                if _matches_direction(item, direction)
-            ]
+            return [dict(item) for item in GATEWAY_STATUS_DATAPOINTS if _matches_direction(item, direction)]
 
         quoted_device_id = quote(device_id, safe="")
         response = await self._client.get(
@@ -549,20 +545,8 @@ def _normalize_device(item: Any) -> dict[str, Any]:
             "writable": False,
         }
 
-    device_id = str(
-        item.get("id")
-        or item.get("device_id")
-        or item.get("address")
-        or item.get("external_id")
-        or ""
-    )
-    device_name = str(
-        item.get("device_name")
-        or item.get("display_name")
-        or item.get("name")
-        or item.get("alias")
-        or device_id
-    )
+    device_id = str(item.get("id") or item.get("device_id") or item.get("address") or item.get("external_id") or "")
+    device_name = str(item.get("device_name") or item.get("display_name") or item.get("name") or item.get("alias") or device_id)
     datapoints = item.get("datapoints")
     readable = _flag(item, "readable", "read", default=_direction_allows(item, {"read", "ro", "source"}))
     writable = _flag(item, "writable", "write", default=_direction_allows(item, {"write", "wo", "dest"}))

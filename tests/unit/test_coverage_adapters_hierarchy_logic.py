@@ -978,12 +978,8 @@ class TestTestInstance:
         mock_cls.return_value = inst
         monkeypatch.setattr(adp_api.adapter_registry, "get_class", lambda adapter_type: mock_cls)
 
-        body = adp_api.TestRequest(
-            config={"host": "gateway", "port": 8001, "token": REDACTED, "timeout": 10.0}
-        )
-        result = await adp_api.test_instance(
-            instance_id=uuid.UUID(row["id"]), body=body, db=db, _user="admin"
-        )
+        body = adp_api.TestRequest(config={"host": "gateway", "port": 8001, "token": REDACTED, "timeout": 10.0})
+        result = await adp_api.test_instance(instance_id=uuid.UUID(row["id"]), body=body, db=db, _user="admin")
 
         assert result.success is True
         expected_config = {"host": "gateway", "port": 8001, "token": "stored-token", "timeout": 10.0}

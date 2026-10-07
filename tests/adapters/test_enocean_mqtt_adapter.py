@@ -451,10 +451,14 @@ async def test_browse_datapoints_refreshes_changed_representation_contract(mock_
     async def handler(_request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
-        representations = None if calls == 1 else [
-            {"field": "value", "data_type": "integer", "readable": True, "writable": False},
-            {"field": "meaning", "data_type": "string", "readable": True, "writable": False},
-        ]
+        representations = (
+            None
+            if calls == 1
+            else [
+                {"field": "value", "data_type": "integer", "readable": True, "writable": False},
+                {"field": "meaning", "data_type": "string", "readable": True, "writable": False},
+            ]
+        )
         datapoint = {"id": "door.state", "data_type": "enum", "readable": True}
         if representations is not None:
             datapoint.update(data_type="integer", representations=representations)
@@ -501,13 +505,7 @@ async def test_dispatch_sse_datapoint_event_publishes_bound_value(mock_bus):
 
     await adapter._dispatch_sse_event(
         "datapoint",
-        [
-            (
-                '{"datapoint_id":"th_sensor.temperature",'
-                '"value":22.4,"quality":"good","unit":"°C",'
-                '"timestamp":"2026-10-07T12:34:56Z"}'
-            )
-        ],
+        [('{"datapoint_id":"th_sensor.temperature","value":22.4,"quality":"good","unit":"°C","timestamp":"2026-10-07T12:34:56Z"}')],
     )
 
     event = mock_bus.publish.call_args.args[0]
@@ -529,21 +527,11 @@ async def test_dispatch_sse_selects_both_representations_and_clears_stale_meanin
 
     await adapter._dispatch_sse_event(
         "datapoint",
-        [
-            (
-                '{"datapoint_id":"front_door.lock_contact","value":1,'
-                '"meaning":"door_unlocked","quality":"good","timestamp":"2026-10-07T12:34:56Z"}'
-            )
-        ],
+        [('{"datapoint_id":"front_door.lock_contact","value":1,"meaning":"door_unlocked","quality":"good","timestamp":"2026-10-07T12:34:56Z"}')],
     )
     await adapter._dispatch_sse_event(
         "datapoint",
-        [
-            (
-                '{"datapoint_id":"front_door.lock_contact","value":7,'
-                '"quality":"good","timestamp":"2026-10-07T12:35:00Z"}'
-            )
-        ],
+        [('{"datapoint_id":"front_door.lock_contact","value":7,"quality":"good","timestamp":"2026-10-07T12:35:00Z"}')],
     )
 
     events = [call.args[0] for call in mock_bus.publish.call_args_list]
@@ -611,12 +599,7 @@ async def test_dispatch_gateway_status_event_publishes_bound_values(mock_bus):
 
     await adapter._dispatch_sse_event(
         "gateway_status",
-        [
-            (
-                '{"values":{"gateway.online":true,'
-                '"gateway.devices_total":17}}'
-            )
-        ],
+        [('{"values":{"gateway.online":true,"gateway.devices_total":17}}')],
     )
 
     events = [call.args[0] for call in mock_bus.publish.call_args_list]
